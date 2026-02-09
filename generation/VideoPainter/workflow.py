@@ -80,65 +80,11 @@ def _read_x_from_build_script() -> str:
 			pass
 	return ""
 
-
-def _read_llm_model_size_from_build_script() -> str:
-	"""Extract LLM_MODEL_SIZE from scripts/build_and_run.sh (e.g. '72B' or '7B')."""
-	build_script = os.path.join(os.path.dirname(__file__), "scripts", "build_and_run.sh")
-	if not os.path.exists(build_script):
-		return ""
-	try:
-		with open(build_script) as f:
-			for line in f:
-				# Skip comments quickly.
-				if line.lstrip().startswith("#"):
-					continue
-				match = re.search(r'LLM_MODEL_SIZE=["\']([^"\']+)["\']', line)
-				if match:
-					return (match.group(1) or "").strip().upper()
-	except Exception:
-		return ""
-	return ""
-
 X = _read_x_from_build_script()
 
 
-# ----------------------------------------------------------------------------------
-# OPTIONAL VLM (Qwen2.5-VL-72B) MOUNT
-# ----------------------------------------------------------------------------------
-# Toggle this to control whether we mount the 72B VLM checkpoint folder and symlink it
-# into the expected local path.
-#
-# - True  -> Adds a separate FuseBucket mount and creates:
-#            /workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-72B-Instruct -> <mounted_folder>
-# - False -> Does nothing (no extra mounts, no symlink)
-# Automatically set based on LLM_MODEL_SIZE in scripts/build_and_run.sh:
-#   - "72B" -> True
-#   - "7B"  -> False
-LLM_MODEL_SIZE = _read_llm_model_size_from_build_script()
-
-
-
-USE_QWEN2_5_VL_72B = LLM_MODEL_SIZE == "7B"
-
-
-def _compute_node_from_llm_model_size(llm_model_size: str) -> Node:
-	"""Map LLM_MODEL_SIZE to a compute node.
-
-	- "72B" -> 2 GPUs
-	- "7B"  -> 1 GPU
-	"""
-	s = (llm_model_size or "").strip().upper()
-	if s == "72B":
-		return Node.A100_80GB_2GPU
-	if s == "7B":
-		return Node.A100_80GB_1GPU
-	# Conservative default: 1 GPU.
-	return Node.A100_80GB_1GPU
-
-
-COMPUTE_NODE = _compute_node_from_llm_model_size(LLM_MODEL_SIZE)
-# To dedicate the second GPU to Qwen (VLM) when available, keep Flux on the same
-# GPU as CogVideoX by default.
+# Compute: always 1 GPU.
+COMPUTE_NODE = Node.A100_80GB_1GPU
 VP_FLUX_DEVICE_DEFAULT = "cuda:0"
 
 
@@ -171,10 +117,6 @@ SCRATCH_DATA_BASE = "/tmp/videopainter_data"
 VP_BUCKET = "mbadas-sandbox-research-9bb9c7f"
 VP_BUCKET_PREFIX = "workspace/user/hbaskar/Video_inpainting/videopainter"
 
-# Optional VLM checkpoint folder (mounted separately so it doesn't interfere with
-# existing ckpt or data mounts).
-VLM_72B_GCS_PREFIX = os.path.join(VP_BUCKET_PREFIX, "vlm", "Qwen2.5-VL-72B-Instruct")
-
 # GCS bucket path for SAM2 preprocessed data.
 # IMPORTANT: we mount the *base* prefix so `data_run_id` can be chosen dynamically.
 DEFAULT_DATA_RUN_ID = os.environ.get("DATA_RUN_ID", "10")
@@ -185,11 +127,6 @@ VP_FUSE_MOUNT_NAME = "vp-bucket"
 VP_FUSE_MOUNT_ROOT = os.path.join(MOUNTPOINT, VP_FUSE_MOUNT_NAME)
 MOUNTED_CKPT_PATH = os.path.join(VP_FUSE_MOUNT_ROOT, "ckpt")
 
-VP_VLM_72B_FUSE_MOUNT_NAME = "vp-vlm-72b"
-VP_VLM_72B_FUSE_MOUNT_ROOT = os.path.join(MOUNTPOINT, VP_VLM_72B_FUSE_MOUNT_NAME)
-
-VLM_72B_DEST_PATH = os.path.join(DEFAULT_CKPT_DIR, "vlm", "Qwen2.5-VL-72B-Instruct")
-
 VP_DATA_FUSE_MOUNT_NAME = "data"
 VP_DATA_FUSE_MOUNT_ROOT = os.path.join(MOUNTPOINT, VP_DATA_FUSE_MOUNT_NAME)
 
@@ -197,7 +134,7 @@ GCS_OUTPUT_BASE = os.path.join(f"gs://{VP_BUCKET}", VP_BUCKET_PREFIX, OUTPUT_SUB
 
 DEFAULT_MODEL_PATH = os.path.join(DEFAULT_CKPT_DIR, "CogVideoX-5b-I2V")
 DEFAULT_BRANCH_PATH = os.path.join(DEFAULT_CKPT_DIR, "VideoPainter/checkpoints/branch")
-DEFAULT_IMG_INPAINT_PATH = os.path.join(DEFAULT_CKPT_DIR, "flux_inp")
+DEFAULT_IMG_INPAINT_PATH = os.path.join(DEFAULT_CKPT_DIR, "sdxl_inpaint")
 
 
 DEFAULT_META = os.path.join(DEFAULT_DATA_DIR, "meta.csv")
@@ -455,22 +392,6 @@ def ensure_symlink(src: str, dest: str) -> None:
 			return
 	os.symlink(src, dest)
 	logger.info("Created symlink %s -> %s", dest, src)
-
-
-def ensure_writable_dir(path: str) -> None:
-	"""Ensure `path` is a real, writable directory (not a symlink).
-
-	We need this when we want to create additional symlinks *inside* the directory.
-	If `path` is a symlink to a read-only FUSE mount, creating new entries under it
-	will fail.
-	"""
-	if os.path.islink(path):
-		os.unlink(path)
-	if os.path.exists(path):
-		if os.path.isdir(path):
-			return
-		raise RuntimeError(f"Path exists and is not a directory: {path}")
-	Path(path).mkdir(parents=True, exist_ok=True)
 
 
 
@@ -789,6 +710,9 @@ def _upload_outputs(
 	# These are very helpful for debugging prompt/mask issues.
 	sidecars = [
 		output_path.replace(".mp4", ".json"),
+		output_path + "_sdxl_i_img.png",
+		output_path + "_sdxl_i_mask.png",
+		output_path + "_sdxl_o_img.png",
 		output_path + "_flux_i_img.png",
 		output_path + "_flux_i_mask.png",
 		output_path + "_flux_o_img.png",
@@ -846,8 +770,8 @@ def _upload_outputs(
 		"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
 		"VP_COG_DEVICE": "cuda:0",
 		"VP_FLUX_DEVICE": VP_FLUX_DEVICE_DEFAULT,
-		# Let infer/edit_bench.py auto-pick a different GPU for Qwen when available.
-		"VP_QWEN_DEVICE": "auto",
+		# Single-GPU only: run Qwen on the same GPU.
+		"VP_QWEN_DEVICE": "cuda:0",
 		"VP_UNLOAD_QWEN_AFTER_USE": "1",
 	},
 	mounts=[
@@ -861,13 +785,6 @@ def _upload_outputs(
 			name=VP_DATA_FUSE_MOUNT_NAME,
 			prefix=VP_DATA_PREFIX,
 		),
-		*([
-			FuseBucket(
-				bucket=VP_BUCKET,
-				name=VP_VLM_72B_FUSE_MOUNT_NAME,
-				prefix=VLM_72B_GCS_PREFIX,
-			),
-		] if USE_QWEN2_5_VL_72B else []),
 	],
 )
 def run_videopainter_edit_many(
@@ -902,7 +819,7 @@ def run_videopainter_edit_many(
 	# Default to disabling the LLM-based prompt editing/captioning so the workflow
 	# does not require `transformers` / `qwen-vl-utils` inside the container.
 	# To enable, pass a non-disabled string and ensure dependencies are installed.
-	llm_model: str = "disabled",
+	llm_model: str = "/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct",
 	dilate_size: int = 0,
 	mask_feather: int = 0,
 	caption_refine_iters: int = 0,
@@ -922,32 +839,11 @@ def run_videopainter_edit_many(
 	if not effective_output_run_id:
 		raise ValueError("output_run_id must be non-empty when provided")
 	logger.info("output_run_id=%s", effective_output_run_id)
-	logger.info("USE_QWEN2_5_VL_72B=%s", USE_QWEN2_5_VL_72B)
-
 	# Prefetch checkpoints from GCS.
 	fuse_prefetch_metadata(MOUNTED_CKPT_PATH)
 
-	# Default behavior: symlink the whole ckpt folder into /workspace/VideoPainter/ckpt.
-	# If USE_QWEN2_5_VL_72B is enabled, keep ckpt as a writable dir and symlink
-	# required subfolders so we can add ckpt/vlm/Qwen2.5-VL-72B-Instruct.
-	if not USE_QWEN2_5_VL_72B:
-		ensure_symlink(MOUNTED_CKPT_PATH, DEFAULT_CKPT_DIR)
-	else:
-		ensure_writable_dir(DEFAULT_CKPT_DIR)
-		for rel in ("CogVideoX-5b-I2V", "VideoPainter", "flux_inp"):
-			src = os.path.join(MOUNTED_CKPT_PATH, rel)
-			dest = os.path.join(DEFAULT_CKPT_DIR, rel)
-			if os.path.exists(src):
-				ensure_symlink(src, dest)
-		ensure_writable_dir(os.path.join(DEFAULT_CKPT_DIR, "vlm"))
-
-		try:
-			fuse_prefetch_metadata(VP_VLM_72B_FUSE_MOUNT_ROOT)
-		except Exception:
-			logger.info("VLM 72B prefetch skipped/failed; continuing.")
-		
-		# Create symlink for VLM 72B mount
-		ensure_symlink(VP_VLM_72B_FUSE_MOUNT_ROOT, VLM_72B_DEST_PATH)
+	# Symlink the whole ckpt folder into /workspace/VideoPainter/ckpt.
+	ensure_symlink(MOUNTED_CKPT_PATH, DEFAULT_CKPT_DIR)
 
 	# Keep /workspace/VideoPainter/data present and pointing at the mounted dataset.
 	ensure_symlink(VP_DATA_FUSE_MOUNT_ROOT, DEFAULT_DATA_DIR)
@@ -976,7 +872,13 @@ def run_videopainter_edit_many(
 		"inpainting_branch": inpainting_branch,
 		"img_inpainting_model": img_inpainting_model,
 	}
-	missing = {k: v for k, v in paths_to_check.items() if v and not os.path.exists(v)}
+	# Allow HuggingFace model IDs (e.g. 'stabilityai/...') for img_inpainting_model.
+	# For absolute/relative filesystem paths we still validate existence.
+	def _must_exist(p: str) -> bool:
+		p = str(p or "").strip()
+		return bool(p) and (os.path.isabs(p) or p.startswith(".") or p.startswith("~"))
+
+	missing = {k: v for k, v in paths_to_check.items() if v and _must_exist(v) and not os.path.exists(v)}
 	if missing:
 		for k, v in missing.items():
 			logger.error("Missing path (%s): %s", k, v)
@@ -1128,7 +1030,7 @@ def videopainter_many_wf(
 	prev_clip_weight: float = 0.0,
 	video_editing_instruction: str = "auto",
 	video_editing_instructions: str = "",
-	llm_model: str = "disabled",
+	llm_model: str = "/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct",
 	dilate_size: int = 0,
 	mask_feather: int = 0,
 	caption_refine_iters: int = 0,

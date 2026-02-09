@@ -18,7 +18,7 @@ from diffusers import (
     CogVideoXTransformer3DModel,
     CogVideoXI2VDualInpaintPipeline,
     CogVideoXI2VDualInpaintAnyLPipeline,
-    FluxFillPipeline
+    StableDiffusionXLInpaintPipeline
 )
 import cv2
 try:
@@ -703,6 +703,14 @@ Centerline handling (CRITICAL for road videos):
 - Describe ONLY the desired final centerline marking inside the masked region, following the road geometry and perspective.
 - If there is no centerline and the instruction requests one/two: place it at the road center, aligned to the lane direction/vanishing point.
 - If there is a single and instruction requests double (or vice versa): describe the final marking as one or two parallel lines with realistic spacing.
+
+Edge lane lines (CRITICAL for this task):
+- Ensure the road has TWO SOLID WHITE lane lines at the road edges: one on the left edge and one on the right edge.
+- These edge lines must follow the road boundary/curb and match the scene perspective/curvature.
+
+Placement rule for the REQUIRED center/interior lane marking (from the instruction):
+- If the original frame shows interior lane markings (not the outer edge lines), place the required marking in those same interior locations.
+- If the original frame shows no interior lane markings, place the required marking at the road center, aligned with the vanishing point.
 """
         
         user_prompt = f"""IMAGE CONTEXT:
@@ -730,8 +738,12 @@ Requirements:
 3. CONSTRAINT:
    - Describe ONLY what the edited region should look like
    - Do NOT mention mask, editing, or transformation process
-    - Maximum 25 words (prioritize key visual details)
+    - Maximum 35 words (prioritize key visual details)
     - Do NOT claim existing markings unless they are visible; focus on the post-edit target result
+
+Lane-marking rule (MANDATORY):
+- Always include two solid white edge lane lines at the left and right road edges, perspective-aligned.
+- Then describe the required lane marking from the instruction either at existing interior marking locations (if visible) or at the road center if none are visible.
 
 Example (good):
 Instruction: "Add solid yellow double line"
@@ -1120,14 +1132,6 @@ def generate_video(
             masked_image = np.where(foreground_mask, image_array, 0)
             masked_image = Image.fromarray(masked_image.astype(np.uint8))
 
-            # For the VLM prompt, provide *surrounding context* (unmasked area)
-            # by showing the original frame with the inpaint region removed.
-            # This matches the instructions in `video_editing_prompt` and helps
-            # Qwen generate a caption consistent with scene lighting/perspective.
-            # For lane-placement tasks, showing the original frame helps the VLM
-            # preserve perspective and align edits with existing lane markings.
-            vlm_context_image = video[0] if keep_masked_pixels else masked_video_for_pipe[0]
-
             if llm_model is None:
                 llm_model = "none"
 
@@ -1139,6 +1143,10 @@ def generate_video(
                     )
                 video_editing_instruction = generate_video_editing_instruction(masked_image, llm_model, qwen_device=qwen_device)
                 output_path = output_path.replace("auto", video_editing_instruction).replace("..", ".")
+
+            # For the VLM prompt, provide *surrounding context* (unmasked area)
+            # by showing the original frame with the inpaint region removed.
+            vlm_context_image = video[0] if keep_masked_pixels else masked_video_for_pipe[0]
 
             original_prompt = prompt
             prompt, masked_image_caption = video_editing_prompt(
@@ -1194,28 +1202,38 @@ def generate_video(
                 json.dump(prompt_dict, f, indent=4, ensure_ascii=False)
             
 
-            pipe_img_inpainting = FluxFillPipeline.from_pretrained(
-                img_inpainting_model,
-                torch_dtype=torch.bfloat16,
-            ).to(flux_device)
+            try:
+                pipe_img_inpainting = StableDiffusionXLInpaintPipeline.from_pretrained(
+                    img_inpainting_model,
+                    torch_dtype=torch.float16,
+                    use_safetensors=True,
+                    variant="fp16",
+                ).to(flux_device)
+            except Exception:
+                pipe_img_inpainting = StableDiffusionXLInpaintPipeline.from_pretrained(
+                    img_inpainting_model,
+                    torch_dtype=torch.float16,
+                ).to(flux_device)
 
             masked_image_caption_initial = masked_image_caption
 
-            def _run_flux(prompt_text: str) -> Image.Image:
+            sdxl_mask = flux_mask.convert("L")
+
+            def _run_sdxl(prompt_text: str) -> Image.Image:
                 return pipe_img_inpainting(
                     prompt=prompt_text,
                     image=image,
-                    mask_image=flux_mask,
+                    mask_image=sdxl_mask,
                     height=image.size[1],
                     width=image.size[0],
-                    guidance_scale=30,
+                    guidance_scale=8.0,
+                    strength=1.0,
                     num_inference_steps=50,
-                    max_sequence_length=512,
                     generator=torch.Generator("cpu").manual_seed(0),
                 ).images[0]
 
-            image.save(os.path.join(os.path.dirname(output_path), f"{os.path.basename(output_path)}_flux_i_img.png"))
-            flux_mask.save(os.path.join(os.path.dirname(output_path), f"{os.path.basename(output_path)}_flux_i_mask.png"))
+            image.save(os.path.join(os.path.dirname(output_path), f"{os.path.basename(output_path)}_sdxl_i_img.png"))
+            flux_mask.save(os.path.join(os.path.dirname(output_path), f"{os.path.basename(output_path)}_sdxl_i_mask.png"))
 
             iters_used = 0
             last_notes = ""
@@ -1230,9 +1248,9 @@ def generate_video(
                 max_iters = int(caption_refine_iters or 0)
                 for i in range(1, max_iters + 1):
                     iters_used = i
-                    image_inpainting = _run_flux(masked_image_caption)
+                    image_inpainting = _run_sdxl(masked_image_caption)
                     image_inpainting.save(
-                        os.path.join(refine_dir, f"iter{i:03d}_flux_o_img.png")
+                        os.path.join(refine_dir, f"iter{i:03d}_sdxl_o_img.png")
                     )
                     passed, revised_caption, notes = _qwen_refine_first_frame_caption(
                         llm_model=llm_model,
@@ -1261,11 +1279,11 @@ def generate_video(
                         break
                     masked_image_caption = revised_caption
             else:
-                image_inpainting = _run_flux(masked_image_caption)
+                image_inpainting = _run_sdxl(masked_image_caption)
 
             # Always write the final image to the legacy output name.
             if image_inpainting is not None:
-                image_inpainting.save(os.path.join(os.path.dirname(output_path), f"{os.path.basename(output_path)}_flux_o_img.png"))
+                image_inpainting.save(os.path.join(os.path.dirname(output_path), f"{os.path.basename(output_path)}_sdxl_o_img.png"))
 
             # Update sidecar JSON with refinement results.
             try:

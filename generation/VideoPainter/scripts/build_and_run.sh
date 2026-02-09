@@ -1,40 +1,11 @@
 
-
-# ----------------------------------------------------------------------------------
-# LLM MODEL SELECTION
-# ----------------------------------------------------------------------------------
-# Choose which Qwen model to use:
-#   - "72B" for Qwen2.5-VL-72B-Instruct (high quality, needs 2 GPUs, ~70-80GB VRAM)
-#   - "7B"  for Qwen2.5-VL-7B-Instruct  (balanced, needs 1 GPU, ~16GB VRAM)
-LLM_MODEL_SIZE="7B"
-
-# Normalize for downstream logic.
-LLM_MODEL_SIZE="${LLM_MODEL_SIZE^^}"
-
-MODEL_SIZE_TAG=""
-if [[ "${LLM_MODEL_SIZE}" =~ ^([0-9]+)B$ ]]; then
-  MODEL_SIZE_TAG="${BASH_REMATCH[1]}"
-else
-  echo "Unknown LLM_MODEL_SIZE='${LLM_MODEL_SIZE}'. Expected '72B' or '7B'; defaulting to 7B."
-  MODEL_SIZE_TAG="7"
-fi
-
-LLM_MODEL_PATH=""
-case "${LLM_MODEL_SIZE}" in
-  "72B") LLM_MODEL_PATH="/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-72B-Instruct" ;;
-  "7B")  LLM_MODEL_PATH="/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct" ;;
-  *)
-    echo "Unknown LLM_MODEL_SIZE='${LLM_MODEL_SIZE}'. Expected '72B' or '7B'; defaulting to 7B path."
-    LLM_MODEL_PATH="/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct"
-    ;;
-esac
-
-
-echo "  MODEL_PREFIX: $MODEL_PREFIX"
+# LLM/VLM:
+# We always use the 7B Qwen model for captioning.
+# Model path inside the container (must exist under the mounted ckpt folder):
+#   /workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct
 
 # Declare a run suffix used by both this script and workflow.py
-# The model-size prefix (e.g. '72' or '7') is derived from LLM_MODEL_SIZE.
-X="${MODEL_SIZE_TAG}_5p_10v_prompt2_5226_p_5"
+X="5p_10v_prompt3_9226_1"
 export VP_RUN_SUFFIX="${X}"
 
 # Build image first (required for the tag below)
@@ -100,14 +71,14 @@ hlx wf run \
   --inpainting_sample_id 0 \
   --model_path "/workspace/VideoPainter/ckpt/CogVideoX-5b-I2V" \
   --inpainting_branch "/workspace/VideoPainter/ckpt/VideoPainter/checkpoints/branch" \
-  --img_inpainting_model "/workspace/VideoPainter/ckpt/flux_inp" \
+  --img_inpainting_model "/workspace/VideoPainter/ckpt/sdxl_inpaint" \
   --output_name_suffix "vp_edit_sample0.mp4" \
   --num_inference_steps 70 \
   --guidance_scale 6.0 \
   --down_sample_fps 8 \
   --inpainting_frames 49 \
   --video_editing_instructions "${VIDEO_EDITING_INSTRUCTIONS}" \
-  --llm_model "${LLM_MODEL_PATH}" \
+  --llm_model "/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct" \
   --caption_refine_iters "${CAPTION_REFINE_ITERS}" \
   --caption_refine_temperature "${CAPTION_REFINE_TEMPERATURE}" \
   --dilate_size 24 \
@@ -116,7 +87,4 @@ hlx wf run \
 
 echo "VideoPainter report will be uploaded as: gs://.../videopainter/output_vp/10_${X}/10_${X}.txt"
 
-# Model size options:
-# --llm_model "Qwen/Qwen2.5-VL-7B-Instruct"  # Balanced, ~16GB VRAM
-# --llm_model "Qwen/Qwen2.5-VL-72B-Instruct" # Best quality, ~70-80GB VRAM (CURRENT)
-# --llm_model "none"    
+# LLM is pinned to: /workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct
