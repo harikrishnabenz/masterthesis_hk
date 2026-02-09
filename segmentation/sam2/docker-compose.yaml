@@ -1,0 +1,29 @@
+services:
+  frontend:
+    image: sam2/frontend
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sam2_workflow
+    shm_size: 16g
+    ipc: host
+    environment:
+      - HF_HOME=/root/.cache/huggingface
+      - HUGGINGFACE_HUB_CACHE=/root/.cache/huggingface
+      - TRANSFORMERS_CACHE=/root/.cache/huggingface
+      - PYTHONPATH=/workspace/sam2
+      - NVIDIA_VISIBLE_DEVICES=all
+      - SAM2_BUILD_CUDA=0
+    volumes:
+      - ./:/workspace/sam2
+    working_dir: /workspace/sam2
+    command: ["/bin/bash"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    stdin_open: true
+    tty: true

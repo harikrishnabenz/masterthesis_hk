@@ -1,0 +1,15 @@
+# Exclude checkpoints as requested
+/segmentation/sam2/checkpoints/
+/generation/VideoPainter/ckpt/
+
+# Common Python noise
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+
+# Common OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/

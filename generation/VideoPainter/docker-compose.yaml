@@ -1,0 +1,30 @@
+version: "3.8"
+
+services:
+  videopainter:
+    build: .
+    image: videopainter:latest
+    container_name: videopainter
+    shm_size: 16g
+    ipc: host
+    environment:
+      - HF_HOME=/root/.cache/huggingface
+      - HUGGINGFACE_HUB_CACHE=/root/.cache/huggingface
+      - TRANSFORMERS_CACHE=/root/.cache/huggingface
+      - PYTHONPATH=/workspace/VideoPainter
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      - ./:/workspace/VideoPainter
+    working_dir: /workspace/VideoPainter
+    command: ["/bin/bash"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    ports:
+      - "7860:7860"
+    stdin_open: true
+    tty: true
