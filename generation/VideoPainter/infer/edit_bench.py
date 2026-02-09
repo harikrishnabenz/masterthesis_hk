@@ -150,29 +150,37 @@ def _limit_words(text: str, max_words: int) -> str:
 
 
 def _sanitize_inpaint_caption(text: str) -> str:
-    """Normalize LLM captions into diffusion-friendly prompts.
+    """Normalize inpaint captions into diffusion-friendly prompts.
 
-    SDXL prompts work best as short, descriptive phrases. This strips common
-    instruction/process leakage (e.g., mentioning masks or inpainting) and
-    normalizes whitespace.
+    Primary goal is to normalize formatting (newlines/whitespace, stray quotes).
+    We avoid aggressively deleting words by default and instead rely on the
+    first-frame caption prompting to prevent process/instruction leakage.
+
+    If you still want the legacy "delete process words" behavior (as a safety
+    net for noisy LLM outputs), set env var:
+      - `VP_STRICT_INPAINT_CAPTION_SANITIZE=1`
     """
 
     if not text:
         return ""
 
-    s = str(text).replace("\n", " ").replace("\r", " ")
+    s = str(text).replace("\n", " ").replace("\r", " ").strip()
 
-    # Remove common process words that sometimes leak from the LLM.
-    # Keep this conservative to avoid deleting useful visual content.
-    s = re.sub(
-        r"\b(mask|masked|unmasked|inpaint|inpainting|edit|editing|instruction|prompt|regenerate|regenerated|regeneration)\b",
-        "",
-        s,
-        flags=re.IGNORECASE,
-    )
+    # Strip wrapping quotes/backticks that sometimes appear in raw model outputs.
+    s = s.strip(" \t\"'`")
 
     # Collapse repeated whitespace.
     s = re.sub(r"\s+", " ", s).strip()
+
+    # Optional legacy sanitizer: delete common process words that sometimes leak.
+    if _env_flag("VP_STRICT_INPAINT_CAPTION_SANITIZE", default=False):
+        s = re.sub(
+            r"\b(mask|masked|unmasked|inpaint|inpainting|edit|editing|instruction|prompt|regenerate|regenerated|regeneration)\b",
+            "",
+            s,
+            flags=re.IGNORECASE,
+        )
+        s = re.sub(r"\s+", " ", s).strip()
     return s
 
 
@@ -333,6 +341,7 @@ Rules for revised_caption (IMPORTANT):
 4. If there was an existing single/double centerline and the instruction changes it, describe the *final* marking (e.g., replace single->double or double->single) without saying "replace".
 5. Describe ONLY the target edited region (what it should look like after the edit)
 6. Do NOT mention the mask, inpainting, or editing process
+6b. Do NOT use any of these words: mask, masked, unmasked, inpaint, inpainting, edit, editing, instruction, prompt, regenerate, regenerated, regeneration
 7. Keep perspective/geometry consistent with the original
 
 Good captions have:
@@ -722,6 +731,13 @@ CRITICAL: Your description quality directly impacts output quality. Generate DET
 4. Include LIGHTING consistency (shadows, reflections, daylight/ambient, matching surroundings, etc.)
 5. Describe ONLY the edited result (what it SHOULD look like after the edit), NOT the process
 
+ABSOLUTE FORBIDDEN WORDS (do not output these):
+- mask, masked, unmasked
+- inpaint, inpainting
+- edit, editing
+- instruction, prompt
+- regenerate, regenerated, regeneration
+
 This is NOT a generic labeling task. The more specific and visually detailed, the better the generation.
 Analyze the image context and produce descriptions rich enough to guide a diffusion model.
 
@@ -766,6 +782,7 @@ Requirements:
 3. CONSTRAINT:
    - Describe ONLY what the edited region should look like
    - Do NOT mention mask, editing, or transformation process
+    - Do NOT use any of these words: mask, masked, unmasked, inpaint, inpainting, edit, editing, instruction, prompt, regenerate, regenerated, regeneration
     - Maximum 35 words (prioritize key visual details)
     - Do NOT claim existing markings unless they are visible; focus on the post-edit target result
 

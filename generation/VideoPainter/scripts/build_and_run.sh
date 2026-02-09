@@ -5,7 +5,7 @@
 #   /workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct
 
 # Declare a run suffix used by both this script and workflow.py
-X="5p_10v_prompt3_9226_1"
+X="5p_10v_prompt3_sd_9226_2"
 export VP_RUN_SUFFIX="${X}"
 
 # Build image first (required for the tag below)
