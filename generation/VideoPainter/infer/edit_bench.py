@@ -280,6 +280,8 @@ def _qwen_refine_first_frame_caption(
         "- If instruction says DOUBLE, REJECT captions describing SINGLE line\n"
         "- If instruction says SOLID/CONTINUOUS, REJECT captions describing DASHED/INTERMITTENT\n"
         "- If instruction says DASHED/INTERMITTENT, REJECT captions describing SOLID/CONTINUOUS\n"
+        "- If instruction requests TWO ROAD-EDGE LINES, REJECT captions that do not clearly include two continuous solid WHITE lines at the left and right road edges\n"
+        "- If instruction says to ADD A CENTERLINE ONLY IF MISSING: (a) if the original panel shows no centerline in the masked region, the caption must include exactly one centerline; (b) if a centerline is already present, the caption must not invent a new centerline or change its count/style unless explicitly instructed\n"
         "- If instruction specifies color (white/yellow), caption color must match exactly\n"
         "- Reject captions that imply existing markings that are not present in the original panel\n"
         "- Reject captions that are too vague (e.g., 'lane line')\n"
@@ -303,6 +305,8 @@ Rules for revised_caption (IMPORTANT):
 1. ALWAYS include ALL key descriptors from the instruction (single/double, solid/dashed, color, etc.)
 2. Add VISUAL DETAILS: paint wear, crispness, asphalt texture blending, lighting/shadow consistency
 3. Placement rule: align with the road center and perspective (follow curvature / vanishing point). If there was no centerline originally, describe how the new centerline is placed plausibly at the center of the lane.
+3b. If the instruction requests road-edge lines, include TWO continuous solid WHITE edge lines at the left and right edges of the road, perspective-aligned and following road curvature.
+3c. If the instruction says add a centerline only if missing, follow what is visible in the original: add exactly one centerline only when none is present.
 4. If there was an existing single/double centerline and the instruction changes it, describe the *final* marking (e.g., replace single->double or double->single) without saying "replace".
 5. Describe ONLY the target edited region (what it should look like after the edit)
 6. Do NOT mention the mask, inpainting, or editing process
@@ -703,6 +707,15 @@ Centerline handling (CRITICAL for road videos):
 - Describe ONLY the desired final centerline marking inside the masked region, following the road geometry and perspective.
 - If there is no centerline and the instruction requests one/two: place it at the road center, aligned to the lane direction/vanishing point.
 - If there is a single and instruction requests double (or vice versa): describe the final marking as one or two parallel lines with realistic spacing.
+
+Road-edge handling (CRITICAL when requested):
+- If the instruction requests road-edge / boundary lines, include TWO continuous solid WHITE lines along the left and right edges of the road.
+- Edge lines must follow road curvature, match the perspective/vanishing point, and sit on the road boundary (not on the shoulder/grass).
+
+Conditional centerline rule (when requested):
+- If the instruction says to add a centerline ONLY IF MISSING, first check whether a centerline is visible in the original masked region.
+- If none is visible, add exactly one centerline aligned to the road center and perspective.
+- If one is already visible, do not add or change the centerline unless explicitly instructed.
 """
         
         user_prompt = f"""IMAGE CONTEXT:
@@ -717,6 +730,8 @@ Requirements:
    - Count: single, double, triple?
    - Style: solid, dashed, dotted, intermittent?
    - Color: white, yellow, other? (explicit colors)
+    - Road edges: if requested, TWO continuous solid WHITE edge lines (left + right)
+    - Centerline conditional: if instruction says "only if missing", add exactly one centerline only when none is visible
    - Texture: smooth/worn/faded/crisp/weathered paint?
    - Perspective: centered, offset, perspective-aligned to original markings?
    - Lighting: match surrounding road lighting/shadows?
@@ -725,12 +740,12 @@ Requirements:
    - Describe line width, spacing (if multiple)
    - Road surface integration (asphalt texture match)
    - Any wear patterns or degradation
-   - Alignment with original lane geometry
+    - Alignment with original lane geometry (keep original lane positions where visible)
 
 3. CONSTRAINT:
    - Describe ONLY what the edited region should look like
    - Do NOT mention mask, editing, or transformation process
-    - Maximum 25 words (prioritize key visual details)
+    - Maximum 35 words (prioritize key visual details; include edge lines + conditional centerline if requested)
     - Do NOT claim existing markings unless they are visible; focus on the post-edit target result
 
 Example (good):

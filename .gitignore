@@ -2,6 +2,10 @@
 /segmentation/sam2/checkpoints/
 /generation/VideoPainter/ckpt/
 
+# Ignore local wheel artifact
+/generation/VideoPainter/hlx_wf-2.4.2.dev9-py3-none-any.whl
+/segmentation/sam2/hlx_wf-2.4.2.dev9-py3-none-any.whl
+
 # Common Python noise
 **/__pycache__/
 *.pyc
