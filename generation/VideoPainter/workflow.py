@@ -115,7 +115,10 @@ X = _read_x_from_build_script()
 #   - "72B" -> True
 #   - "7B"  -> False
 LLM_MODEL_SIZE = _read_llm_model_size_from_build_script()
-USE_QWEN2_5_VL_72B = LLM_MODEL_SIZE == "72B"
+
+
+
+USE_QWEN2_5_VL_72B = LLM_MODEL_SIZE == "7B"
 
 
 def _compute_node_from_llm_model_size(llm_model_size: str) -> Node:

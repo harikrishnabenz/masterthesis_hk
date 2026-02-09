@@ -6,7 +6,7 @@
 # Choose which Qwen model to use:
 #   - "72B" for Qwen2.5-VL-72B-Instruct (high quality, needs 2 GPUs, ~70-80GB VRAM)
 #   - "7B"  for Qwen2.5-VL-7B-Instruct  (balanced, needs 1 GPU, ~16GB VRAM)
-LLM_MODEL_SIZE="72B"
+LLM_MODEL_SIZE="7B"
 
 # Normalize for downstream logic.
 LLM_MODEL_SIZE="${LLM_MODEL_SIZE^^}"
