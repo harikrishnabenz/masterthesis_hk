@@ -149,6 +149,33 @@ def _limit_words(text: str, max_words: int) -> str:
     return " ".join(words[:max_words]).strip()
 
 
+def _sanitize_inpaint_caption(text: str) -> str:
+    """Normalize LLM captions into diffusion-friendly prompts.
+
+    SDXL prompts work best as short, descriptive phrases. This strips common
+    instruction/process leakage (e.g., mentioning masks or inpainting) and
+    normalizes whitespace.
+    """
+
+    if not text:
+        return ""
+
+    s = str(text).replace("\n", " ").replace("\r", " ")
+
+    # Remove common process words that sometimes leak from the LLM.
+    # Keep this conservative to avoid deleting useful visual content.
+    s = re.sub(
+        r"\b(mask|masked|unmasked|inpaint|inpainting|edit|editing|instruction|prompt|regenerate|regenerated|regeneration)\b",
+        "",
+        s,
+        flags=re.IGNORECASE,
+    )
+
+    # Collapse repeated whitespace.
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
 def _primary_instruction_clause(instruction: str) -> str:
     """Extract the main edit clause from a possibly long instruction.
 
@@ -338,6 +365,7 @@ Bad captions are generic:
     notes = str(obj.get("notes", "") or "").strip()
     pass_ok = verdict == "PASS"
     if revised:
+        revised = _sanitize_inpaint_caption(revised)
         revised = _limit_words(revised, 20)
     else:
         revised = current_caption
@@ -789,6 +817,9 @@ Generate only the description, nothing else:"""
             user_prompt=user_prompt,
         )
 
+    # Ensure the caption is SDXL-friendly: short, descriptive, no process leakage.
+    masked_image_caption = _sanitize_inpaint_caption(masked_image_caption)
+    masked_image_caption = _limit_words(masked_image_caption, 35)
     return prompt, masked_image_caption
 
 def generate_video_editing_instruction(masked_image, llm_model, *, qwen_device: str | None = None):    
