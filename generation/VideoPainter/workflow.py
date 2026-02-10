@@ -168,7 +168,8 @@ VP_BUCKET_PREFIX = "workspace/user/hbaskar/Video_inpainting/videopainter"
 
 # Optional VLM checkpoint folder (mounted separately so it doesn't interfere with
 # existing ckpt or data mounts).
-VLM_7B_GCS_PREFIX = os.path.join(VP_BUCKET_PREFIX, "vlm", "Qwen2.5-VL-7B-Instruct")
+# NOTE: In our bucket layout, VLM checkpoints live under `ckpt/vlm/...`.
+VLM_7B_GCS_PREFIX = os.path.join(VP_BUCKET_PREFIX, "ckpt", "vlm", "Qwen2.5-VL-7B-Instruct")
 
 # GCS bucket path for SAM2 preprocessed data.
 # IMPORTANT: we mount the *base* prefix so `data_run_id` can be chosen dynamically.
@@ -466,8 +467,6 @@ def ensure_writable_dir(path: str) -> None:
 			return
 		raise RuntimeError(f"Path exists and is not a directory: {path}")
 	Path(path).mkdir(parents=True, exist_ok=True)
-
-
 
 
 
