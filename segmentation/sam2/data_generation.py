@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import json
 import logging
 import os
 import subprocess
@@ -282,6 +283,38 @@ def _caption_qwen(
     return qwen_processor.decode(trimmed, skip_special_tokens=True).strip()
 
 
+def _lane_prompt_from_qwen_output(text: str) -> str:
+    """Normalize Qwen output into a prompt that always includes lane attributes."""
+    t = (text or "").strip()
+    if not t:
+        return "road with unknown lane markings"
+
+    # Prefer strict JSON outputs if the model followed instructions.
+    try:
+        payload = json.loads(t)
+        if isinstance(payload, dict):
+            count = str(payload.get("lane_marking_count", "unknown")).strip().lower() or "unknown"
+            pattern = str(payload.get("lane_marking_pattern", "unknown")).strip().lower() or "unknown"
+            color = str(payload.get("lane_marking_color", "unknown")).strip().lower() or "unknown"
+
+            # Keep values in a tight vocabulary to avoid prompt drift.
+            def _norm(val: str, allowed: set[str]) -> str:
+                val = (val or "").strip().lower()
+                return val if val in allowed else "unknown"
+
+            count = _norm(count, {"single", "double", "unknown"})
+            pattern = _norm(pattern, {"solid", "dashed", "mixed", "unknown"})
+            color = _norm(color, {"white", "yellow", "mixed", "unknown"})
+
+            return f"road with {count} {color} {pattern} lane markings"
+    except Exception:
+        pass
+
+    # Fallback: ensure we still bias the prompt toward lane descriptions.
+    # Keep it short and road-focused.
+    return f"road lane markings: {t}"[:200]
+
+
 # --------------------------------------------------------------------------------------
 # SAM2 MASKING (FIRST FRAME)
 # --------------------------------------------------------------------------------------
@@ -513,11 +546,18 @@ def generate_fluxfill_training_data(
     Path(images_dir).mkdir(parents=True, exist_ok=True)
     Path(masks_dir).mkdir(parents=True, exist_ok=True)
 
-    system_prompt = "You write short, literal captions. Avoid speculation."
+    system_prompt = (
+        "You are a driving scene labeling assistant. "
+        "You only describe lane markings on the road surface. "
+        "Return ONLY valid JSON with keys: lane_marking_count, lane_marking_pattern, lane_marking_color. "
+        "Use this fixed vocabulary: "
+        "lane_marking_count={single|double|unknown}, "
+        "lane_marking_pattern={solid|dashed|mixed|unknown}, "
+        "lane_marking_color={white|yellow|mixed|unknown}."
+    )
     user_prompt = (
-        "Describe only the road and lane markings visible in the image. "
-        "Do not mention cars, buildings, sky, trees, or anything outside the road. "
-        "Write 1 short sentence (<= 20 words)."
+        "Look only at the segmented road region. "
+        "Classify the lane marking count (single vs double line), pattern (solid vs dashed), and color (white vs yellow)."
     )
 
     dest_prefix = f"gs://{BUCKET}/{DEST_GCS_PREFIX_BASE}/{run_id}".rstrip("/")
@@ -571,15 +611,14 @@ def generate_fluxfill_training_data(
 
         focus_img = _focus_image_to_mask(pil_img, mask)
 
-        prompt = _caption_qwen(
+        prompt_raw = _caption_qwen(
             focus_img,
             model_path=VLM_72B_FUSE_ROOT,
             qwen_device=qwen_device,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
         )
-        if not prompt:
-            prompt = "a front-facing driving camera frame"
+        prompt = _lane_prompt_from_qwen_output(prompt_raw)
 
         row = {
             "image": f"images/{os.path.basename(out_img)}",
