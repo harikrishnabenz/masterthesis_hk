@@ -111,9 +111,9 @@ X = _read_x_from_build_script()
 #
 # This avoids relying on HuggingFace Hub downloads at runtime and avoids needing
 # the VLM checkpoint to live inside the main ckpt mount.
-LLM_MODEL_SIZE = _read_llm_model_size_from_build_script()
+LLM_MODEL_SIZE = "7B"
 
-USE_QWEN2_5_VL_7B = (LLM_MODEL_SIZE or "").strip().upper() == "7B"
+USE_QWEN2_5_VL_7B = True
 
 
 def _compute_node_from_llm_model_size(llm_model_size: str) -> Node:

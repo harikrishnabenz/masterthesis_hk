@@ -5,16 +5,14 @@
 # ----------------------------------------------------------------------------------
 # This repo is configured to use ONLY the Qwen2.5-VL-7B-Instruct checkpoint
 # mounted by workflow.py and exposed under the local path below.
-LLM_MODEL_SIZE="7B"
-MODEL_SIZE_TAG="7"
 LLM_MODEL_PATH="/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct"
 
 
 echo "  MODEL_PREFIX: $MODEL_PREFIX"
 
 # Declare a run suffix used by both this script and workflow.py
-# The model-size prefix (e.g. '72' or '7') is derived from LLM_MODEL_SIZE.
-X="${MODEL_SIZE_TAG}_5p_10v_p2_s5_10226_1"
+# The model-size prefix is fixed to 7 (we only use Qwen2.5-VL-7B-Instruct).
+X="5p_10v_p2_s5_10226_1"
 export VP_RUN_SUFFIX="${X}"
 
 # Build image first (required for the tag below)
