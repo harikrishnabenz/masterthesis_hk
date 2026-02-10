@@ -93,7 +93,7 @@ CAPTION_REFINE_TEMPERATURE="${CAPTION_REFINE_TEMPERATURE:-0.1}"
 # Forwarded to infer/edit_bench.py as --strength (valid range: [0.0, 1.0]).
 # Example: VP_STRENGTH=0.85 bash scripts/build_and_run.sh
 # -----------------------------------------------------------------------------
-VP_STRENGTH="${VP_STRENGTH:-1.0}"
+VP_STRENGTH="${VP_STRENGTH:-0.5}"
 
 
 hlx wf run \
