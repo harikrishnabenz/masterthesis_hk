@@ -1126,6 +1126,11 @@ def generate_video(
     image = None
     video = None
 
+    # Used to restore the original first frame after first-frame-only edits.
+    # Some code paths never set it (e.g., when SDXL first-frame inpainting is disabled),
+    # so initialize here to avoid UnboundLocalError.
+    gt_video_first_frame = None
+
     cog_device = _normalize_device(cog_device, fallback_cuda="cuda:0")
     flux_device = _normalize_device(flux_device, fallback_cuda=cog_device if cog_device.startswith("cuda") else "cuda:0")
     qwen_device = _normalize_device_or_auto(qwen_device)
@@ -1527,6 +1532,9 @@ def generate_video(
             raise ValueError(f"video length is less than {frames}, using {len(video)} frames...")
             
         if first_frame_gt:
+            # Ensure we have the original first frame available for restoration after generation.
+            if gt_video_first_frame is None:
+                gt_video_first_frame = video[0]
             gt_mask_first_frame = binary_masks[0]
             if mask_background:
                 binary_masks[0] = Image.fromarray(np.ones_like(np.array(binary_masks[0])) * 255).convert("RGB")
@@ -1566,7 +1574,8 @@ def generate_video(
         ).frames[0]
         video_generate = inpaint_outputs
         binary_masks[0] = gt_mask_first_frame
-        video[0] = gt_video_first_frame
+        if gt_video_first_frame is not None:
+            video[0] = gt_video_first_frame
 
         # For visualization, always show the "blacked" masked video.
         round_video = _visualize_video(
