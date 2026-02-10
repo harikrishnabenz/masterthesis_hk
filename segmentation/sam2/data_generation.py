@@ -4,7 +4,7 @@ This script lives under `segmentation/sam2/` so it can directly reuse the SAM2
 installation + configs in this repo.
 
 Pipeline:
-  1) Mount source mp4 folder from GCS
+    1) List + download a slice of mp4s from GCS
   2) Mount Qwen2.5-VL-72B-Instruct (local HF folder)
   3) Mount SAM2 checkpoint
   4) For N selected mp4s:
@@ -63,9 +63,6 @@ BUCKET = "mbadas-sandbox-research-9bb9c7f"
 SOURCE_GCS_PREFIX = "datasets/public/physical_ai_av/camera/camera_front_tele_30fov"
 DEST_GCS_PREFIX_BASE = "workspace/user/hbaskar/Video_inpainting/videopainter/training/data"
 
-SRC_FUSE_NAME = "src-dataset"
-SRC_FUSE_ROOT = os.path.join(MOUNTPOINT, SRC_FUSE_NAME)
-
 VLM_72B_GCS_PREFIX = "workspace/user/hbaskar/Video_inpainting/videopainter/vlm/Qwen2.5-VL-72B-Instruct"
 VLM_72B_FUSE_NAME = "vlm-72b"
 VLM_72B_FUSE_ROOT = os.path.join(MOUNTPOINT, VLM_72B_FUSE_NAME)
@@ -106,43 +103,6 @@ def _extract_first_frame_ffmpeg(video_path: str, out_png_path: str) -> None:
         raise RuntimeError(f"ffmpeg failed for {video_path}: {err}")
 
 
-def _iter_mp4_files(root_dir: str, *, start_index: int, limit: int, max_walk_files: int) -> Iterable[str]:
-    yielded = 0
-    skipped = 0
-    walked_files = 0
-
-    root_abs = os.path.abspath(root_dir)
-
-    # Fast-path for flat folder
-    try:
-        with os.scandir(root_abs) as it:
-            entries = [e for e in it if e.is_file() and e.name.lower().endswith(".mp4")]
-        entries.sort(key=lambda e: e.name)
-        for e in entries[start_index : start_index + limit]:
-            yield e.path
-        if len(entries) >= (start_index + limit):
-            return
-    except Exception:
-        pass
-
-    for cur_root, _dirs, files in os.walk(root_abs):
-        for fn in sorted(files):
-            walked_files += 1
-            if walked_files > max_walk_files:
-                logger.warning("Reached max_walk_files=%d while scanning %s", max_walk_files, root_abs)
-                return
-            if not fn.lower().endswith(".mp4"):
-                continue
-            p = os.path.join(cur_root, fn)
-            if skipped < start_index:
-                skipped += 1
-                continue
-            yield p
-            yielded += 1
-            if yielded >= limit:
-                return
-
-
 def _upload_directory_to_gcs(local_dir: str, gcs_prefix: str) -> None:
     fs = gcsfs.GCSFileSystem(token="google_default")
     base = Path(local_dir)
@@ -155,6 +115,61 @@ def _upload_directory_to_gcs(local_dir: str, gcs_prefix: str) -> None:
         if remote_parent:
             fs.makedirs(remote_parent, exist_ok=True)
         fs.put(path.as_posix(), remote)
+
+
+def _list_mp4s_in_gcs_prefix(
+    *,
+    bucket: str,
+    prefix: str,
+    start_index: int,
+    limit: int,
+    max_list_files: int,
+) -> list[str]:
+    """List mp4 objects under gs://bucket/prefix and return a sliced list.
+
+    Returns fully-qualified gs:// URIs.
+    """
+    fs = gcsfs.GCSFileSystem(token="google_default")
+    root = f"{bucket}/{prefix.strip('/')}"
+
+    # fs.find can return a lot; cap the scan for safety.
+    all_paths: list[str] = []
+    for i, p in enumerate(fs.find(root)):
+        if i >= int(max_list_files):
+            logger.warning("Reached max_list_files=%d while listing %s", int(max_list_files), root)
+            break
+        if p.lower().endswith(".mp4"):
+            all_paths.append(p)
+
+    all_paths.sort()
+    sliced = all_paths[int(start_index) : int(start_index) + int(limit)]
+    return [f"gs://{p}" for p in sliced]
+
+
+def _download_gcs_files(
+    *,
+    uris: list[str],
+    out_dir: str,
+) -> list[str]:
+    """Download gs:// URIs to out_dir and return local paths."""
+    fs = gcsfs.GCSFileSystem(token="google_default")
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+
+    local_paths: list[str] = []
+    for i, uri in enumerate(uris):
+        if not uri.startswith("gs://"):
+            raise ValueError(f"Expected gs:// URI, got: {uri}")
+
+        # Convert gs://bucket/key -> bucket/key for gcsfs
+        remote = uri[len("gs://") :]
+        base = os.path.basename(remote)
+        if not base:
+            base = f"video_{i:06d}.mp4"
+        local = os.path.join(out_dir, base)
+        fs.get(remote, local)
+        local_paths.append(local)
+
+    return local_paths
 
 
 # --------------------------------------------------------------------------------------
@@ -407,7 +422,6 @@ def _sam2_road_mask(image_rgb: Image.Image, *, ckpt_path: str, config_name: str,
         "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
     },
     mounts=[
-        FuseBucket(bucket=BUCKET, name=SRC_FUSE_NAME, prefix=SOURCE_GCS_PREFIX),
         FuseBucket(bucket=BUCKET, name=VLM_72B_FUSE_NAME, prefix=VLM_72B_GCS_PREFIX),
         FuseBucket(bucket=BUCKET, name=SAM2_FUSE_NAME, prefix=SAM2_CHECKPOINT_GCS_PREFIX),
     ],
@@ -442,22 +456,22 @@ def generate_fluxfill_training_data(
         raise ValueError("output_run_id resolved to empty")
 
     # Prefetch metadata best-effort
-    for p in (SRC_FUSE_ROOT, VLM_72B_FUSE_ROOT, SAM2_FUSE_ROOT):
+    for p in (VLM_72B_FUSE_ROOT, SAM2_FUSE_ROOT):
         try:
             fuse_prefetch_metadata(p)
         except Exception as e:
             logger.warning("Prefetch failed (non-fatal) for %s: %s", p, e)
 
-    if not os.path.isdir(SRC_FUSE_ROOT):
-        raise FileNotFoundError(f"Source mp4 mount missing: {SRC_FUSE_ROOT}")
     if not os.path.isdir(VLM_72B_FUSE_ROOT):
         raise FileNotFoundError(f"Qwen model mount missing: {VLM_72B_FUSE_ROOT}")
     if not os.path.exists(sam2_checkpoint_path):
         raise FileNotFoundError(f"SAM2 checkpoint missing: {sam2_checkpoint_path}")
 
     tmp_root = os.path.join(tempfile.gettempdir(), "fluxfill_training_data", run_id)
+    videos_dir = os.path.join(tmp_root, "videos")
     images_dir = os.path.join(tmp_root, "images")
     masks_dir = os.path.join(tmp_root, "masks")
+    Path(videos_dir).mkdir(parents=True, exist_ok=True)
     Path(images_dir).mkdir(parents=True, exist_ok=True)
     Path(masks_dir).mkdir(parents=True, exist_ok=True)
 
@@ -466,8 +480,28 @@ def generate_fluxfill_training_data(
 
     rows: list[dict[str, str]] = []
 
-    mp4_iter = _iter_mp4_files(SRC_FUSE_ROOT, start_index=start_index, limit=num_videos, max_walk_files=max_walk_files)
-    for i, mp4_path in enumerate(mp4_iter):
+    # List + download only the requested slice of mp4s.
+    logger.info(
+        "Listing mp4s in gs://%s/%s (start_index=%d, num_videos=%d)",
+        BUCKET,
+        SOURCE_GCS_PREFIX,
+        int(start_index),
+        int(num_videos),
+    )
+    mp4_uris = _list_mp4s_in_gcs_prefix(
+        bucket=BUCKET,
+        prefix=SOURCE_GCS_PREFIX,
+        start_index=start_index,
+        limit=num_videos,
+        max_list_files=max_walk_files,
+    )
+    if not mp4_uris:
+        raise RuntimeError("No mp4 files found for the requested slice")
+
+    logger.info("Downloading %d mp4s to %s", len(mp4_uris), videos_dir)
+    local_mp4s = _download_gcs_files(uris=mp4_uris, out_dir=videos_dir)
+
+    for i, mp4_path in enumerate(local_mp4s):
         sid = _stable_id(mp4_path)
         out_img = os.path.join(images_dir, f"{i:06d}_{sid}.png")
         out_mask = os.path.join(masks_dir, f"{i:06d}_{sid}.png")
