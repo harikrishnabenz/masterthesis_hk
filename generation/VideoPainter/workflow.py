@@ -103,22 +103,17 @@ X = _read_x_from_build_script()
 
 
 # ----------------------------------------------------------------------------------
-# OPTIONAL VLM (Qwen2.5-VL-72B) MOUNT
+# VLM (Qwen2.5-VL-7B) MOUNT
 # ----------------------------------------------------------------------------------
-# Toggle this to control whether we mount the 72B VLM checkpoint folder and symlink it
-# into the expected local path.
+# We only support mounting the 7B VLM checkpoint via a dedicated FuseBucket and
+# symlinking it into the expected local path:
+#   /workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct -> <mounted_folder>
 #
-# - True  -> Adds a separate FuseBucket mount and creates:
-#            /workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-72B-Instruct -> <mounted_folder>
-# - False -> Does nothing (no extra mounts, no symlink)
-# Automatically set based on LLM_MODEL_SIZE in scripts/build_and_run.sh:
-#   - "72B" -> True
-#   - "7B"  -> False
+# This avoids relying on HuggingFace Hub downloads at runtime and avoids needing
+# the VLM checkpoint to live inside the main ckpt mount.
 LLM_MODEL_SIZE = _read_llm_model_size_from_build_script()
 
-
-
-USE_QWEN2_5_VL_72B = LLM_MODEL_SIZE == "7B"
+USE_QWEN2_5_VL_7B = (LLM_MODEL_SIZE or "").strip().upper() == "7B"
 
 
 def _compute_node_from_llm_model_size(llm_model_size: str) -> Node:
@@ -173,7 +168,7 @@ VP_BUCKET_PREFIX = "workspace/user/hbaskar/Video_inpainting/videopainter"
 
 # Optional VLM checkpoint folder (mounted separately so it doesn't interfere with
 # existing ckpt or data mounts).
-VLM_72B_GCS_PREFIX = os.path.join(VP_BUCKET_PREFIX, "vlm", "Qwen2.5-VL-72B-Instruct")
+VLM_7B_GCS_PREFIX = os.path.join(VP_BUCKET_PREFIX, "vlm", "Qwen2.5-VL-7B-Instruct")
 
 # GCS bucket path for SAM2 preprocessed data.
 # IMPORTANT: we mount the *base* prefix so `data_run_id` can be chosen dynamically.
@@ -185,10 +180,10 @@ VP_FUSE_MOUNT_NAME = "vp-bucket"
 VP_FUSE_MOUNT_ROOT = os.path.join(MOUNTPOINT, VP_FUSE_MOUNT_NAME)
 MOUNTED_CKPT_PATH = os.path.join(VP_FUSE_MOUNT_ROOT, "ckpt")
 
-VP_VLM_72B_FUSE_MOUNT_NAME = "vp-vlm-72b"
-VP_VLM_72B_FUSE_MOUNT_ROOT = os.path.join(MOUNTPOINT, VP_VLM_72B_FUSE_MOUNT_NAME)
+VP_VLM_7B_FUSE_MOUNT_NAME = "vp-vlm-7b"
+VP_VLM_7B_FUSE_MOUNT_ROOT = os.path.join(MOUNTPOINT, VP_VLM_7B_FUSE_MOUNT_NAME)
 
-VLM_72B_DEST_PATH = os.path.join(DEFAULT_CKPT_DIR, "vlm", "Qwen2.5-VL-72B-Instruct")
+VLM_7B_DEST_PATH = os.path.join(DEFAULT_CKPT_DIR, "vlm", "Qwen2.5-VL-7B-Instruct")
 
 VP_DATA_FUSE_MOUNT_NAME = "data"
 VP_DATA_FUSE_MOUNT_ROOT = os.path.join(MOUNTPOINT, VP_DATA_FUSE_MOUNT_NAME)
@@ -867,10 +862,10 @@ def _upload_outputs(
 		*([
 			FuseBucket(
 				bucket=VP_BUCKET,
-				name=VP_VLM_72B_FUSE_MOUNT_NAME,
-				prefix=VLM_72B_GCS_PREFIX,
+				name=VP_VLM_7B_FUSE_MOUNT_NAME,
+				prefix=VLM_7B_GCS_PREFIX,
 			),
-		] if USE_QWEN2_5_VL_72B else []),
+		] if USE_QWEN2_5_VL_7B else []),
 	],
 )
 def run_videopainter_edit_many(
@@ -926,15 +921,14 @@ def run_videopainter_edit_many(
 	if not effective_output_run_id:
 		raise ValueError("output_run_id must be non-empty when provided")
 	logger.info("output_run_id=%s", effective_output_run_id)
-	logger.info("USE_QWEN2_5_VL_72B=%s", USE_QWEN2_5_VL_72B)
+	logger.info("USE_QWEN2_5_VL_7B=%s", USE_QWEN2_5_VL_7B)
 
 	# Prefetch checkpoints from GCS.
 	fuse_prefetch_metadata(MOUNTED_CKPT_PATH)
 
-	# Default behavior: symlink the whole ckpt folder into /workspace/VideoPainter/ckpt.
-	# If USE_QWEN2_5_VL_72B is enabled, keep ckpt as a writable dir and symlink
-	# required subfolders so we can add ckpt/vlm/Qwen2.5-VL-72B-Instruct.
-	if not USE_QWEN2_5_VL_72B:
+	# If we mount a dedicated VLM folder (7B), keep ckpt as a writable dir and
+	# symlink required subfolders so we can add ckpt/vlm/Qwen2.5-VL-7B-Instruct.
+	if not USE_QWEN2_5_VL_7B:
 		ensure_symlink(MOUNTED_CKPT_PATH, DEFAULT_CKPT_DIR)
 	else:
 		ensure_writable_dir(DEFAULT_CKPT_DIR)
@@ -946,12 +940,12 @@ def run_videopainter_edit_many(
 		ensure_writable_dir(os.path.join(DEFAULT_CKPT_DIR, "vlm"))
 
 		try:
-			fuse_prefetch_metadata(VP_VLM_72B_FUSE_MOUNT_ROOT)
+			fuse_prefetch_metadata(VP_VLM_7B_FUSE_MOUNT_ROOT)
 		except Exception:
-			logger.info("VLM 72B prefetch skipped/failed; continuing.")
-		
-		# Create symlink for VLM 72B mount
-		ensure_symlink(VP_VLM_72B_FUSE_MOUNT_ROOT, VLM_72B_DEST_PATH)
+			logger.info("VLM 7B prefetch skipped/failed; continuing.")
+
+		# Create symlink for VLM 7B mount
+		ensure_symlink(VP_VLM_7B_FUSE_MOUNT_ROOT, VLM_7B_DEST_PATH)
 
 	# Keep /workspace/VideoPainter/data present and pointing at the mounted dataset.
 	ensure_symlink(VP_DATA_FUSE_MOUNT_ROOT, DEFAULT_DATA_DIR)

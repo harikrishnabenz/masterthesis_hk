@@ -3,31 +3,11 @@
 # ----------------------------------------------------------------------------------
 # LLM MODEL SELECTION
 # ----------------------------------------------------------------------------------
-# Choose which Qwen model to use:
-#   - "72B" for Qwen2.5-VL-72B-Instruct (high quality, needs 2 GPUs, ~70-80GB VRAM)
-#   - "7B"  for Qwen2.5-VL-7B-Instruct  (balanced, needs 1 GPU, ~16GB VRAM)
+# This repo is configured to use ONLY the Qwen2.5-VL-7B-Instruct checkpoint
+# mounted by workflow.py and exposed under the local path below.
 LLM_MODEL_SIZE="7B"
-
-# Normalize for downstream logic.
-LLM_MODEL_SIZE="${LLM_MODEL_SIZE^^}"
-
-MODEL_SIZE_TAG=""
-if [[ "${LLM_MODEL_SIZE}" =~ ^([0-9]+)B$ ]]; then
-  MODEL_SIZE_TAG="${BASH_REMATCH[1]}"
-else
-  echo "Unknown LLM_MODEL_SIZE='${LLM_MODEL_SIZE}'. Expected '72B' or '7B'; defaulting to 7B."
-  MODEL_SIZE_TAG="7"
-fi
-
-LLM_MODEL_PATH=""
-case "${LLM_MODEL_SIZE}" in
-  "72B") LLM_MODEL_PATH="/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-72B-Instruct" ;;
-  "7B")  LLM_MODEL_PATH="/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct" ;;
-  *)
-    echo "Unknown LLM_MODEL_SIZE='${LLM_MODEL_SIZE}'. Expected '72B' or '7B'; defaulting to 7B path."
-    LLM_MODEL_PATH="/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct"
-    ;;
-esac
+MODEL_SIZE_TAG="7"
+LLM_MODEL_PATH="/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct"
 
 
 echo "  MODEL_PREFIX: $MODEL_PREFIX"
@@ -124,7 +104,7 @@ hlx wf run \
 
 echo "VideoPainter report will be uploaded as: gs://.../videopainter/output_vp/10_${X}/10_${X}.txt"
 
-# Model size options:
-# --llm_model "Qwen/Qwen2.5-VL-7B-Instruct"  # Balanced, ~16GB VRAM
-# --llm_model "Qwen/Qwen2.5-VL-72B-Instruct" # Best quality, ~70-80GB VRAM (CURRENT)
-# --llm_model "none"    
+# llm_model options:
+# --llm_model "/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct"  # Local (mounted)
+# --llm_model "Qwen/Qwen2.5-VL-7B-Instruct"                             # Hub (requires internet)
+# --llm_model "none"
