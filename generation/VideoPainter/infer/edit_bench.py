@@ -865,6 +865,7 @@ def generate_video(
     caption_refine_temperature: float = 0.2,
     long_video: bool = False,
     id_adapter_resample_learnable_path: str = None,
+    strength: float = 1.0,
 ):
 
     def _normalize_device(dev: str, *, fallback_cuda: str = "cuda:0") -> str:
@@ -965,6 +966,10 @@ def generate_video(
 
     image = None
     video = None
+
+    strength = float(strength)
+    if strength < 0.0 or strength > 1.0:
+        raise ValueError(f"strength must be within [0.0, 1.0], got {strength}")
 
     cog_device = _normalize_device(cog_device, fallback_cuda="cuda:0")
     flux_device = _normalize_device(flux_device, fallback_cuda=cog_device if cog_device.startswith("cuda") else "cuda:0")
@@ -1351,7 +1356,7 @@ def generate_video(
             generator=torch.Generator().manual_seed(seed),
             video=masked_video_for_pipe,
             masks=binary_masks,
-            strength=1.0,
+            strength=strength,
             replace_gt=replace_gt,
             mask_add=mask_add,
             stride= int(frames - down_sample_fps),
@@ -1552,6 +1557,12 @@ if __name__ == "__main__":
         help="Temperature for Qwen evaluation/refinement. Default is 0.2.",
     )
     parser.add_argument(
+        "--strength",
+        type=float,
+        default=1.0,
+        help="Inpainting strength in [0.0, 1.0]. Default is 1.0.",
+    )
+    parser.add_argument(
         "--id_adapter_resample_learnable_path",
         type=str,
         default=None,
@@ -1604,4 +1615,5 @@ if __name__ == "__main__":
         caption_refine_iters=args.caption_refine_iters,
         caption_refine_temperature=args.caption_refine_temperature,
         id_adapter_resample_learnable_path=args.id_adapter_resample_learnable_path,
+        strength=args.strength,
     )

@@ -675,6 +675,7 @@ def _run_edit_bench(
 	down_sample_fps: int,
 	overlap_frames: int,
 	prev_clip_weight: float,
+	strength: float,
 	video_editing_instruction: str,
 	llm_model: str,
 	dilate_size: int,
@@ -721,6 +722,8 @@ def _run_edit_bench(
 		str(overlap_frames),
 		"--prev_clip_weight",
 		str(prev_clip_weight),
+		"--strength",
+		str(float(strength)),
 		"--img_inpainting_model",
 		img_inpainting_model,
 		"--video_editing_instruction",
@@ -890,6 +893,7 @@ def run_videopainter_edit_many(
 	down_sample_fps: int = 8,
 	overlap_frames: int = 0,
 	prev_clip_weight: float = 0.0,
+	strength: float = 1.0,
 	# Lane-line spec options (optional):
 	# - Provide a single spec via lane_count/lane_color/lane_pattern, OR
 	# - Provide many specs via lane_specs (same delimiter rules as video_editing_instructions).
@@ -1046,6 +1050,7 @@ def run_videopainter_edit_many(
 				down_sample_fps=down_sample_fps,
 				overlap_frames=overlap_frames,
 				prev_clip_weight=prev_clip_weight,
+				strength=strength,
 				video_editing_instruction=instruction,
 				llm_model=llm_model,
 				dilate_size=dilate_size,
@@ -1126,6 +1131,7 @@ def videopainter_many_wf(
 	down_sample_fps: int = 8,
 	overlap_frames: int = 0,
 	prev_clip_weight: float = 0.0,
+	strength: float = 1.0,
 	video_editing_instruction: str = "auto",
 	video_editing_instructions: str = "",
 	llm_model: str = "disabled",
@@ -1155,6 +1161,7 @@ def videopainter_many_wf(
 		down_sample_fps=down_sample_fps,
 		overlap_frames=overlap_frames,
 		prev_clip_weight=prev_clip_weight,
+		strength=strength,
 		video_editing_instruction=video_editing_instruction,
 		video_editing_instructions=video_editing_instructions,
 		llm_model=llm_model,

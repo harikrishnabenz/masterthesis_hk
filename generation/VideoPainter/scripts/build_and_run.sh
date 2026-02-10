@@ -88,6 +88,13 @@ VIDEO_EDITING_INSTRUCTIONS=$'Single solid white continuous line, aligned exactly
 CAPTION_REFINE_ITERS="${CAPTION_REFINE_ITERS:-10}"
 CAPTION_REFINE_TEMPERATURE="${CAPTION_REFINE_TEMPERATURE:-0.1}"
 
+# -----------------------------------------------------------------------------
+# Inpainting strength
+# Forwarded to infer/edit_bench.py as --strength (valid range: [0.0, 1.0]).
+# Example: VP_STRENGTH=0.85 bash scripts/build_and_run.sh
+# -----------------------------------------------------------------------------
+VP_STRENGTH="${VP_STRENGTH:-1.0}"
+
 
 hlx wf run \
   --team-space research \
@@ -104,6 +111,7 @@ hlx wf run \
   --output_name_suffix "vp_edit_sample0.mp4" \
   --num_inference_steps 70 \
   --guidance_scale 6.0 \
+  --strength "${VP_STRENGTH}" \
   --down_sample_fps 8 \
   --inpainting_frames 49 \
   --video_editing_instructions "${VIDEO_EDITING_INSTRUCTIONS}" \
