@@ -53,6 +53,7 @@ class InpaintCsvDataset(Dataset):
         caption_2_column: Optional[str] = "prompt_2",
     ):
         self.examples: List[InpaintExample] = []
+        base_dir = os.path.dirname(os.path.abspath(csv_path))
         with open(csv_path, newline="", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
@@ -64,6 +65,12 @@ class InpaintCsvDataset(Dataset):
                     prompt_2 = (row.get(caption_2_column) or "").strip() or None
                 if not image_path or not mask_path or not prompt:
                     continue
+
+                if not os.path.isabs(image_path):
+                    image_path = os.path.join(base_dir, image_path)
+                if not os.path.isabs(mask_path):
+                    mask_path = os.path.join(base_dir, mask_path)
+
                 self.examples.append(
                     InpaintExample(image_path=image_path, mask_path=mask_path, prompt=prompt, prompt_2=prompt_2)
                 )

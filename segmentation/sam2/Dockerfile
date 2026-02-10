@@ -65,10 +65,14 @@ RUN pip install --no-cache-dir \
     opencv-python-headless \
     tqdm \
     Pillow \
-    gsutil \
     gcsfs \
     google-cloud-storage \
-    flytekit>=1.13.0
+    flytekit>=1.13.0 \
+    "transformers>=4.46.0" \
+    "accelerate>=0.30.0" \
+    qwen-vl-utils \
+    safetensors \
+    sentencepiece
 
 # Copy HLX workflow wheel
 COPY hlx_wf-2.4.2.dev9-py3-none-any.whl /workspace/sam2/
