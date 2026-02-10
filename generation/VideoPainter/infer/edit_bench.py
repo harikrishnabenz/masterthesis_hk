@@ -142,6 +142,14 @@ def _llm_disabled(llm_model: str | None) -> bool:
     return llm_model.strip().lower() in {"", "none", "off", "disable", "disabled", "false", "0", "no"}
 
 
+def _path_disabled(path: str | None) -> bool:
+    if path is None:
+        return True
+    if not isinstance(path, str):
+        return True
+    return path.strip().lower() in {"", "none", "off", "disable", "disabled", "false", "0", "no"}
+
+
 def _limit_words(text: str, max_words: int) -> str:
     words = (text or "").split()
     if len(words) <= max_words:
@@ -182,6 +190,109 @@ def _sanitize_inpaint_caption(text: str) -> str:
         )
         s = re.sub(r"\s+", " ", s).strip()
     return s
+
+
+def _edit_video_prompt_with_llm(
+    *,
+    prompt: str,
+    instruction: str,
+    llm_model: str,
+    qwen_device: str | None,
+) -> str:
+    system_prompt = (
+        "You are a video description editing expert for driving scenes. You will edit the original video description "
+        "based on the user's instruction.\n\n"
+        "Requirements:\n"
+        "1. Keep the description coherent and natural.\n"
+        "2. Apply ONLY what the instruction requests (do not invent extra objects).\n"
+        "3. Retain important details that are not affected by the instruction.\n"
+        "4. Lane-marking instructions may apply to videos with: no centerline, a single centerline, or a double centerline. "
+        "Do not assume which one exists; describe the *result after the edit*.\n"
+    )
+    user_prompt = (
+        f"Original video description: {prompt}\n"
+        f"Editing instruction: {instruction}\n"
+        "Please edit the video description based on the editing instruction. Only return the edited description, no other words."
+    )
+    return _qwen_generate_text(
+        model=llm_model,
+        qwen_device=qwen_device,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+    )
+
+
+def _np_frame_to_pil(frame: np.ndarray) -> Image.Image:
+    arr = np.asarray(frame)
+    if arr.ndim == 4:
+        arr = arr[0]
+    if arr.dtype != np.uint8:
+        a = arr.astype(np.float32)
+        # Heuristic: if values look like [0,1], scale to [0,255].
+        if np.nanmax(a) <= 1.5:
+            a = a * 255.0
+        a = np.clip(a, 0.0, 255.0)
+        arr = a.astype(np.uint8)
+    if arr.ndim == 2:
+        return Image.fromarray(arr, mode="L").convert("RGB")
+    return Image.fromarray(arr).convert("RGB")
+
+
+def _qwen_validate_cog_first_frame(
+    *,
+    llm_model: str,
+    qwen_device: str | None,
+    instruction: str,
+    original_frame: Image.Image,
+    generated_frame: Image.Image,
+    flux_mask: Image.Image,
+    temperature: float = 0.2,
+) -> tuple[bool, str]:
+    """Return (pass_ok, notes) for the CogVideoX first frame."""
+    panel_bytes = _make_qwen_eval_panel(original=original_frame, inpainted=generated_frame, flux_mask=flux_mask)
+    system_prompt = (
+        "You are a strict visual quality evaluator for image inpainting edits in driving scenes. "
+        "Judge whether the edited image satisfies the instruction inside the masked region, "
+        "and whether it remains visually consistent with the unmasked context.\n"
+        "IMPORTANT: the input videos may have no centerline, a single centerline, or a double centerline.\n"
+        "CRITICAL VALIDATION:\n"
+        "- If instruction says SINGLE, reject DOUBLE (two parallel) lines\n"
+        "- If instruction says DOUBLE, reject SINGLE line\n"
+        "- If instruction says SOLID/CONTINUOUS, reject DASHED/INTERMITTENT\n"
+        "- If instruction says DASHED/INTERMITTENT, reject SOLID/CONTINUOUS\n"
+        "- If instruction specifies color (white/yellow), it must match exactly\n"
+        "- Reject captions/outputs that are too vague or geometrically misaligned\n"
+    )
+    user_prompt = f"""You will be shown a 3-panel image: (1) original with mask overlay (red indicates inpaint region), (2) the binary mask (white=inpaint), (3) the generated result.
+
+Editing instruction:
+{instruction}
+
+Return ONLY a JSON object with these keys:
+- verdict: \"PASS\" or \"FAIL\"
+- notes: short reason, mention any artifacts or mismatches
+
+Rules:
+1. Evaluate only the masked region for instruction satisfaction
+2. Also check seams/blending at mask borders
+3. Be strict about single/double, solid/dashed, and color
+"""
+
+    out = _qwen_generate_text(
+        model=llm_model,
+        qwen_device=qwen_device,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        image_bytes=panel_bytes,
+        temperature=temperature,
+        max_output_tokens=200,
+    )
+    obj = _extract_json_object(out)
+    if not obj:
+        return (False, (out or "").strip())
+    verdict = str(obj.get("verdict", "")).strip().upper()
+    notes = str(obj.get("notes", "") or "").strip()
+    return (verdict == "PASS", notes)
 
 
 def _primary_instruction_clause(instruction: str) -> str:
@@ -692,24 +803,11 @@ def video_editing_prompt(prompt, instruction, llm_model, masked_image=None, targ
         masked_image_caption = _limit_words(_primary_instruction_clause(instruction), 20)
         return edited_prompt, masked_image_caption
     # Use LLM to edit the video description
-    system_prompt = """You are a video description editing expert for driving scenes. You will edit the original video description based on the user's instruction.
-
-Requirements:
-1. Keep the description coherent and natural.
-2. Apply ONLY what the instruction requests (do not invent extra objects).
-3. Retain important details that are not affected by the instruction.
-4. Lane-marking instructions may apply to videos with: no centerline, a single centerline, or a double centerline. Do not assume which one exists; describe the *result after the edit*.
-"""
-    
-    user_prompt = f"""Original video description: {prompt}
-    Editing instruction: {instruction}
-    Please edit the video description based on the editing instruction. Only return the edited description, no other words."""
-
-    prompt = _qwen_generate_text(
-        model=llm_model,
+    prompt = _edit_video_prompt_with_llm(
+        prompt=prompt,
+        instruction=instruction,
+        llm_model=llm_model,
         qwen_device=qwen_device,
-        system_prompt=system_prompt,
-        user_prompt=user_prompt,
     )
 
 
@@ -923,6 +1021,8 @@ def generate_video(
     mask_feather: int = 0,
     caption_refine_iters: int = 0,
     caption_refine_temperature: float = 0.2,
+    validate_cog_first_frame: bool = False,
+    cog_validate_temperature: float = 0.2,
     long_video: bool = False,
     id_adapter_resample_learnable_path: str = None,
 ):
@@ -1079,6 +1179,62 @@ def generate_video(
         # new lanes exactly where the originals were.
         masked_video_for_pipe = video if keep_masked_pixels else masked_video_black
 
+        # Prepare the editing instruction and optionally edit the global prompt even when
+        # running Cog-only (no first-frame SDXL inpainting).
+        if llm_model is None:
+            llm_model = "none"
+
+        # Build a masked-only image for auto-instruction generation when requested.
+        image0 = video[0]
+        mask0 = binary_masks[0]
+        image_array0 = np.array(image0)
+        mask_array0 = np.array(mask0)
+        foreground_mask0 = (mask_array0 == 255)
+        masked_image0 = np.where(foreground_mask0, image_array0, 0)
+        masked_image0 = Image.fromarray(masked_image0.astype(np.uint8))
+
+        if video_editing_instruction == "auto":
+            if _llm_disabled(llm_model):
+                raise ValueError(
+                    "video_editing_instruction='auto' requires an LLM. "
+                    "Provide --video_editing_instruction explicitly, or set --llm_model (e.g., 'Qwen/...')."
+                )
+            video_editing_instruction = generate_video_editing_instruction(masked_image0, llm_model, qwen_device=qwen_device)
+            output_path = output_path.replace("auto", video_editing_instruction).replace("..", ".")
+
+        original_prompt = prompt
+        if video_editing_instruction and str(video_editing_instruction).strip():
+            if _llm_disabled(llm_model):
+                prompt = f"{prompt}. {video_editing_instruction}".strip()
+            else:
+                prompt = _edit_video_prompt_with_llm(
+                    prompt=prompt,
+                    instruction=video_editing_instruction,
+                    llm_model=llm_model,
+                    qwen_device=qwen_device,
+                )
+
+        # Always write a sidecar JSON (even for Cog-only runs).
+        prompt_json_path = output_path.replace(".mp4", f".json")
+        try:
+            with open(prompt_json_path, "w") as f:
+                prompt_dict = {
+                    "path": meta_data["path"],
+                    "mask_id": int(mask_id),
+                    "start_frame": int(start_frame),
+                    "end_frame": int(end_frame),
+                    "fps": int(meta_data["fps"]),
+                    "Original_video_caption": original_prompt,
+                    "Edited_video_caption": prompt,
+                    "Editing_instruction": video_editing_instruction,
+                    "Used_first_frame_sdxl": (not _path_disabled(img_inpainting_model)),
+                    "Validate_cog_first_frame_requested": bool(validate_cog_first_frame),
+                    "Cog_validate_temperature": float(cog_validate_temperature or 0.2),
+                }
+                json.dump(prompt_dict, f, indent=4, ensure_ascii=False)
+        except Exception:
+            pass
+
         # Defer building the heavy CogVideoX pipeline until after Qwen+Flux steps.
         pipe = None
         transformer = None
@@ -1150,7 +1306,7 @@ def generate_video(
             pipe.vae.requires_grad_(False)
             pipe.branch.requires_grad_(False)
 
-        if img_inpainting_model:
+        if not _path_disabled(img_inpainting_model):
             print(f"Using the provided image inpainting model: {img_inpainting_model}")
 
             image = video[0]
@@ -1180,28 +1336,16 @@ def generate_video(
             masked_image = np.where(foreground_mask, image_array, 0)
             masked_image = Image.fromarray(masked_image.astype(np.uint8))
 
-            if llm_model is None:
-                llm_model = "none"
-
-            if video_editing_instruction == 'auto':
-                if _llm_disabled(llm_model):
-                    raise ValueError(
-                        "video_editing_instruction='auto' requires an LLM. "
-                        "Provide --video_editing_instruction explicitly, or set --llm_model (e.g., 'Qwen/Qwen2.5-VL-72B-Instruct')."
-                    )
-                video_editing_instruction = generate_video_editing_instruction(masked_image, llm_model, qwen_device=qwen_device)
-                output_path = output_path.replace("auto", video_editing_instruction).replace("..", ".")
-
             # For the VLM prompt, provide *surrounding context* (unmasked area)
             # by showing the original frame with the inpaint region removed.
             vlm_context_image = video[0] if keep_masked_pixels else masked_video_for_pipe[0]
 
-            original_prompt = prompt
-            prompt, masked_image_caption = video_editing_prompt(
-                prompt, 
-                video_editing_instruction, 
-                llm_model, 
-                masked_image=vlm_context_image, 
+            # For SDXL first-frame inpainting, also request a masked-region caption.
+            _, masked_image_caption = video_editing_prompt(
+                original_prompt,
+                video_editing_instruction,
+                llm_model,
+                masked_image=vlm_context_image,
                 target_img_caption=True,
                 qwen_device=qwen_device,
             )
@@ -1230,24 +1374,19 @@ def generate_video(
             print(f"Video editing instruction: {video_editing_instruction}")
             print("-"*100)
 
-            prompt_json_path = output_path.replace(".mp4", f".json")
-            with open(prompt_json_path, "w") as f:
-                prompt_dict = {
-                    "path": meta_data['path'],
-                    "mask_id": int(mask_id),
-                    "start_frame": int(start_frame),
-                    "end_frame": int(end_frame),
-                    "fps": int(meta_data['fps']),
-                    "Original_video_caption": original_prompt,
-                    "Edited_video_caption": prompt,
-                    "Edited_image_caption": masked_image_caption,
-                    "Edited_image_caption_initial": masked_image_caption,
-                    "Edited_image_caption_final": None,
-                    "Editing_instruction": video_editing_instruction,
-                    "Caption_refine_iters_requested": int(caption_refine_iters or 0),
-                    "Caption_refine_temperature": float(caption_refine_temperature or 0.2),
-                }
-                json.dump(prompt_dict, f, indent=4, ensure_ascii=False)
+            # Append SDXL-specific fields into the existing sidecar JSON.
+            try:
+                with open(prompt_json_path, "r") as f:
+                    pj = json.load(f)
+                pj["Edited_image_caption"] = masked_image_caption
+                pj["Edited_image_caption_initial"] = masked_image_caption
+                pj["Edited_image_caption_final"] = None
+                pj["Caption_refine_iters_requested"] = int(caption_refine_iters or 0)
+                pj["Caption_refine_temperature"] = float(caption_refine_temperature or 0.2)
+                with open(prompt_json_path, "w") as f:
+                    json.dump(pj, f, indent=4, ensure_ascii=False)
+            except Exception:
+                pass
             
 
             try:
@@ -1444,6 +1583,46 @@ def generate_video(
         # 2) generated-only video
         generated_only_path = output_path.replace(".mp4", "_generated.mp4")
         export_to_video(video_generate, generated_only_path, fps=8)
+
+        # Optional: validate the first generated frame using Qwen VLM.
+        if bool(validate_cog_first_frame) and (not _llm_disabled(llm_model)) and video_editing_instruction:
+            try:
+                gen0 = _np_frame_to_pil(video_generate[0])
+                # Use a Flux-style mask where white=inpaint for the eval panel.
+                flux_mask_eval = binary_masks[0]
+                if mask_background:
+                    m = np.array(binary_masks[0])
+                    if m.ndim == 3:
+                        m = m[:, :, 0]
+                    flux_mask_eval = Image.fromarray((255 - m).astype(np.uint8)).convert("RGB")
+                passed, notes = _qwen_validate_cog_first_frame(
+                    llm_model=llm_model,
+                    qwen_device=qwen_device,
+                    instruction=video_editing_instruction,
+                    original_frame=video[0],
+                    generated_frame=gen0,
+                    flux_mask=flux_mask_eval,
+                    temperature=float(cog_validate_temperature or 0.2),
+                )
+                try:
+                    with open(prompt_json_path, "r") as f:
+                        pj = json.load(f)
+                    pj["Cog_first_frame_qwen_verdict"] = "PASS" if passed else "FAIL"
+                    pj["Cog_first_frame_qwen_notes"] = notes
+                    with open(prompt_json_path, "w") as f:
+                        json.dump(pj, f, indent=4, ensure_ascii=False)
+                except Exception:
+                    pass
+            except Exception as e:
+                try:
+                    with open(prompt_json_path, "r") as f:
+                        pj = json.load(f)
+                    pj["Cog_first_frame_qwen_verdict"] = "ERROR"
+                    pj["Cog_first_frame_qwen_notes"] = str(e)
+                    with open(prompt_json_path, "w") as f:
+                        json.dump(pj, f, indent=4, ensure_ascii=False)
+                except Exception:
+                    pass
        
         print(f"{inpainting_sample_id} generate completed! Total frames: {len(round_video)}")
         print(f"Saved comparison mp4: {output_path}")
@@ -1618,6 +1797,19 @@ if __name__ == "__main__":
         help="Temperature for Qwen evaluation/refinement. Default is 0.2.",
     )
     parser.add_argument(
+        "--validate_cog_first_frame",
+        action="store_true",
+        help=(
+            "Run Qwen VLM validation on the first generated CogVideoX frame and write verdict/notes into the sidecar JSON."
+        ),
+    )
+    parser.add_argument(
+        "--cog_validate_temperature",
+        type=float,
+        default=0.2,
+        help="Temperature for Qwen Cog first-frame validation. Default is 0.2.",
+    )
+    parser.add_argument(
         "--id_adapter_resample_learnable_path",
         type=str,
         default=None,
@@ -1669,5 +1861,7 @@ if __name__ == "__main__":
         mask_feather=args.mask_feather,
         caption_refine_iters=args.caption_refine_iters,
         caption_refine_temperature=args.caption_refine_temperature,
+        validate_cog_first_frame=bool(args.validate_cog_first_frame),
+        cog_validate_temperature=float(args.cog_validate_temperature or 0.2),
         id_adapter_resample_learnable_path=args.id_adapter_resample_learnable_path,
     )

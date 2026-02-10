@@ -51,13 +51,17 @@ VIDEO_EDITING_INSTRUCTIONS=$'Single solid white continuous line, aligned exactly
 
 # -----------------------------------------------------------------------------
 # First-frame caption refinement (Qwen critic loop)
+# NOTE: This is only used when SDXL first-frame inpainting is enabled.
 # Set these env vars to override defaults:
-#   CAPTION_REFINE_ITERS=5         (number of refinement iterations, default 10)
+#   CAPTION_REFINE_ITERS=0         (number of refinement iterations, default 0)
 #   CAPTION_REFINE_TEMPERATURE=0.1 (Qwen temperature, default 0.2)
 # Example: CAPTION_REFINE_ITERS=3 bash scripts/build_and_run.sh
 # -----------------------------------------------------------------------------
 CAPTION_REFINE_ITERS="${CAPTION_REFINE_ITERS:-10}"
 CAPTION_REFINE_TEMPERATURE="${CAPTION_REFINE_TEMPERATURE:-0.1}"
+
+# CogVideoX output validation (Qwen VLM)
+COG_VALIDATE_TEMPERATURE="${COG_VALIDATE_TEMPERATURE:-0.2}"
 
 
 hlx wf run \
@@ -71,7 +75,7 @@ hlx wf run \
   --inpainting_sample_id 0 \
   --model_path "/workspace/VideoPainter/ckpt/CogVideoX-5b-I2V" \
   --inpainting_branch "/workspace/VideoPainter/ckpt/VideoPainter/checkpoints/branch" \
-  --img_inpainting_model "/workspace/VideoPainter/ckpt/sdxl_inpaint" \
+  --img_inpainting_model "none" \
   --output_name_suffix "vp_edit_sample0.mp4" \
   --num_inference_steps 70 \
   --guidance_scale 6.0 \
@@ -79,6 +83,8 @@ hlx wf run \
   --inpainting_frames 49 \
   --video_editing_instructions "${VIDEO_EDITING_INSTRUCTIONS}" \
   --llm_model "/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct" \
+  --validate_cog_first_frame \
+  --cog_validate_temperature "${COG_VALIDATE_TEMPERATURE}" \
   --caption_refine_iters "${CAPTION_REFINE_ITERS}" \
   --caption_refine_temperature "${CAPTION_REFINE_TEMPERATURE}" \
   --dilate_size 24 \

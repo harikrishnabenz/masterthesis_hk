@@ -598,6 +598,8 @@ def _run_edit_bench(
 	prev_clip_weight: float,
 	video_editing_instruction: str,
 	llm_model: str,
+	validate_cog_first_frame: bool,
+	cog_validate_temperature: float,
 	dilate_size: int,
 	mask_feather: int,
 	caption_refine_iters: int,
@@ -642,8 +644,6 @@ def _run_edit_bench(
 		str(overlap_frames),
 		"--prev_clip_weight",
 		str(prev_clip_weight),
-		"--img_inpainting_model",
-		img_inpainting_model,
 		"--video_editing_instruction",
 		video_editing_instruction,
 		"--llm_model",
@@ -652,11 +652,28 @@ def _run_edit_bench(
 		str(dilate_size),
 		"--mask_feather",
 		str(mask_feather),
+		"--cog_validate_temperature",
+		str(float(cog_validate_temperature or 0.2)),
+	]
+
+	# Optional first-frame SDXL inpainting: allow disabling by passing '', 'none', etc.
+	img_inpaint_val = (img_inpainting_model or "").strip().lower()
+	if img_inpaint_val not in {"", "none", "off", "disable", "disabled", "false", "0", "no"}:
+		cmd.extend(["--img_inpainting_model", img_inpainting_model])
+	else:
+		# Ensure refinement is off when SDXL is disabled.
+		caption_refine_iters = 0
+
+	# Caption refinement loop is only meaningful when SDXL first-frame inpainting runs.
+	cmd.extend([
 		"--caption_refine_iters",
 		str(int(caption_refine_iters or 0)),
 		"--caption_refine_temperature",
 		str(float(caption_refine_temperature or 0.2)),
-	]
+	])
+
+	if validate_cog_first_frame:
+		cmd.append("--validate_cog_first_frame")
 	if qwen_device:
 		cmd.extend(["--qwen_device", qwen_device])
 	if unload_qwen:
@@ -820,6 +837,8 @@ def run_videopainter_edit_many(
 	# does not require `transformers` / `qwen-vl-utils` inside the container.
 	# To enable, pass a non-disabled string and ensure dependencies are installed.
 	llm_model: str = "/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct",
+	validate_cog_first_frame: bool = False,
+	cog_validate_temperature: float = 0.2,
 	dilate_size: int = 0,
 	mask_feather: int = 0,
 	caption_refine_iters: int = 0,
@@ -950,6 +969,8 @@ def run_videopainter_edit_many(
 				prev_clip_weight=prev_clip_weight,
 				video_editing_instruction=instruction,
 				llm_model=llm_model,
+				validate_cog_first_frame=validate_cog_first_frame,
+				cog_validate_temperature=cog_validate_temperature,
 				dilate_size=dilate_size,
 				mask_feather=mask_feather,
 				caption_refine_iters=caption_refine_iters,
@@ -1031,6 +1052,8 @@ def videopainter_many_wf(
 	video_editing_instruction: str = "auto",
 	video_editing_instructions: str = "",
 	llm_model: str = "/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct",
+	validate_cog_first_frame: bool = False,
+	cog_validate_temperature: float = 0.2,
 	dilate_size: int = 0,
 	mask_feather: int = 0,
 	caption_refine_iters: int = 0,
@@ -1060,6 +1083,8 @@ def videopainter_many_wf(
 		video_editing_instruction=video_editing_instruction,
 		video_editing_instructions=video_editing_instructions,
 		llm_model=llm_model,
+		validate_cog_first_frame=validate_cog_first_frame,
+		cog_validate_temperature=cog_validate_temperature,
 		dilate_size=dilate_size,
 		mask_feather=mask_feather,
 		caption_refine_iters=caption_refine_iters,
