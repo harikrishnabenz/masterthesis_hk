@@ -117,6 +117,18 @@ def _upload_directory_to_gcs(local_dir: str, gcs_prefix: str) -> None:
         fs.put(path.as_posix(), remote)
 
 
+def _gcs_strip_scheme(uri: str) -> str:
+    return uri[len("gs://") :] if uri.startswith("gs://") else uri
+
+
+def _upload_file_to_gcs(fs: gcsfs.GCSFileSystem, local_path: str, gcs_uri: str) -> None:
+    remote = _gcs_strip_scheme(gcs_uri)
+    remote_parent = os.path.dirname(remote)
+    if remote_parent:
+        fs.makedirs(remote_parent, exist_ok=True)
+    fs.put(local_path, remote)
+
+
 def _list_mp4s_in_gcs_prefix(
     *,
     bucket: str,
@@ -478,7 +490,17 @@ def generate_fluxfill_training_data(
     system_prompt = "You write short, literal captions. Avoid speculation."
     user_prompt = "Describe this image in 1 short sentence (no more than 20 words)."
 
-    rows: list[dict[str, str]] = []
+    dest_prefix = f"gs://{BUCKET}/{DEST_GCS_PREFIX_BASE}/{run_id}".rstrip("/")
+    remote_images_prefix = f"{dest_prefix}/images"
+    remote_masks_prefix = f"{dest_prefix}/masks"
+    remote_csv_uri = f"{dest_prefix}/train.csv"
+
+    fs = gcsfs.GCSFileSystem(token="google_default")
+
+    csv_path = os.path.join(tmp_root, "train.csv")
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        wri = csv.DictWriter(f, fieldnames=["image", "mask", "prompt", "prompt_2"])
+        wri.writeheader()
 
     # List + download only the requested slice of mp4s.
     logger.info(
@@ -522,33 +544,30 @@ def generate_fluxfill_training_data(
         if not prompt:
             prompt = "a front-facing driving camera frame"
 
-        rows.append(
-            {
-                "image": f"images/{os.path.basename(out_img)}",
-                "mask": f"masks/{os.path.basename(out_mask)}",
-                "prompt": prompt,
-                "prompt_2": prompt,
-            }
-        )
+        row = {
+            "image": f"images/{os.path.basename(out_img)}",
+            "mask": f"masks/{os.path.basename(out_mask)}",
+            "prompt": prompt,
+            "prompt_2": prompt,
+        }
+
+        # Upload image+mask immediately, then update train.csv on GCS.
+        _upload_file_to_gcs(fs, out_img, f"{remote_images_prefix}/{os.path.basename(out_img)}")
+        _upload_file_to_gcs(fs, out_mask, f"{remote_masks_prefix}/{os.path.basename(out_mask)}")
+
+        with open(csv_path, "a", newline="", encoding="utf-8") as f:
+            wri = csv.DictWriter(f, fieldnames=["image", "mask", "prompt", "prompt_2"])
+            wri.writerow(row)
+
+        # Overwrite remote CSV each time (simple + robust for resumability).
+        _upload_file_to_gcs(fs, csv_path, remote_csv_uri)
 
         if (i + 1) % 25 == 0:
             logger.info("Processed %d/%d", i + 1, num_videos)
 
-    if not rows:
-        raise RuntimeError("No samples generated")
-
-    csv_path = os.path.join(tmp_root, "train.csv")
-    with open(csv_path, "w", newline="", encoding="utf-8") as f:
-        wri = csv.DictWriter(f, fieldnames=["image", "mask", "prompt", "prompt_2"])
-        wri.writeheader()
-        for r in rows:
-            wri.writerow(r)
-
-    dest_prefix = f"gs://{BUCKET}/{DEST_GCS_PREFIX_BASE}/{run_id}"
-    logger.info("Uploading: %s -> %s", tmp_root, dest_prefix)
-    _upload_directory_to_gcs(tmp_root, dest_prefix)
-    logger.info("Upload complete: %s", dest_prefix)
-
+    # If we processed at least one file, ensure train.csv is present remotely.
+    _upload_file_to_gcs(fs, csv_path, remote_csv_uri)
+    logger.info("Upload complete (incremental): %s", dest_prefix)
     return dest_prefix + "/"
 
 
