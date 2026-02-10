@@ -422,6 +422,32 @@ def _sam2_road_mask(image_rgb: Image.Image, *, ckpt_path: str, config_name: str,
     return Image.fromarray(filtered_255.astype(np.uint8), mode="L")
 
 
+def _focus_image_to_mask(image_rgb: Image.Image, mask_l: Image.Image) -> Image.Image:
+    """Return an image where only the masked region is visible.
+
+    Outside-mask pixels are set to black so captioning can focus on the segmented region.
+    """
+    import numpy as np
+
+    if image_rgb.mode != "RGB":
+        image_rgb = image_rgb.convert("RGB")
+    if mask_l.mode != "L":
+        mask_l = mask_l.convert("L")
+
+    img = np.array(image_rgb, dtype=np.uint8)
+    m = np.array(mask_l, dtype=np.uint8)
+    if img.ndim != 3 or img.shape[2] != 3:
+        return image_rgb
+
+    keep = m > 0
+    if not bool(np.any(keep)):
+        return image_rgb
+
+    out = np.zeros_like(img)
+    out[keep] = img[keep]
+    return Image.fromarray(out, mode="RGB")
+
+
 @task(
     compute=DedicatedNode(
         node=Node.A100_80GB_1GPU,
@@ -488,7 +514,11 @@ def generate_fluxfill_training_data(
     Path(masks_dir).mkdir(parents=True, exist_ok=True)
 
     system_prompt = "You write short, literal captions. Avoid speculation."
-    user_prompt = "Describe this image in 1 short sentence (no more than 20 words)."
+    user_prompt = (
+        "Describe only the road and lane markings visible in the image. "
+        "Do not mention cars, buildings, sky, trees, or anything outside the road. "
+        "Write 1 short sentence (<= 20 words)."
+    )
 
     dest_prefix = f"gs://{BUCKET}/{DEST_GCS_PREFIX_BASE}/{run_id}".rstrip("/")
     remote_images_prefix = f"{dest_prefix}/images"
@@ -531,11 +561,18 @@ def generate_fluxfill_training_data(
         _extract_first_frame_ffmpeg(mp4_path, out_img)
         pil_img = Image.open(out_img).convert("RGB")
 
-        mask = _sam2_road_mask(pil_img, ckpt_path=sam2_checkpoint_path, config_name=sam2_config_name, device=sam2_device)
+        mask = _sam2_road_mask(
+            pil_img,
+            ckpt_path=sam2_checkpoint_path,
+            config_name=sam2_config_name,
+            device=sam2_device,
+        )
         mask.save(out_mask)
 
+        focus_img = _focus_image_to_mask(pil_img, mask)
+
         prompt = _caption_qwen(
-            pil_img,
+            focus_img,
             model_path=VLM_72B_FUSE_ROOT,
             qwen_device=qwen_device,
             system_prompt=system_prompt,
