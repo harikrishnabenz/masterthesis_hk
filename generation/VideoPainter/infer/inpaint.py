@@ -220,6 +220,8 @@ def generate_video(
     overlap_frames: int = 0,
     prev_clip_weight: float = 0.0,
     img_inpainting_model: str = None,
+    img_inpainting_lora_path: str = None,
+    img_inpainting_lora_scale: float = 1.0,
     llm_model: str = None,
     long_video: bool = False,
     dilate_size: int = -1,
@@ -387,6 +389,9 @@ def generate_video(
                 )
 
             pipe_img_inpainting = FluxFillPipeline.from_pretrained(img_inpainting_model, torch_dtype=torch.bfloat16).to("cuda")
+            if img_inpainting_lora_path:
+                pipe_img_inpainting.load_lora_weights(img_inpainting_lora_path)
+                pipe_img_inpainting.set_adapters(["default"], adapter_weights=[float(img_inpainting_lora_scale)])
             image_inpainting = pipe_img_inpainting(
                 prompt=image_inpainting_prompt,
                 image=image,
@@ -544,6 +549,18 @@ if __name__ == "__main__":
         help="The path of the image inpainting model. Default is None.",
     )
     parser.add_argument(
+        "--img_inpainting_lora_path",
+        type=str,
+        default=None,
+        help="Optional LoRA adapter path to load into FluxFillPipeline for first-frame inpainting.",
+    )
+    parser.add_argument(
+        "--img_inpainting_lora_scale",
+        type=float,
+        default=1.0,
+        help="LoRA scale for FluxFillPipeline adapter (default: 1.0).",
+    )
+    parser.add_argument(
         "--llm_model",
         type=str,
         default=None,
@@ -594,6 +611,8 @@ if __name__ == "__main__":
         overlap_frames=args.overlap_frames,
         prev_clip_weight=args.prev_clip_weight,
         img_inpainting_model=args.img_inpainting_model,
+        img_inpainting_lora_path=args.img_inpainting_lora_path,
+        img_inpainting_lora_scale=args.img_inpainting_lora_scale,
         llm_model=args.llm_model,
         long_video=args.long_video,
         dilate_size=args.dilate_size,
