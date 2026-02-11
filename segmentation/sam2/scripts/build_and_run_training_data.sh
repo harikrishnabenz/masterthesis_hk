@@ -10,7 +10,7 @@ DOMAIN="prod"
 
 NUM_VIDEOS="10000"
 START_INDEX="0"
-OUTPUT_RUN_ID="training_data_clearroad_10000"
+OUTPUT_RUN_ID="trainingdata_chunk199"
 
 DOWNLOAD_BATCH_SIZE="100"
 
