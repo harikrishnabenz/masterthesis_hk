@@ -29,6 +29,7 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import subprocess
 import tempfile
 from datetime import datetime
@@ -205,6 +206,13 @@ def _download_gcs_files(
         local_paths.append(local)
 
     return local_paths
+
+
+def _local_mp4_name_for_uri(uri: str, index: int) -> str:
+    # Avoid collisions when many objects share the same basename.
+    # Use a stable hash so re-runs produce predictable local names.
+    sid = _stable_id(uri)
+    return f"{int(index):06d}_{sid}.mp4"
 
 
 # --------------------------------------------------------------------------------------
@@ -568,6 +576,7 @@ def generate_fluxfill_training_data(
     sam2_config_name: str = "configs/sam2.1/sam2.1_hiera_l.yaml",
     max_walk_files: int = 500000,
     sort_gcs_listing: bool = False,
+    download_batch_size: int = 100,
     output_run_id: Optional[str] = None,
 ) -> str:
     logging.basicConfig(
@@ -580,6 +589,8 @@ def generate_fluxfill_training_data(
         raise ValueError("num_videos must be > 0")
     if start_index < 0:
         raise ValueError("start_index must be >= 0")
+    if int(download_batch_size) <= 0:
+        raise ValueError("download_batch_size must be > 0")
 
     run_id = (output_run_id or datetime.utcnow().strftime("fluxfill_%Y%m%d_%H%M%S")).strip()
     if not run_id:
@@ -651,56 +662,98 @@ def generate_fluxfill_training_data(
     if not mp4_uris:
         raise RuntimeError("No mp4 files found for the requested slice")
 
-    logger.info("Downloading %d mp4s to %s", len(mp4_uris), videos_dir)
-    local_mp4s = _download_gcs_files(uris=mp4_uris, out_dir=videos_dir)
+    batch_size = int(download_batch_size)
+    logger.info(
+        "Processing %d videos in batches of %d (download -> process -> upload -> delete local batch)",
+        len(mp4_uris),
+        batch_size,
+    )
 
-    for i, mp4_path in enumerate(local_mp4s):
-        sid = _stable_id(mp4_path)
-        out_img = os.path.join(images_dir, f"{i:06d}_{sid}.png")
-        out_mask = os.path.join(masks_dir, f"{i:06d}_{sid}.png")
+    for batch_start in range(0, len(mp4_uris), batch_size):
+        batch_uris = mp4_uris[batch_start : batch_start + batch_size]
+        batch_dir = os.path.join(videos_dir, f"batch_{batch_start:06d}")
+        Path(batch_dir).mkdir(parents=True, exist_ok=True)
 
-        _extract_first_frame_ffmpeg(mp4_path, out_img)
-        pil_img = Image.open(out_img).convert("RGB")
-
-        mask = _sam2_road_mask(
-            pil_img,
-            ckpt_path=sam2_checkpoint_path,
-            config_name=sam2_config_name,
-            device=sam2_device,
+        logger.info(
+            "Downloading batch %d-%d (size=%d) to %s",
+            batch_start,
+            min(batch_start + len(batch_uris) - 1, len(mp4_uris) - 1),
+            len(batch_uris),
+            batch_dir,
         )
-        mask.save(out_mask)
 
-        focus_img = _focus_image_to_mask(pil_img, mask)
+        local_batch: list[tuple[int, str, str]] = []
+        for j, uri in enumerate(batch_uris):
+            global_index = batch_start + j
+            remote = uri[len("gs://") :] if uri.startswith("gs://") else uri
+            local_mp4 = os.path.join(batch_dir, _local_mp4_name_for_uri(uri, global_index))
+            fs.get(remote, local_mp4)
+            local_batch.append((global_index, uri, local_mp4))
 
-        prompt_raw = _caption_qwen(
-            focus_img,
-            model_path=QWEN_MODEL_FUSE_ROOT,
-            qwen_device=qwen_device,
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-        )
-        prompt = _lane_prompt_from_qwen_output(prompt_raw)
+        for global_index, uri, mp4_path in local_batch:
+            sid = _stable_id(uri)
+            out_img = os.path.join(images_dir, f"{global_index:06d}_{sid}.png")
+            out_mask = os.path.join(masks_dir, f"{global_index:06d}_{sid}.png")
 
-        row = {
-            "image": f"images/{os.path.basename(out_img)}",
-            "mask": f"masks/{os.path.basename(out_mask)}",
-            "prompt": prompt,
-            "prompt_2": prompt,
-        }
+            _extract_first_frame_ffmpeg(mp4_path, out_img)
+            pil_img = Image.open(out_img).convert("RGB")
 
-        # Upload image+mask immediately, then update train.csv on GCS.
-        _upload_file_to_gcs(fs, out_img, f"{remote_images_prefix}/{os.path.basename(out_img)}")
-        _upload_file_to_gcs(fs, out_mask, f"{remote_masks_prefix}/{os.path.basename(out_mask)}")
+            mask = _sam2_road_mask(
+                pil_img,
+                ckpt_path=sam2_checkpoint_path,
+                config_name=sam2_config_name,
+                device=sam2_device,
+            )
+            mask.save(out_mask)
 
-        with open(csv_path, "a", newline="", encoding="utf-8") as f:
-            wri = csv.DictWriter(f, fieldnames=["image", "mask", "prompt", "prompt_2"])
-            wri.writerow(row)
+            focus_img = _focus_image_to_mask(pil_img, mask)
 
-        # Overwrite remote CSV each time (simple + robust for resumability).
-        _upload_file_to_gcs(fs, csv_path, remote_csv_uri)
+            prompt_raw = _caption_qwen(
+                focus_img,
+                model_path=QWEN_MODEL_FUSE_ROOT,
+                qwen_device=qwen_device,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+            )
+            prompt = _lane_prompt_from_qwen_output(prompt_raw)
 
-        if (i + 1) % 25 == 0:
-            logger.info("Processed %d/%d", i + 1, num_videos)
+            row = {
+                "image": f"images/{os.path.basename(out_img)}",
+                "mask": f"masks/{os.path.basename(out_mask)}",
+                "prompt": prompt,
+                "prompt_2": prompt,
+            }
+
+            # Upload image+mask immediately, then update train.csv on GCS.
+            _upload_file_to_gcs(fs, out_img, f"{remote_images_prefix}/{os.path.basename(out_img)}")
+            _upload_file_to_gcs(fs, out_mask, f"{remote_masks_prefix}/{os.path.basename(out_mask)}")
+
+            with open(csv_path, "a", newline="", encoding="utf-8") as f:
+                wri = csv.DictWriter(f, fieldnames=["image", "mask", "prompt", "prompt_2"])
+                wri.writerow(row)
+
+            # Overwrite remote CSV each time (simple + robust for resumability).
+            _upload_file_to_gcs(fs, csv_path, remote_csv_uri)
+
+            # Clean up local artifacts as we go to keep disk usage bounded.
+            try:
+                os.remove(mp4_path)
+            except Exception:
+                pass
+            try:
+                os.remove(out_img)
+            except Exception:
+                pass
+            try:
+                os.remove(out_mask)
+            except Exception:
+                pass
+
+            if (global_index + 1) % 25 == 0:
+                logger.info("Processed %d/%d", global_index + 1, num_videos)
+
+        # Delete the whole batch directory (should already be empty, but robust).
+        shutil.rmtree(batch_dir, ignore_errors=True)
 
     # If we processed at least one file, ensure train.csv is present remotely.
     _upload_file_to_gcs(fs, csv_path, remote_csv_uri)
@@ -719,6 +772,7 @@ def fluxfill_data_generation_wf(
     sam2_config_name: str = "configs/sam2.1/sam2.1_hiera_l.yaml",
     max_walk_files: int = 500000,
     sort_gcs_listing: bool = False,
+    download_batch_size: int = 100,
     output_run_id: Optional[str] = None,
 ) -> str:
     return generate_fluxfill_training_data(
@@ -731,5 +785,6 @@ def fluxfill_data_generation_wf(
         sam2_config_name=sam2_config_name,
         max_walk_files=max_walk_files,
         sort_gcs_listing=sort_gcs_listing,
+        download_batch_size=download_batch_size,
         output_run_id=output_run_id,
     )

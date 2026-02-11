@@ -8,13 +8,15 @@ REMOTE_IMAGE="europe-west4-docker.pkg.dev/mb-adas-2015-p-a4db/research/harimt_sa
 TEAM_SPACE="research"
 DOMAIN="prod"
 
-NUM_VIDEOS="100"
+NUM_VIDEOS="10000"
 START_INDEX="0"
-OUTPUT_RUN_ID="test_data_100_7b"
+OUTPUT_RUN_ID="test_data_10000_7b"
+
+DOWNLOAD_BATCH_SIZE="100"
 
 QWEN_DEVICE="cuda:0"
 SAM2_DEVICE="cuda:0"
-MAX_WALK_FILES="500"
+MAX_WALK_FILES="10000"
 
 # Ensure we run from the sam2 repo root (docker-compose.yaml lives there)
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -33,6 +35,7 @@ export FLUXFILL_DATA_CONTAINER_IMAGE="${REMOTE_IMAGE}"
 
 echo "Running HLX workflow: data_generation.fluxfill_data_generation_wf"
 echo "  NUM_VIDEOS=${NUM_VIDEOS} START_INDEX=${START_INDEX} OUTPUT_RUN_ID=${OUTPUT_RUN_ID}"
+echo "  DOWNLOAD_BATCH_SIZE=${DOWNLOAD_BATCH_SIZE}"
 
 hlx wf run \
 	--team-space "${TEAM_SPACE}" \
@@ -43,7 +46,8 @@ hlx wf run \
 	--output_run_id "${OUTPUT_RUN_ID}" \
 	--qwen_device "${QWEN_DEVICE}" \
 	--sam2_device "${SAM2_DEVICE}" \
-	--max_walk_files "${MAX_WALK_FILES}"
+	--max_walk_files "${MAX_WALK_FILES}" \
+	--download_batch_size "${DOWNLOAD_BATCH_SIZE}"
 
 echo "If successful, data is under:"
 echo "  gs://mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Video_inpainting/videopainter/training/data/${OUTPUT_RUN_ID}/"

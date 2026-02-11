@@ -10,7 +10,7 @@ TEAM_SPACE="research"
 DOMAIN="prod"
 
 # Input dataset (output of data_generation.py)
-INPUT_DIR="gs://mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Video_inpainting/videopainter/training/data/test_data_100_7b"
+INPUT_DIR="gs://mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Video_inpainting/videopainter/training/data/test_data_10000_7b"
 
 # Filtering instruction
 COUNT="single"      # single|double|unknown|any
@@ -18,7 +18,8 @@ COLOR="white"      # white|yellow|mixed|unknown|any
 PATTERN="solid"    # solid|dashed|mixed|unknown|any
 
 # Output naming
-SUFFIX="filtered"
+# Automatically name output by the filter instruction.
+SUFFIX="${COUNT}_${COLOR}_${PATTERN}"
 # If OUTPUT_DIR is empty, workflow writes to <INPUT_DIR>__<SUFFIX>
 OUTPUT_DIR=""
 
