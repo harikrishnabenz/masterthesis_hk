@@ -62,7 +62,7 @@ CONTAINER_IMAGE = os.environ.get("FLUXFILL_DATA_CONTAINER_IMAGE", CONTAINER_IMAG
 # --------------------------------------------------------------------------------------
 BUCKET = "mbadas-sandbox-research-9bb9c7f"
 
-SOURCE_GCS_PREFIX = "datasets/public/physical_ai_av/camera/camera_front_tele_30fov"
+SOURCE_GCS_PREFIX = "workspace/user/hbaskar/Video_inpainting/videopainter/training/data_physical_ai/camera_front_tele_30fov"
 DEST_GCS_PREFIX_BASE = "workspace/user/hbaskar/Video_inpainting/videopainter/training/data"
 
 QWEN_MODEL_GCS_PREFIX = "workspace/user/hbaskar/Video_inpainting/videopainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct"
@@ -172,13 +172,31 @@ def _list_mp4s_in_gcs_prefix(
     limit: int,
     max_list_files: int,
     sort_results: bool,
+    chunk_start: int = 0,
+    chunk_end: int = 200,
 ) -> list[str]:
     """List mp4 objects under gs://bucket/prefix and return a sliced list.
+
+    When chunk_start/chunk_end are provided, only searches chunk_XXXX folders
+    in that range (inclusive).
 
     Returns fully-qualified gs:// URIs.
     """
     fs = gcsfs.GCSFileSystem(token="google_default")
     root = f"{bucket}/{prefix.strip('/')}"
+
+    # Check if we're using chunk-based structure
+    if chunk_start is not None and chunk_end is not None:
+        logger.info("Using chunk-based listing: chunk_%04d to chunk_%04d", chunk_start, chunk_end)
+        return _list_mp4s_in_chunks(
+            fs=fs,
+            root=root,
+            chunk_start=chunk_start,
+            chunk_end=chunk_end,
+            start_index=start_index,
+            limit=limit,
+            sort_results=sort_results,
+        )
 
     # NOTE: Listing large prefixes in GCS can take a long time.
     # By default we *do not* sort, and we stop once we have enough results to
@@ -242,6 +260,49 @@ def _download_gcs_files(
         local_paths.append(local)
 
     return local_paths
+
+
+def _list_mp4s_in_chunks(
+    *,
+    fs: gcsfs.GCSFileSystem,
+    root: str,
+    chunk_start: int,
+    chunk_end: int,
+    start_index: int,
+    limit: int,
+    sort_results: bool,
+) -> list[str]:
+    """List mp4 files from chunk_XXXX folders in the specified range."""
+    needed = int(start_index) + int(limit)
+    if needed <= 0:
+        return []
+
+    all_paths: list[str] = []
+    
+    # Process chunks in order
+    for chunk_num in range(int(chunk_start), int(chunk_end) + 1):
+        chunk_folder = f"{root}/chunk_{chunk_num:04d}"
+        logger.info("Scanning chunk folder: %s", chunk_folder)
+        
+        try:
+            chunk_files = fs.find(chunk_folder)
+            mp4s = [p for p in chunk_files if p.lower().endswith(".mp4")]
+            all_paths.extend(mp4s)
+            logger.info("Found %d mp4s in %s (total so far: %d)", len(mp4s), chunk_folder, len(all_paths))
+            
+            # Early stop if we have enough files and not sorting
+            if not sort_results and len(all_paths) >= needed:
+                logger.info("Early stop: collected enough mp4s (%d >= %d)", len(all_paths), needed)
+                break
+        except FileNotFoundError:
+            logger.warning("Chunk folder not found: %s", chunk_folder)
+            continue
+
+    if sort_results:
+        all_paths.sort()
+
+    sliced = all_paths[int(start_index) : int(start_index) + int(limit)]
+    return [f"gs://{p}" for p in sliced]
 
 
 def _local_mp4_name_for_uri(uri: str, index: int) -> str:
@@ -617,6 +678,8 @@ def generate_fluxfill_training_data(
     sort_gcs_listing: bool = False,
     download_batch_size: int = 100,
     frame_numbers: str = "1,100,200,300,400,500",
+    chunk_start: int = 0,
+    chunk_end: int = 200,
     output_run_id: Optional[str] = None,
 ) -> str:
     logging.basicConfig(
@@ -705,6 +768,8 @@ def generate_fluxfill_training_data(
         limit=num_videos,
         max_list_files=max_walk_files,
         sort_results=bool(sort_gcs_listing),
+        chunk_start=chunk_start,
+        chunk_end=chunk_end,
     )
     if not mp4_uris:
         raise RuntimeError("No mp4 files found for the requested slice")
@@ -841,6 +906,8 @@ def fluxfill_data_generation_wf(
     sort_gcs_listing: bool = False,
     download_batch_size: int = 100,
     frame_numbers: str = "1,100,200,300,400,500",
+    chunk_start: int = 0,
+    chunk_end: int = 200,
     output_run_id: Optional[str] = None,
 ) -> str:
     return generate_fluxfill_training_data(
@@ -855,5 +922,7 @@ def fluxfill_data_generation_wf(
         sort_gcs_listing=sort_gcs_listing,
         download_batch_size=download_batch_size,
         frame_numbers=frame_numbers,
+        chunk_start=chunk_start,
+        chunk_end=chunk_end,
         output_run_id=output_run_id,
     )
