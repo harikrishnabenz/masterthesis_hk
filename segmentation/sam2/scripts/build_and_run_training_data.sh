@@ -16,7 +16,7 @@ DOWNLOAD_BATCH_SIZE="100"
 
 QWEN_DEVICE="cuda:0"
 SAM2_DEVICE="cuda:0"
-MAX_WALK_FILES="10000"
+MAX_WALK_FILES="1000000"
 
 # Ensure we run from the sam2 repo root (docker-compose.yaml lives there)
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
