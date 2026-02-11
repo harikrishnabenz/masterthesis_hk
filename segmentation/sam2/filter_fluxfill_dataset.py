@@ -90,6 +90,11 @@ CONFIG_COPY_MODE = "copy"  # copy|hardlink|symlink (GCS always uses copy)
 CONFIG_SORT = "prompt"  # prompt|image
 CONFIG_LIMIT = 0
 
+# Keep only *clear* lane markings (i.e. reject any prompts with unknown attributes).
+# This also implicitly excludes negative prompts like "no clear road with lane line markings"
+# because they don't match the normalized prompt regex.
+CONFIG_REQUIRE_CLEAR_ROAD = 1
+
 
 @dataclass(frozen=True)
 class LaneAttrs:
@@ -262,6 +267,17 @@ def parse_args() -> argparse.Namespace:
         help="If 1 (default), delete existing output_dir/prefix before writing",
     )
 
+    ap.add_argument(
+        "--require_clear_road",
+        type=int,
+        default=1,
+        choices=[0, 1],
+        help=(
+            "If 1 (default), keep only prompts with no 'unknown' lane attributes. "
+            "This yields only clear lane-marking samples and excludes negative prompts."
+        ),
+    )
+
     return ap.parse_args()
 
 
@@ -280,6 +296,7 @@ def _resolve_effective_args(args: argparse.Namespace) -> argparse.Namespace:
             (args.copy_mode != "copy"),
             (args.sort != "prompt"),
             bool(args.limit),
+            (int(getattr(args, "require_clear_road", 1) or 0) != 1),
         ]
     ):
         return args
@@ -293,7 +310,12 @@ def _resolve_effective_args(args: argparse.Namespace) -> argparse.Namespace:
     args.copy_mode = CONFIG_COPY_MODE
     args.sort = CONFIG_SORT
     args.limit = int(CONFIG_LIMIT)
+    args.require_clear_road = int(CONFIG_REQUIRE_CLEAR_ROAD)
     return args
+
+
+def _attrs_are_clear(a: LaneAttrs) -> bool:
+    return (a.count != "unknown") and (a.color != "unknown") and (a.pattern != "unknown")
 
 
 def run_filter(
@@ -308,6 +330,7 @@ def run_filter(
     sort: str = "prompt",
     limit: int = 0,
     clean_output: bool = True,
+    require_clear_road: bool = True,
     verbose: bool = True,
 ) -> str:
     """Filter a FluxFill dataset and write a new dataset folder.
@@ -370,6 +393,10 @@ def run_filter(
 
                 attrs = _parse_lane_attrs(prompt)
                 if attrs is None:
+                    skipped_bad_prompt += 1
+                    continue
+
+                if require_clear_road and not _attrs_are_clear(attrs):
                     skipped_bad_prompt += 1
                     continue
 
@@ -501,6 +528,10 @@ def run_filter(
                 skipped_bad_prompt += 1
                 continue
 
+            if require_clear_road and not _attrs_are_clear(attrs):
+                skipped_bad_prompt += 1
+                continue
+
             if wanted_count is not None and attrs.count != wanted_count:
                 continue
             if wanted_color is not None and attrs.color != wanted_color:
@@ -596,6 +627,7 @@ def main() -> None:
         sort=args.sort,
         limit=int(args.limit or 0),
         clean_output=bool(int(getattr(args, "clean_output", 1) or 0)),
+        require_clear_road=bool(int(getattr(args, "require_clear_road", 1) or 0)),
         verbose=True,
     )
 
@@ -637,6 +669,7 @@ if task is not None and workflow is not None and DedicatedNode is not None and N
         sort: str = "prompt",
         limit: int = 0,
         clean_output: int = 1,
+        require_clear_road: int = 1,
     ) -> str:
         """HLX task wrapper around `run_filter`.
 
@@ -655,6 +688,7 @@ if task is not None and workflow is not None and DedicatedNode is not None and N
             sort=sort,
             limit=int(limit or 0),
             clean_output=bool(int(clean_output or 0)),
+            require_clear_road=bool(int(require_clear_road or 0)),
             verbose=True,
         )
 
@@ -670,6 +704,7 @@ if task is not None and workflow is not None and DedicatedNode is not None and N
         sort: str = "prompt",
         limit: int = 0,
         clean_output: int = 1,
+        require_clear_road: int = 1,
     ) -> str:
         return filter_fluxfill_dataset_task(
             input_dir=input_dir,
@@ -681,6 +716,7 @@ if task is not None and workflow is not None and DedicatedNode is not None and N
             sort=sort,
             limit=limit,
             clean_output=clean_output,
+            require_clear_road=require_clear_road,
         )
 
 
