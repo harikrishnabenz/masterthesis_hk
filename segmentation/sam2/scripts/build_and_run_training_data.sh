@@ -14,6 +14,9 @@ OUTPUT_RUN_ID="training_data_clearroad_10000"
 
 DOWNLOAD_BATCH_SIZE="100"
 
+# Frame numbers (1-based) to extract per video. Comma-separated.
+FRAME_NUMBERS="1,100,200,300,400,500"
+
 QWEN_DEVICE="cuda:0"
 SAM2_DEVICE="cuda:0"
 
@@ -38,6 +41,7 @@ export FLUXFILL_DATA_CONTAINER_IMAGE="${REMOTE_IMAGE}"
 echo "Running HLX workflow: data_generation.fluxfill_data_generation_wf"
 echo "  NUM_VIDEOS=${NUM_VIDEOS} START_INDEX=${START_INDEX} OUTPUT_RUN_ID=${OUTPUT_RUN_ID}"
 echo "  DOWNLOAD_BATCH_SIZE=${DOWNLOAD_BATCH_SIZE}"
+echo "  FRAME_NUMBERS=${FRAME_NUMBERS}"
 
 hlx wf run \
 	--team-space "${TEAM_SPACE}" \
@@ -49,7 +53,8 @@ hlx wf run \
 	--qwen_device "${QWEN_DEVICE}" \
 	--sam2_device "${SAM2_DEVICE}" \
 	--max_walk_files "${MAX_WALK_FILES}" \
-	--download_batch_size "${DOWNLOAD_BATCH_SIZE}"
+	--download_batch_size "${DOWNLOAD_BATCH_SIZE}" \
+	--frame_numbers "${FRAME_NUMBERS}"
 
 echo "If successful, data is under:"
 echo "  gs://mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Video_inpainting/videopainter/training/data/${OUTPUT_RUN_ID}/"

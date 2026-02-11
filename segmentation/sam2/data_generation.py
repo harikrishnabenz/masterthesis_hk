@@ -8,7 +8,7 @@ Pipeline:
     2) Mount Qwen2.5-VL-* model (local HF folder, default: Qwen2.5-VL-7B-Instruct)
   3) Mount SAM2 checkpoint
   4) For N selected mp4s:
-     - extract first frame
+    - extract selected frames (by frame number)
      - generate mask using SAM2 (image predictor + fixed road-style points)
     - generate caption using Qwen2.5-VL model
   5) Write FluxFill training structure:
@@ -83,7 +83,15 @@ def _stable_id(path: str) -> str:
     return hashlib.sha1(path.encode("utf-8")).hexdigest()[:12]
 
 
-def _extract_first_frame_ffmpeg(video_path: str, out_png_path: str) -> None:
+def _extract_frame_ffmpeg(video_path: str, *, frame_number: int, out_png_path: str) -> None:
+    """Extract a specific frame (1-based) from a video into a PNG.
+
+    Uses ffmpeg's frame-index selector (0-based internally).
+    """
+    if int(frame_number) <= 0:
+        raise ValueError(f"frame_number must be >= 1, got {frame_number}")
+
+    frame0 = int(frame_number) - 1
     cmd = [
         "ffmpeg",
         "-hide_banner",
@@ -92,6 +100,10 @@ def _extract_first_frame_ffmpeg(video_path: str, out_png_path: str) -> None:
         "-y",
         "-i",
         video_path,
+        "-vf",
+        f"select=eq(n\\,{frame0})",
+        "-vsync",
+        "vfr",
         "-frames:v",
         "1",
         out_png_path,
@@ -103,6 +115,27 @@ def _extract_first_frame_ffmpeg(video_path: str, out_png_path: str) -> None:
     except subprocess.CalledProcessError as e:
         err = (e.stderr or "").strip()
         raise RuntimeError(f"ffmpeg failed for {video_path}: {err}")
+
+
+def _parse_frame_numbers_csv(frame_numbers: str | None) -> list[int]:
+    """Parse a comma-separated list of 1-based frame numbers.
+
+    Empty/None => [1].
+    """
+    s = (frame_numbers or "").strip()
+    if not s:
+        return [1]
+    out: list[int] = []
+    for part in s.split(","):
+        p = part.strip()
+        if not p:
+            continue
+        n = int(p)
+        if n <= 0:
+            raise ValueError(f"Invalid frame number '{p}' (must be >= 1)")
+        out.append(n)
+    # deterministic order + avoid duplicates
+    return sorted(set(out))
 
 
 def _upload_directory_to_gcs(local_dir: str, gcs_prefix: str) -> None:
@@ -583,6 +616,7 @@ def generate_fluxfill_training_data(
     max_walk_files: int = 0,
     sort_gcs_listing: bool = False,
     download_batch_size: int = 100,
+    frame_numbers: str = "1,100,200,300,400,500",
     output_run_id: Optional[str] = None,
 ) -> str:
     logging.basicConfig(
@@ -597,6 +631,10 @@ def generate_fluxfill_training_data(
         raise ValueError("start_index must be >= 0")
     if int(download_batch_size) <= 0:
         raise ValueError("download_batch_size must be > 0")
+
+    frames = _parse_frame_numbers_csv(frame_numbers)
+    if not frames:
+        raise ValueError("frame_numbers resolved to empty")
 
     run_id = (output_run_id or datetime.utcnow().strftime("fluxfill_%Y%m%d_%H%M%S")).strip()
     if not run_id:
@@ -677,6 +715,7 @@ def generate_fluxfill_training_data(
         len(mp4_uris),
         batch_size,
     )
+    logger.info("Per-video frames: %s", ",".join(str(x) for x in frames))
 
     for batch_start in range(0, len(mp4_uris), batch_size):
         batch_uris = mp4_uris[batch_start : batch_start + batch_size]
@@ -699,67 +738,86 @@ def generate_fluxfill_training_data(
             fs.get(remote, local_mp4)
             local_batch.append((global_index, uri, local_mp4))
 
+        processed_rows = 0
         for global_index, uri, mp4_path in local_batch:
             sid = _stable_id(uri)
-            out_img = os.path.join(images_dir, f"{global_index:06d}_{sid}.png")
-            out_mask = os.path.join(masks_dir, f"{global_index:06d}_{sid}.png")
 
-            _extract_first_frame_ffmpeg(mp4_path, out_img)
-            pil_img = Image.open(out_img).convert("RGB")
+            for frame_number in frames:
+                out_base = f"{global_index:06d}_f{int(frame_number):04d}_{sid}.png"
+                out_img = os.path.join(images_dir, out_base)
+                out_mask = os.path.join(masks_dir, out_base)
 
-            mask = _sam2_road_mask(
-                pil_img,
-                ckpt_path=sam2_checkpoint_path,
-                config_name=sam2_config_name,
-                device=sam2_device,
-            )
-            mask.save(out_mask)
+                try:
+                    _extract_frame_ffmpeg(mp4_path, frame_number=int(frame_number), out_png_path=out_img)
+                except Exception as e:
+                    # Short videos may not have all requested frames.
+                    logger.warning("Skipping %s frame %s: %s", uri, frame_number, e)
+                    try:
+                        if os.path.exists(out_img):
+                            os.remove(out_img)
+                    except Exception:
+                        pass
+                    continue
 
-            focus_img = _focus_image_to_mask(pil_img, mask)
+                pil_img = Image.open(out_img).convert("RGB")
 
-            prompt_raw = _caption_qwen(
-                focus_img,
-                model_path=QWEN_MODEL_FUSE_ROOT,
-                qwen_device=qwen_device,
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-            )
-            prompt = _lane_prompt_from_qwen_output(prompt_raw)
+                mask = _sam2_road_mask(
+                    pil_img,
+                    ckpt_path=sam2_checkpoint_path,
+                    config_name=sam2_config_name,
+                    device=sam2_device,
+                )
+                mask.save(out_mask)
 
-            row = {
-                "image": f"images/{os.path.basename(out_img)}",
-                "mask": f"masks/{os.path.basename(out_mask)}",
-                "prompt": prompt,
-                "prompt_2": prompt,
-            }
+                focus_img = _focus_image_to_mask(pil_img, mask)
 
-            # Upload image+mask immediately, then update train.csv on GCS.
-            _upload_file_to_gcs(fs, out_img, f"{remote_images_prefix}/{os.path.basename(out_img)}")
-            _upload_file_to_gcs(fs, out_mask, f"{remote_masks_prefix}/{os.path.basename(out_mask)}")
+                prompt_raw = _caption_qwen(
+                    focus_img,
+                    model_path=QWEN_MODEL_FUSE_ROOT,
+                    qwen_device=qwen_device,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                )
+                prompt = _lane_prompt_from_qwen_output(prompt_raw)
 
-            with open(csv_path, "a", newline="", encoding="utf-8") as f:
-                wri = csv.DictWriter(f, fieldnames=["image", "mask", "prompt", "prompt_2"])
-                wri.writerow(row)
+                row = {
+                    "image": f"images/{os.path.basename(out_img)}",
+                    "mask": f"masks/{os.path.basename(out_mask)}",
+                    "prompt": prompt,
+                    "prompt_2": prompt,
+                }
 
-            # Overwrite remote CSV each time (simple + robust for resumability).
-            _upload_file_to_gcs(fs, csv_path, remote_csv_uri)
+                # Upload image+mask immediately, then update train.csv on GCS.
+                _upload_file_to_gcs(fs, out_img, f"{remote_images_prefix}/{os.path.basename(out_img)}")
+                _upload_file_to_gcs(fs, out_mask, f"{remote_masks_prefix}/{os.path.basename(out_mask)}")
 
-            # Clean up local artifacts as we go to keep disk usage bounded.
+                with open(csv_path, "a", newline="", encoding="utf-8") as f:
+                    wri = csv.DictWriter(f, fieldnames=["image", "mask", "prompt", "prompt_2"])
+                    wri.writerow(row)
+
+                # Overwrite remote CSV each time (simple + robust for resumability).
+                _upload_file_to_gcs(fs, csv_path, remote_csv_uri)
+
+                processed_rows += 1
+
+                # Clean up local artifacts as we go to keep disk usage bounded.
+                try:
+                    os.remove(out_img)
+                except Exception:
+                    pass
+                try:
+                    os.remove(out_mask)
+                except Exception:
+                    pass
+
+            # After all frames for this mp4, delete the local video.
             try:
                 os.remove(mp4_path)
             except Exception:
                 pass
-            try:
-                os.remove(out_img)
-            except Exception:
-                pass
-            try:
-                os.remove(out_mask)
-            except Exception:
-                pass
 
-            if (global_index + 1) % 25 == 0:
-                logger.info("Processed %d/%d", global_index + 1, num_videos)
+            if processed_rows and (processed_rows % 50 == 0):
+                logger.info("Processed %d rows in current batch", processed_rows)
 
         # Delete the whole batch directory (should already be empty, but robust).
         shutil.rmtree(batch_dir, ignore_errors=True)
@@ -782,6 +840,7 @@ def fluxfill_data_generation_wf(
     max_walk_files: int = 0,
     sort_gcs_listing: bool = False,
     download_batch_size: int = 100,
+    frame_numbers: str = "1,100,200,300,400,500",
     output_run_id: Optional[str] = None,
 ) -> str:
     return generate_fluxfill_training_data(
@@ -795,5 +854,6 @@ def fluxfill_data_generation_wf(
         max_walk_files=max_walk_files,
         sort_gcs_listing=sort_gcs_listing,
         download_batch_size=download_batch_size,
+        frame_numbers=frame_numbers,
         output_run_id=output_run_id,
     )
