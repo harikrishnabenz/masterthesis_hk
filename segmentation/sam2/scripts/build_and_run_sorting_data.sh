@@ -10,7 +10,7 @@ TEAM_SPACE="research"
 DOMAIN="prod"
 
 # Input dataset (output of data_generation.py)
-INPUT_DIR="gs://mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Video_inpainting/videopainter/training/data/training_data_10000_clearroad"
+INPUT_DIR="gs://mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Video_inpainting/videopainter/training/data/training_data_clearroad_10000"
 
 # Filtering instruction
 COUNT="single"      # single|double|unknown|any
