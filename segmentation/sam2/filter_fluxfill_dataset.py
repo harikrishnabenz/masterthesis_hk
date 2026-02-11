@@ -254,6 +254,14 @@ def parse_args() -> argparse.Namespace:
         help="If >0, keep at most this many rows (after filtering)",
     )
 
+    ap.add_argument(
+        "--clean_output",
+        type=int,
+        default=1,
+        choices=[0, 1],
+        help="If 1 (default), delete existing output_dir/prefix before writing",
+    )
+
     return ap.parse_args()
 
 
@@ -299,6 +307,7 @@ def run_filter(
     copy_mode: str = "copy",
     sort: str = "prompt",
     limit: int = 0,
+    clean_output: bool = True,
     verbose: bool = True,
 ) -> str:
     """Filter a FluxFill dataset and write a new dataset folder.
@@ -401,10 +410,12 @@ def run_filter(
             stage_images.mkdir(parents=True, exist_ok=True)
             stage_masks.mkdir(parents=True, exist_ok=True)
 
+            staged_rows: list[dict[str, str]] = []
             for r in rows:
                 img_rel = (r.get("image") or "").strip()
                 msk_rel = (r.get("mask") or "").strip()
                 if not img_rel or not msk_rel:
+                    skipped_missing_files += 1
                     continue
 
                 src_img = _join_gcs(bucket_in, key_in, img_rel)
@@ -420,16 +431,27 @@ def run_filter(
                     skipped_missing_files += 1
                     continue
 
-                r["image"] = f"images/{dst_img.name}"
-                r["mask"] = f"masks/{dst_msk.name}"
+                staged_rows.append(
+                    {
+                        "image": f"images/{dst_img.name}",
+                        "mask": f"masks/{dst_msk.name}",
+                        "prompt": (r.get("prompt") or "").strip(),
+                        "prompt_2": (r.get("prompt_2") or "").strip(),
+                    }
+                )
 
             stage_csv = stage_root / "train.csv"
             with stage_csv.open("w", newline="", encoding="utf-8") as f:
                 w = csv.DictWriter(f, fieldnames=["image", "mask", "prompt", "prompt_2"])
                 w.writeheader()
-                w.writerows(rows)
+                w.writerows(staged_rows)
 
             out_prefix = _join_gcs(bucket_out, key_out, "")
+
+            # Make the output prefix contain ONLY this run's selected subset.
+            if clean_output and fs.exists(out_prefix):
+                fs.rm(out_prefix, recursive=True)
+
             _upload_directory_to_gcs(fs=fs, local_dir=stage_root, gcs_prefix=out_prefix)
 
         if verbose:
@@ -439,7 +461,7 @@ def run_filter(
                         f"Input: gs://{bucket_in}/{key_in}",
                         f"Output: gs://{bucket_out}/{key_out}",
                         f"Wrote: gs://{bucket_out}/{key_out}/train.csv",
-                        f"Rows kept: {len(rows)}",
+                        f"Rows kept: {len(staged_rows)}",
                         f"Skipped (bad prompt format): {skipped_bad_prompt}",
                         f"Skipped (missing files): {skipped_missing_files}",
                     ]
@@ -450,6 +472,9 @@ def run_filter(
     # Local filesystem mode
     input_path = Path(input_dir).expanduser().resolve()
     output_path = Path(output_dir_str).expanduser().resolve()
+
+    if clean_output and output_path.exists():
+        shutil.rmtree(output_path)
 
     in_csv = input_path / "train.csv"
     if not in_csv.exists():
@@ -570,6 +595,7 @@ def main() -> None:
         copy_mode=args.copy_mode,
         sort=args.sort,
         limit=int(args.limit or 0),
+        clean_output=bool(int(getattr(args, "clean_output", 1) or 0)),
         verbose=True,
     )
 
@@ -610,6 +636,7 @@ if task is not None and workflow is not None and DedicatedNode is not None and N
         pattern: str = "any",
         sort: str = "prompt",
         limit: int = 0,
+        clean_output: int = 1,
     ) -> str:
         """HLX task wrapper around `run_filter`.
 
@@ -627,6 +654,7 @@ if task is not None and workflow is not None and DedicatedNode is not None and N
             copy_mode="copy",
             sort=sort,
             limit=int(limit or 0),
+            clean_output=bool(int(clean_output or 0)),
             verbose=True,
         )
 
@@ -641,6 +669,7 @@ if task is not None and workflow is not None and DedicatedNode is not None and N
         pattern: str = "any",
         sort: str = "prompt",
         limit: int = 0,
+        clean_output: int = 1,
     ) -> str:
         return filter_fluxfill_dataset_task(
             input_dir=input_dir,
@@ -651,6 +680,7 @@ if task is not None and workflow is not None and DedicatedNode is not None and N
             pattern=pattern,
             sort=sort,
             limit=limit,
+            clean_output=clean_output,
         )
 
 

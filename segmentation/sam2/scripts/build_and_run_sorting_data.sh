@@ -19,7 +19,7 @@ PATTERN="solid"    # solid|dashed|mixed|unknown|any
 
 # Output naming
 # Automatically name output by the filter instruction.
-SUFFIX="${COUNT}_${COLOR}_${PATTERN}"
+SUFFIX="${COUNT}_${COLOR}_${PATTERN}_10000"
 # If OUTPUT_DIR is empty, workflow writes to <INPUT_DIR>__<SUFFIX>
 OUTPUT_DIR=""
 
