@@ -8,11 +8,12 @@ REMOTE_IMAGE="europe-west4-docker.pkg.dev/mb-adas-2015-p-a4db/research/harimt_sa
 TEAM_SPACE="research"
 DOMAIN="prod"
 
+# Source GCS prefix (chunk-based folder structure)
+SOURCE_GCS_PREFIX="workspace/user/hbaskar/Video_inpainting/videopainter/training/data_physical_ai/camera_front_tele_30fov"
+
 NUM_VIDEOS="10000"
 START_INDEX="0"
 OUTPUT_RUN_ID="trainingdata_chunk199"
-
-DOWNLOAD_BATCH_SIZE="100"
 
 # Frame numbers (1-based) to extract per video. Comma-separated.
 FRAME_NUMBERS="1,100,200,300,400,500"
@@ -44,8 +45,8 @@ export SAM2_CONTAINER_IMAGE="${REMOTE_IMAGE}"
 export FLUXFILL_DATA_CONTAINER_IMAGE="${REMOTE_IMAGE}"
 
 echo "Running HLX workflow: data_generation.fluxfill_data_generation_wf"
+echo "  SOURCE_GCS_PREFIX=${SOURCE_GCS_PREFIX}"
 echo "  NUM_VIDEOS=${NUM_VIDEOS} START_INDEX=${START_INDEX} OUTPUT_RUN_ID=${OUTPUT_RUN_ID}"
-echo "  DOWNLOAD_BATCH_SIZE=${DOWNLOAD_BATCH_SIZE}"
 echo "  FRAME_NUMBERS=${FRAME_NUMBERS}"
 echo "  CHUNK_START=${CHUNK_START} CHUNK_END=${CHUNK_END}"
 
@@ -53,13 +54,13 @@ hlx wf run \
 	--team-space "${TEAM_SPACE}" \
 	--domain "${DOMAIN}" \
 	data_generation.fluxfill_data_generation_wf \
+	--source_gcs_prefix "${SOURCE_GCS_PREFIX}" \
 	--num_videos "${NUM_VIDEOS}" \
 	--start_index "${START_INDEX}" \
 	--output_run_id "${OUTPUT_RUN_ID}" \
 	--qwen_device "${QWEN_DEVICE}" \
 	--sam2_device "${SAM2_DEVICE}" \
 	--max_walk_files "${MAX_WALK_FILES}" \
-	--download_batch_size "${DOWNLOAD_BATCH_SIZE}" \
 	--frame_numbers "${FRAME_NUMBERS}" \
 	--chunk_start "${CHUNK_START}" \
 	--chunk_end "${CHUNK_END}"

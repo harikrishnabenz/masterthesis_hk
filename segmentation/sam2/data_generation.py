@@ -667,6 +667,7 @@ def generate_fluxfill_training_data(
     num_videos: int = 200,
     start_index: int = 0,
     seed: int = 42,
+    source_gcs_prefix: str = SOURCE_GCS_PREFIX,
     # Single-GPU defaults (A100 80GB): run both on the same GPU.
     # Qwen may still offload some weights/states to CPU depending on available VRAM.
     qwen_device: str = "cuda:0",
@@ -755,56 +756,74 @@ def generate_fluxfill_training_data(
 
     # List + download only the requested slice of mp4s.
     logger.info(
-        "Listing mp4s in gs://%s/%s (start_index=%d, num_videos=%d)",
+        "Listing mp4s in gs://%s/%s (start_index=%d, num_videos=%d, chunk_start=%d, chunk_end=%d)",
         BUCKET,
-        SOURCE_GCS_PREFIX,
+        source_gcs_prefix,
         int(start_index),
         int(num_videos),
+        int(chunk_start),
+        int(chunk_end),
     )
-    mp4_uris = _list_mp4s_in_gcs_prefix(
-        bucket=BUCKET,
-        prefix=SOURCE_GCS_PREFIX,
-        start_index=start_index,
-        limit=num_videos,
-        max_list_files=max_walk_files,
-        sort_results=bool(sort_gcs_listing),
-        chunk_start=chunk_start,
-        chunk_end=chunk_end,
-    )
-    if not mp4_uris:
-        raise RuntimeError("No mp4 files found for the requested slice")
-
-    batch_size = int(download_batch_size)
-    logger.info(
-        "Processing %d videos in batches of %d (download -> process -> upload -> delete local batch)",
-        len(mp4_uris),
-        batch_size,
-    )
-    logger.info("Per-video frames: %s", ",".join(str(x) for x in frames))
-
-    for batch_start in range(0, len(mp4_uris), batch_size):
-        batch_uris = mp4_uris[batch_start : batch_start + batch_size]
-        batch_dir = os.path.join(videos_dir, f"batch_{batch_start:06d}")
-        Path(batch_dir).mkdir(parents=True, exist_ok=True)
-
-        logger.info(
-            "Downloading batch %d-%d (size=%d) to %s",
-            batch_start,
-            min(batch_start + len(batch_uris) - 1, len(mp4_uris) - 1),
-            len(batch_uris),
-            batch_dir,
-        )
-
-        local_batch: list[tuple[int, str, str]] = []
-        for j, uri in enumerate(batch_uris):
-            global_index = batch_start + j
-            remote = uri[len("gs://") :] if uri.startswith("gs://") else uri
-            local_mp4 = os.path.join(batch_dir, _local_mp4_name_for_uri(uri, global_index))
+    
+    # Process chunk-by-chunk: download chunk → process → upload → delete → next chunk
+    fs = gcsfs.GCSFileSystem(token="google_default")
+    root = f"{BUCKET}/{source_gcs_prefix.strip('/')}"
+    
+    total_processed = 0
+    start_idx = int(start_index)
+    limit = int(num_videos)
+    
+    for chunk_num in range(int(chunk_start), int(chunk_end) + 1):
+        if total_processed >= limit:
+            logger.info("Reached video limit (%d), stopping chunk iteration", limit)
+            break
+            
+        chunk_folder = f"{root}/chunk_{chunk_num:04d}"
+        logger.info("=" * 80)
+        logger.info("Processing chunk: %s (chunk %d/%d)", chunk_folder, chunk_num - chunk_start + 1, chunk_end - chunk_start + 1)
+        logger.info("=" * 80)
+        
+        try:
+            chunk_files = fs.find(chunk_folder)
+            chunk_mp4s = [f"gs://{p}" for p in chunk_files if p.lower().endswith(".mp4")]
+            logger.info("Found %d mp4s in chunk_%04d", len(chunk_mp4s), chunk_num)
+            
+            if not chunk_mp4s:
+                logger.warning("No mp4s in chunk_%04d, skipping", chunk_num)
+                continue
+                
+            # Apply start_index and limit within this chunk
+            remaining = limit - total_processed
+            chunk_to_process = chunk_mp4s[start_idx:start_idx + remaining] if start_idx > 0 else chunk_mp4s[:remaining]
+            start_idx = max(0, start_idx - len(chunk_mp4s))  # Decrement for next chunk
+            
+            if not chunk_to_process:
+                logger.info("No videos to process from chunk_%04d after applying start_index/limit", chunk_num)
+                continue
+                
+        except FileNotFoundError:
+            logger.warning("Chunk folder not found: %s", chunk_folder)
+            continue
+        
+        # Download this chunk's videos
+        chunk_dir = os.path.join(videos_dir, f"chunk_{chunk_num:04d}")
+        Path(chunk_dir).mkdir(parents=True, exist_ok=True)
+        
+        logger.info("Downloading %d videos from chunk_%04d to %s", len(chunk_to_process), chunk_num, chunk_dir)
+        
+        local_videos: list[tuple[int, str, str]] = []
+        for j, uri in enumerate(chunk_to_process):
+            global_index = total_processed + j
+            remote = uri[len("gs://"):] if uri.startswith("gs://") else uri
+            local_mp4 = os.path.join(chunk_dir, _local_mp4_name_for_uri(uri, global_index))
             fs.get(remote, local_mp4)
-            local_batch.append((global_index, uri, local_mp4))
-
-        processed_rows = 0
-        for global_index, uri, mp4_path in local_batch:
+            local_videos.append((global_index, uri, local_mp4))
+        
+        logger.info("Processing %d videos from chunk_%04d (frames: %s)", len(local_videos), chunk_num, ",".join(str(f) for f in frames))
+        
+        # Process each video in this chunk
+        chunk_rows = 0
+        for global_index, uri, mp4_path in local_videos:
             sid = _stable_id(uri)
 
             for frame_number in frames:
@@ -863,7 +882,7 @@ def generate_fluxfill_training_data(
                 # Overwrite remote CSV each time (simple + robust for resumability).
                 _upload_file_to_gcs(fs, csv_path, remote_csv_uri)
 
-                processed_rows += 1
+                chunk_rows += 1
 
                 # Clean up local artifacts as we go to keep disk usage bounded.
                 try:
@@ -881,15 +900,22 @@ def generate_fluxfill_training_data(
             except Exception:
                 pass
 
-            if processed_rows and (processed_rows % 50 == 0):
-                logger.info("Processed %d rows in current batch", processed_rows)
+            if chunk_rows and (chunk_rows % 50 == 0):
+                logger.info("Processed %d rows in chunk_%04d so far", chunk_rows, chunk_num)
 
-        # Delete the whole batch directory (should already be empty, but robust).
-        shutil.rmtree(batch_dir, ignore_errors=True)
+        # Delete the whole chunk directory (should already be empty, but robust).
+        shutil.rmtree(chunk_dir, ignore_errors=True)
+        
+        total_processed += len(chunk_to_process)
+        logger.info("Finished chunk_%04d: processed %d videos (%d total so far)", chunk_num, len(chunk_to_process), total_processed)
 
     # If we processed at least one file, ensure train.csv is present remotely.
-    _upload_file_to_gcs(fs, csv_path, remote_csv_uri)
-    logger.info("Upload complete (incremental): %s", dest_prefix)
+    if total_processed > 0:
+        _upload_file_to_gcs(fs, csv_path, remote_csv_uri)
+        logger.info("Upload complete (incremental): %s (processed %d videos)", dest_prefix, total_processed)
+    else:
+        raise RuntimeError("No videos were processed from any chunks")
+        
     return dest_prefix + "/"
 
 
@@ -898,6 +924,7 @@ def fluxfill_data_generation_wf(
     num_videos: int = 200,
     start_index: int = 0,
     seed: int = 42,
+    source_gcs_prefix: str = SOURCE_GCS_PREFIX,
     qwen_device: str = "cuda:0",
     sam2_device: str = "cuda:0",
     sam2_checkpoint_path: str = SAM2_CHECKPOINT_MOUNTED_PATH,
@@ -914,6 +941,7 @@ def fluxfill_data_generation_wf(
         num_videos=num_videos,
         start_index=start_index,
         seed=seed,
+        source_gcs_prefix=source_gcs_prefix,
         qwen_device=qwen_device,
         sam2_device=sam2_device,
         sam2_checkpoint_path=sam2_checkpoint_path,
