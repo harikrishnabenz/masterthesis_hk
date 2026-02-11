@@ -5,12 +5,12 @@ installation + configs in this repo.
 
 Pipeline:
     1) List + download a slice of mp4s from GCS
-  2) Mount Qwen2.5-VL-72B-Instruct (local HF folder)
+    2) Mount Qwen2.5-VL-* model (local HF folder, default: Qwen2.5-VL-7B-Instruct)
   3) Mount SAM2 checkpoint
   4) For N selected mp4s:
      - extract first frame
      - generate mask using SAM2 (image predictor + fixed road-style points)
-     - generate caption using Qwen2.5-VL-72B
+    - generate caption using Qwen2.5-VL model
   5) Write FluxFill training structure:
        images/*.png
        masks/*.png
@@ -64,9 +64,9 @@ BUCKET = "mbadas-sandbox-research-9bb9c7f"
 SOURCE_GCS_PREFIX = "datasets/public/physical_ai_av/camera/camera_front_tele_30fov"
 DEST_GCS_PREFIX_BASE = "workspace/user/hbaskar/Video_inpainting/videopainter/training/data"
 
-VLM_72B_GCS_PREFIX = "workspace/user/hbaskar/Video_inpainting/videopainter/vlm/Qwen2.5-VL-72B-Instruct"
-VLM_72B_FUSE_NAME = "vlm-72b"
-VLM_72B_FUSE_ROOT = os.path.join(MOUNTPOINT, VLM_72B_FUSE_NAME)
+QWEN_MODEL_GCS_PREFIX = "workspace/user/hbaskar/Video_inpainting/videopainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct"
+QWEN_MODEL_FUSE_NAME = "vlm-7b"
+QWEN_MODEL_FUSE_ROOT = os.path.join(MOUNTPOINT, QWEN_MODEL_FUSE_NAME)
 
 SAM2_CHECKPOINT_GCS_PREFIX = "workspace/user/hbaskar/Video_inpainting/sam2_checkpoint"
 SAM2_FUSE_NAME = "sam2-checkpoints"
@@ -137,6 +137,7 @@ def _list_mp4s_in_gcs_prefix(
     start_index: int,
     limit: int,
     max_list_files: int,
+    sort_results: bool,
 ) -> list[str]:
     """List mp4 objects under gs://bucket/prefix and return a sliced list.
 
@@ -145,16 +146,37 @@ def _list_mp4s_in_gcs_prefix(
     fs = gcsfs.GCSFileSystem(token="google_default")
     root = f"{bucket}/{prefix.strip('/')}"
 
-    # fs.find can return a lot; cap the scan for safety.
+    # NOTE: Listing large prefixes in GCS can take a long time.
+    # By default we *do not* sort, and we stop once we have enough results to
+    # cover the requested slice. This makes the job start processing quickly.
+    # If you need deterministic, lexicographically-sorted selection, set
+    # sort_results=True (slower; requires scanning up to max_list_files).
+
+    needed = int(start_index) + int(limit)
+    if needed <= 0:
+        return []
+
     all_paths: list[str] = []
+    scanned = 0
     for i, p in enumerate(fs.find(root)):
-        if i >= int(max_list_files):
+        scanned = i + 1
+        if scanned >= int(max_list_files):
             logger.warning("Reached max_list_files=%d while listing %s", int(max_list_files), root)
             break
-        if p.lower().endswith(".mp4"):
-            all_paths.append(p)
+        if not p.lower().endswith(".mp4"):
+            continue
+        all_paths.append(p)
 
-    all_paths.sort()
+        # Fast path: once we have enough mp4s to cover the slice, stop.
+        if not sort_results and len(all_paths) >= needed:
+            break
+
+        if scanned % 50000 == 0:
+            logger.info("Listing %s: scanned=%d, mp4s_found=%d", root, scanned, len(all_paths))
+
+    if sort_results:
+        all_paths.sort()
+
     sliced = all_paths[int(start_index) : int(start_index) + int(limit)]
     return [f"gs://{p}" for p in sliced]
 
@@ -285,34 +307,70 @@ def _caption_qwen(
 
 def _lane_prompt_from_qwen_output(text: str) -> str:
     """Normalize Qwen output into a prompt that always includes lane attributes."""
+    import re
+
     t = (text or "").strip()
     if not t:
-        return "road with unknown lane markings"
+        return "road with unknown unknown unknown lane markings"
 
-    # Prefer strict JSON outputs if the model followed instructions.
+    def _norm(val: str, allowed: set[str]) -> str:
+        val = (val or "").strip().lower()
+        return val if val in allowed else "unknown"
+
+    def _format(count: str, color: str, pattern: str) -> str:
+        count = _norm(count, {"single", "double", "unknown"})
+        pattern = _norm(pattern, {"solid", "dashed", "mixed", "unknown"})
+        color = _norm(color, {"white", "yellow", "mixed", "unknown"})
+        return f"road with {count} {color} {pattern} lane markings"
+
+    def _strip_markdown_fences(s: str) -> str:
+        # Handles e.g. ```json\n{...}\n``` or ```\n{...}\n```
+        s = s.strip()
+        if "```" not in s:
+            return s
+        # Remove all backtick fences but keep inner content.
+        s = re.sub(r"^```(?:json)?\s*", "", s, flags=re.IGNORECASE)
+        s = re.sub(r"\s*```$", "", s)
+        return s.strip()
+
+    def _extract_json_object(s: str) -> str | None:
+        # Extract the first {...} block if the model emitted surrounding text.
+        start = s.find("{")
+        end = s.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return None
+        return s[start : end + 1].strip()
+
+    cleaned = _strip_markdown_fences(t)
+    json_candidate = _extract_json_object(cleaned) or cleaned
+
+    # Prefer strict JSON outputs.
     try:
-        payload = json.loads(t)
+        payload = json.loads(json_candidate)
         if isinstance(payload, dict):
-            count = str(payload.get("lane_marking_count", "unknown")).strip().lower() or "unknown"
-            pattern = str(payload.get("lane_marking_pattern", "unknown")).strip().lower() or "unknown"
-            color = str(payload.get("lane_marking_color", "unknown")).strip().lower() or "unknown"
-
-            # Keep values in a tight vocabulary to avoid prompt drift.
-            def _norm(val: str, allowed: set[str]) -> str:
-                val = (val or "").strip().lower()
-                return val if val in allowed else "unknown"
-
-            count = _norm(count, {"single", "double", "unknown"})
-            pattern = _norm(pattern, {"solid", "dashed", "mixed", "unknown"})
-            color = _norm(color, {"white", "yellow", "mixed", "unknown"})
-
-            return f"road with {count} {color} {pattern} lane markings"
+            return _format(
+                str(payload.get("lane_marking_count", "unknown")),
+                str(payload.get("lane_marking_color", "unknown")),
+                str(payload.get("lane_marking_pattern", "unknown")),
+            )
     except Exception:
         pass
 
-    # Fallback: ensure we still bias the prompt toward lane descriptions.
-    # Keep it short and road-focused.
-    return f"road lane markings: {t}"[:200]
+    # Regex fallback: works even if the model returns a pseudo-JSON / prose blob.
+    # Example matches: lane_marking_count: single / "lane_marking_pattern" = "dashed".
+    blob = cleaned
+    m_count = re.search(r"lane_marking_count\s*[:=]\s*['\"]?(single|double|unknown)", blob, flags=re.IGNORECASE)
+    m_pattern = re.search(r"lane_marking_pattern\s*[:=]\s*['\"]?(solid|dashed|mixed|unknown)", blob, flags=re.IGNORECASE)
+    m_color = re.search(r"lane_marking_color\s*[:=]\s*['\"]?(white|yellow|mixed|unknown)", blob, flags=re.IGNORECASE)
+    if m_count or m_pattern or m_color:
+        return _format(
+            (m_count.group(1) if m_count else "unknown"),
+            (m_color.group(1) if m_color else "unknown"),
+            (m_pattern.group(1) if m_pattern else "unknown"),
+        )
+
+    # Final fallback: unknown, but keep the output clean (no code fences).
+    return "road with unknown unknown unknown lane markings"
 
 
 # --------------------------------------------------------------------------------------
@@ -493,7 +551,7 @@ def _focus_image_to_mask(image_rgb: Image.Image, mask_l: Image.Image) -> Image.I
         "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
     },
     mounts=[
-        FuseBucket(bucket=BUCKET, name=VLM_72B_FUSE_NAME, prefix=VLM_72B_GCS_PREFIX),
+        FuseBucket(bucket=BUCKET, name=QWEN_MODEL_FUSE_NAME, prefix=QWEN_MODEL_GCS_PREFIX),
         FuseBucket(bucket=BUCKET, name=SAM2_FUSE_NAME, prefix=SAM2_CHECKPOINT_GCS_PREFIX),
     ],
 )
@@ -509,6 +567,7 @@ def generate_fluxfill_training_data(
     sam2_checkpoint_path: str = SAM2_CHECKPOINT_MOUNTED_PATH,
     sam2_config_name: str = "configs/sam2.1/sam2.1_hiera_l.yaml",
     max_walk_files: int = 500000,
+    sort_gcs_listing: bool = False,
     output_run_id: Optional[str] = None,
 ) -> str:
     logging.basicConfig(
@@ -527,14 +586,14 @@ def generate_fluxfill_training_data(
         raise ValueError("output_run_id resolved to empty")
 
     # Prefetch metadata best-effort
-    for p in (VLM_72B_FUSE_ROOT, SAM2_FUSE_ROOT):
+    for p in (QWEN_MODEL_FUSE_ROOT, SAM2_FUSE_ROOT):
         try:
             fuse_prefetch_metadata(p)
         except Exception as e:
             logger.warning("Prefetch failed (non-fatal) for %s: %s", p, e)
 
-    if not os.path.isdir(VLM_72B_FUSE_ROOT):
-        raise FileNotFoundError(f"Qwen model mount missing: {VLM_72B_FUSE_ROOT}")
+    if not os.path.isdir(QWEN_MODEL_FUSE_ROOT):
+        raise FileNotFoundError(f"Qwen model mount missing: {QWEN_MODEL_FUSE_ROOT}")
     if not os.path.exists(sam2_checkpoint_path):
         raise FileNotFoundError(f"SAM2 checkpoint missing: {sam2_checkpoint_path}")
 
@@ -550,6 +609,7 @@ def generate_fluxfill_training_data(
         "You are a driving scene labeling assistant. "
         "You only describe lane markings on the road surface. "
         "Return ONLY valid JSON with keys: lane_marking_count, lane_marking_pattern, lane_marking_color. "
+        "Do NOT wrap the JSON in Markdown, code fences, or backticks. "
         "Use this fixed vocabulary: "
         "lane_marking_count={single|double|unknown}, "
         "lane_marking_pattern={solid|dashed|mixed|unknown}, "
@@ -586,6 +646,7 @@ def generate_fluxfill_training_data(
         start_index=start_index,
         limit=num_videos,
         max_list_files=max_walk_files,
+        sort_results=bool(sort_gcs_listing),
     )
     if not mp4_uris:
         raise RuntimeError("No mp4 files found for the requested slice")
@@ -613,7 +674,7 @@ def generate_fluxfill_training_data(
 
         prompt_raw = _caption_qwen(
             focus_img,
-            model_path=VLM_72B_FUSE_ROOT,
+            model_path=QWEN_MODEL_FUSE_ROOT,
             qwen_device=qwen_device,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
@@ -657,6 +718,7 @@ def fluxfill_data_generation_wf(
     sam2_checkpoint_path: str = SAM2_CHECKPOINT_MOUNTED_PATH,
     sam2_config_name: str = "configs/sam2.1/sam2.1_hiera_l.yaml",
     max_walk_files: int = 500000,
+    sort_gcs_listing: bool = False,
     output_run_id: Optional[str] = None,
 ) -> str:
     return generate_fluxfill_training_data(
@@ -668,5 +730,6 @@ def fluxfill_data_generation_wf(
         sam2_checkpoint_path=sam2_checkpoint_path,
         sam2_config_name=sam2_config_name,
         max_walk_files=max_walk_files,
+        sort_gcs_listing=sort_gcs_listing,
         output_run_id=output_run_id,
     )

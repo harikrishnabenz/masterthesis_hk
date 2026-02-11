@@ -10,11 +10,11 @@ DOMAIN="prod"
 
 NUM_VIDEOS="100"
 START_INDEX="0"
-OUTPUT_RUN_ID="test_data_100"
+OUTPUT_RUN_ID="test_data_100_7b"
 
 QWEN_DEVICE="cuda:0"
 SAM2_DEVICE="cuda:0"
-MAX_WALK_FILES="5000"
+MAX_WALK_FILES="500"
 
 # Ensure we run from the sam2 repo root (docker-compose.yaml lives there)
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
