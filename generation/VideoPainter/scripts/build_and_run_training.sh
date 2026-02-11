@@ -17,7 +17,7 @@ DOMAIN="prod"
 # Declare a run suffix used by both this script and the HLX workflow.
 # Default matches scripts/build_and_run.sh.
 # Override by: TRAIN_RUN_SUFFIX="..." bash scripts/build_and_run_training.sh
-X="${TRAIN_RUN_SUFFIX:-5p_10v_p2_s5_10226_1}"
+X="${TRAIN_RUN_SUFFIX:-5p_10v_p2_s5_11226_1}"
 export VP_RUN_SUFFIX="${X}"
 
 REMOTE_IMAGE="europe-west4-docker.pkg.dev/mb-adas-2015-p-a4db/research/harimt_vp${X}"
@@ -25,7 +25,7 @@ REMOTE_IMAGE="europe-west4-docker.pkg.dev/mb-adas-2015-p-a4db/research/harimt_vp
 # Input dataset (filtered output from segmentation/sam2/filter_fluxfill_dataset.py)
 # Override example:
 #   INPUT_DATA_DIR="gs://.../training/data/my_dataset" bash scripts/build_and_run_training.sh
-INPUT_DATA_DIR="${INPUT_DATA_DIR:-gs://mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Video_inpainting/videopainter/training/data/single_white_solid_clearroad_10000}"
+INPUT_DATA_DIR="${INPUT_DATA_DIR:-gs://mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Video_inpainting/videopainter/training/data/training_data_clearroad_10000__clearroad_10000_single_white_solid}"
 
 # Output checkpoint base prefix (workflow will create a subfolder per run_id)
 # Override example:
@@ -44,7 +44,6 @@ LEARNING_RATE="1e-4"
 TRAIN_BATCH_SIZE="1"
 GRAD_ACCUM="1"
 MIXED_PRECISION="bf16"
-GRADIENT_CHECKPOINTING="0"  # 1|0
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
@@ -82,8 +81,7 @@ hlx wf run \
 	--gradient_accumulation_steps "${GRAD_ACCUM}" \
 	--learning_rate "${LEARNING_RATE}" \
 	--max_train_steps "${MAX_TRAIN_STEPS}" \
-	--checkpointing_steps "${CHECKPOINTING_STEPS}" \
-	--gradient_checkpointing "${GRADIENT_CHECKPOINTING}"
+	--checkpointing_steps "${CHECKPOINTING_STEPS}"
 
 echo "If successful, checkpoints are under:"
 echo "  ${OUTPUT_CHECKPOINT_DIR}/${OUTPUT_RUN_ID}/"

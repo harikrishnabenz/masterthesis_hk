@@ -51,6 +51,9 @@ CONTAINER_IMAGE = os.environ.get("VP_CONTAINER_IMAGE", CONTAINER_IMAGE_DEFAULT)
 VP_BUCKET = "mbadas-sandbox-research-9bb9c7f"
 VP_BUCKET_PREFIX = "workspace/user/hbaskar/Video_inpainting/videopainter"
 
+# Mount only the FluxFill checkpoint folder (not the entire videopainter prefix)
+FLUXFILL_CKPT_PREFIX = f"{VP_BUCKET_PREFIX}/ckpt/flux_inp"
+
 DEFAULT_INPUT_DATA_DIR = (
 	f"gs://{VP_BUCKET}/{VP_BUCKET_PREFIX}/training/data/single_white_solid_clearroad_10000"
 )
@@ -65,11 +68,10 @@ DEFAULT_OUTPUT_CHECKPOINT_DIR = (
 BASE_WORKDIR = "/workspace/VideoPainter"
 DEFAULT_CKPT_DIR = os.path.join(BASE_WORKDIR, "ckpt")
 
-VP_FUSE_MOUNT_NAME = "vp-bucket"
-VP_FUSE_MOUNT_ROOT = os.path.join(MOUNTPOINT, VP_FUSE_MOUNT_NAME)
-MOUNTED_CKPT_PATH = os.path.join(VP_FUSE_MOUNT_ROOT, "ckpt")
+FLUXFILL_FUSE_MOUNT_NAME = "fluxfill-ckpt"
+FLUXFILL_FUSE_MOUNT_ROOT = os.path.join(MOUNTPOINT, FLUXFILL_FUSE_MOUNT_NAME)
 
-# FluxFill base model path (inside container) after symlinking ckpt.
+# FluxFill base model path (inside container) after symlinking.
 DEFAULT_PRETRAINED_MODEL_PATH = os.path.join(DEFAULT_CKPT_DIR, "flux_inp")
 
 
@@ -100,19 +102,40 @@ def _ensure_symlink(src: str, dest: str) -> None:
 	os.symlink(src, dest)
 
 
-def _gcs_to_mounted_path(gcs_dir: str) -> str:
-	"""Map a GCS directory under VP_BUCKET_PREFIX to a local FUSE-mounted path."""
+def _gcs_to_local_path(gcs_dir: str, local_tmp: str) -> str:
+	"""Download GCS directory to local temporary path (training data is read-only)."""
 	bucket, key = _split_gcs_uri(gcs_dir)
 	if bucket != VP_BUCKET:
 		raise ValueError(f"Expected bucket '{VP_BUCKET}', got '{bucket}'")
 
-	base = VP_BUCKET_PREFIX.rstrip("/") + "/"
-	if not key.startswith(base):
-		raise ValueError(
-			f"input_data_dir must be under gs://{VP_BUCKET}/{VP_BUCKET_PREFIX}/ ... got: gs://{bucket}/{key}"
-		)
-	rel = key[len(base) :]
-	return os.path.join(VP_FUSE_MOUNT_ROOT, rel)
+	fs = gcsfs.GCSFileSystem(token="google_default")
+	local_data_dir = os.path.join(local_tmp, "training_data")
+	Path(local_data_dir).mkdir(parents=True, exist_ok=True)
+	
+	remote_path = f"{bucket}/{key.strip('/')}"
+	logger.info("Downloading training data from gs://%s to %s", remote_path, local_data_dir)
+	
+	# Download images/, masks/, and train.csv
+	for subdir in ["images", "masks"]:
+		remote_subdir = f"{remote_path}/{subdir}"
+		local_subdir = os.path.join(local_data_dir, subdir)
+		Path(local_subdir).mkdir(parents=True, exist_ok=True)
+		try:
+			files = fs.find(remote_subdir)
+			for i, f in enumerate(files):
+				if i % 100 == 0:
+					logger.info("Downloading %s: %d files", subdir, i)
+				local_file = os.path.join(local_subdir, os.path.basename(f))
+				fs.get(f, local_file)
+		except Exception as e:
+			logger.warning("Failed to download %s: %s", subdir, e)
+	
+	# Download train.csv
+	train_csv_remote = f"{remote_path}/train.csv"
+	train_csv_local = os.path.join(local_data_dir, "train.csv")
+	fs.get(train_csv_remote, train_csv_local)
+	
+	return local_data_dir
 
 
 def _upload_directory_to_gcs(*, local_dir: str, gcs_prefix: str) -> None:
@@ -154,8 +177,8 @@ def _safe_run_id(text: str) -> str:
 	mounts=[
 		FuseBucket(
 			bucket=VP_BUCKET,
-			name=VP_FUSE_MOUNT_NAME,
-			prefix=VP_BUCKET_PREFIX,
+			name=FLUXFILL_FUSE_MOUNT_NAME,
+			prefix=FLUXFILL_CKPT_PREFIX,
 		),
 	],
 )
@@ -190,30 +213,31 @@ def train_fluxfill_lora_task(
 	run_id = _safe_run_id(output_run_id or "")
 	logger.info("run_id=%s", run_id)
 	logger.info("CONTAINER_IMAGE=%s", CONTAINER_IMAGE)
-	logger.info("VP_FUSE_MOUNT_ROOT=%s", VP_FUSE_MOUNT_ROOT)
-	logger.info("MOUNTED_CKPT_PATH=%s", MOUNTED_CKPT_PATH)
+	logger.info("FLUXFILL_FUSE_MOUNT_ROOT=%s", FLUXFILL_FUSE_MOUNT_ROOT)
 
 	# Prefetch checkpoint metadata best-effort.
 	try:
-		fuse_prefetch_metadata(MOUNTED_CKPT_PATH)
+		fuse_prefetch_metadata(FLUXFILL_FUSE_MOUNT_ROOT)
 	except Exception as e:
-		logger.warning("Prefetch failed (non-fatal) for %s: %s", MOUNTED_CKPT_PATH, e)
+		logger.warning("Prefetch failed (non-fatal) for %s: %s", FLUXFILL_FUSE_MOUNT_ROOT, e)
 
-	if not os.path.exists(MOUNTED_CKPT_PATH):
-		raise FileNotFoundError(f"Missing mounted ckpt path: {MOUNTED_CKPT_PATH}")
+	if not os.path.exists(FLUXFILL_FUSE_MOUNT_ROOT):
+		raise FileNotFoundError(f"Missing mounted FluxFill checkpoint: {FLUXFILL_FUSE_MOUNT_ROOT}")
 
-	# Ensure /workspace/VideoPainter/ckpt points at the mounted ckpt.
-	_ensure_symlink(MOUNTED_CKPT_PATH, DEFAULT_CKPT_DIR)
+	# Ensure /workspace/VideoPainter/ckpt/flux_inp points at the mounted flux_inp folder.
+	_ensure_symlink(FLUXFILL_FUSE_MOUNT_ROOT, DEFAULT_PRETRAINED_MODEL_PATH)
 
 	if not os.path.exists(pretrained_model_name_or_path):
 		raise FileNotFoundError(f"Missing pretrained_model_name_or_path: {pretrained_model_name_or_path}")
 
-	mounted_data_dir = _gcs_to_mounted_path(input_data_dir)
-	train_csv = os.path.join(mounted_data_dir, "train.csv")
+	# Download training data to local (images, masks, train.csv)
+	tmp_root = os.path.join(tempfile.gettempdir(), "fluxfill_lora_training", run_id)
+	local_data_dir = _gcs_to_local_path(input_data_dir, tmp_root)
+	train_csv = os.path.join(local_data_dir, "train.csv")
 	if not os.path.exists(train_csv):
 		raise FileNotFoundError(f"Missing train.csv at: {train_csv} (input_data_dir={input_data_dir})")
 
-	local_out = os.path.join(tempfile.gettempdir(), "fluxfill_lora_training", run_id)
+	local_out = os.path.join(tmp_root, "output")
 	Path(local_out).mkdir(parents=True, exist_ok=True)
 
 	cmd = [
