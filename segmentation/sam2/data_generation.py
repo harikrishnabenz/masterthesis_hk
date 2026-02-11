@@ -319,7 +319,7 @@ def _lane_prompt_from_qwen_output(text: str) -> str:
 
     t = (text or "").strip()
     if not t:
-        return "road with unknown unknown unknown lane markings"
+        return "no clear road with lane line markings"
 
     def _norm(val: str, allowed: set[str]) -> str:
         val = (val or "").strip().lower()
@@ -329,6 +329,8 @@ def _lane_prompt_from_qwen_output(text: str) -> str:
         count = _norm(count, {"single", "double", "unknown"})
         pattern = _norm(pattern, {"solid", "dashed", "mixed", "unknown"})
         color = _norm(color, {"white", "yellow", "mixed", "unknown"})
+        if count == "unknown" and color == "unknown" and pattern == "unknown":
+            return "no clear road with lane line markings"
         return f"road with {count} {color} {pattern} lane markings"
 
     def _strip_markdown_fences(s: str) -> str:
@@ -378,7 +380,7 @@ def _lane_prompt_from_qwen_output(text: str) -> str:
         )
 
     # Final fallback: unknown, but keep the output clean (no code fences).
-    return "road with unknown unknown unknown lane markings"
+    return "no clear road with lane line markings"
 
 
 # --------------------------------------------------------------------------------------
@@ -618,7 +620,9 @@ def generate_fluxfill_training_data(
 
     system_prompt = (
         "You are a driving scene labeling assistant. "
-        "You only describe lane markings on the road surface. "
+        "You only describe lane line markings on the road surface. "
+        "First, check whether the segmented region shows a CLEAR road surface with lane line markings clearly visible. "
+        "If the road is not clear or the lane line markings are not clearly visible, output 'unknown' for ALL fields. "
         "Return ONLY valid JSON with keys: lane_marking_count, lane_marking_pattern, lane_marking_color. "
         "Do NOT wrap the JSON in Markdown, code fences, or backticks. "
         "Use this fixed vocabulary: "
@@ -628,7 +632,8 @@ def generate_fluxfill_training_data(
     )
     user_prompt = (
         "Look only at the segmented road region. "
-        "Classify the lane marking count (single vs double line), pattern (solid vs dashed), and color (white vs yellow)."
+        "Only answer if it is a clear road with lane line markings visible. "
+        "Classify lane marking count (single vs double line), pattern (solid vs dashed), and color (white vs yellow)."
     )
 
     dest_prefix = f"gs://{BUCKET}/{DEST_GCS_PREFIX_BASE}/{run_id}".rstrip("/")
