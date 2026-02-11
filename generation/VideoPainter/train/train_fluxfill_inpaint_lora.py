@@ -245,7 +245,16 @@ def main() -> None:
     )
 
     def unwrap_model(model):
-        model = accelerator.unwrap_model(model)
+        # Avoid DeepSpeed import issues by manually unwrapping
+        # instead of using accelerator.unwrap_model which tries to import DeepSpeed
+        from torch.nn.parallel import DistributedDataParallel
+        from torch.nn.parallel import DataParallel
+        
+        # Unwrap DDP/DP wrapper
+        if isinstance(model, (DistributedDataParallel, DataParallel)):
+            model = model.module
+        
+        # Unwrap compiled module
         model = model._orig_mod if is_compiled_module(model) else model
         return model
 

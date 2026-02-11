@@ -1,5 +1,5 @@
-# Use official CUDA-enabled PyTorch base image
-FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+# Use official CUDA-enabled PyTorch base image with development tools
+FROM nvidia/cuda:12.1.1-cudnn8-devel-ubuntu22.04
 
 # Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -47,9 +47,11 @@ COPY requirements.txt /workspace/VideoPainter/requirements.txt
 
 
 # Upgrade pip and install Python dependencies
+# Install setuptools first to ensure pkg_resources is available for git-based packages
 RUN python3 -m pip install --upgrade pip setuptools wheel && \
+    pip install --no-cache-dir setuptools && \
     pip install --no-cache-dir numpy==1.26.0 cython && \
-    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir --no-build-isolation -r requirements.txt && \
     pip install --no-cache-dir psutil && \
     python3 -c "import transformers; print('transformers', transformers.__version__)" && \
     python3 -c "from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor; print('qwen2_5_vl import ok')" && \

@@ -175,6 +175,7 @@ def _safe_run_id(text: str) -> str:
 		"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
 		"CUDA_HOME": "/usr/local/cuda-12.1",
 		"DS_SKIP_CUDA_CHECK": "1",
+		"TOKENIZERS_PARALLELISM": "false",
 	},
 	mounts=[
 		FuseBucket(
@@ -283,7 +284,31 @@ def train_fluxfill_lora_task(
 		cmd.extend(["--resume_from_checkpoint", str(resume_from_checkpoint).strip()])
 
 	logger.info("Training command: %s", " ".join(cmd))
-	subprocess.run(cmd, check=True, cwd=BASE_WORKDIR)
+	
+	# Run training and capture output
+	# Set TOKENIZERS_PARALLELISM to suppress warnings
+	env = os.environ.copy()
+	env["TOKENIZERS_PARALLELISM"] = "false"
+	result = subprocess.run(
+		cmd,
+		cwd=BASE_WORKDIR,
+		capture_output=True,
+		text=True,
+		env=env,
+	)
+	
+	# Log stdout and stderr
+	if result.stdout:
+		logger.info("Training stdout:\\n%s", result.stdout)
+	if result.stderr:
+		logger.warning("Training stderr:\\n%s", result.stderr)
+	
+	if result.returncode != 0:
+		raise RuntimeError(
+			f"Training failed with exit code {result.returncode}.\\n"
+			f"Stderr: {result.stderr}\\n"
+			f"Stdout: {result.stdout}"
+		)
 
 	# Upload to output_checkpoint_dir/<run_id>/...
 	dest = output_checkpoint_dir.rstrip("/") + "/" + run_id

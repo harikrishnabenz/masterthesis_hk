@@ -821,12 +821,14 @@ def generate_fluxfill_training_data(
         
         logger.info("Processing %d videos from chunk_%04d (frames: %s)", len(local_videos), chunk_num, ",".join(str(f) for f in frames))
         
-        # Process each video in this chunk
-        chunk_rows = 0
-        for global_index, uri, mp4_path in local_videos:
+        # Process each video in this chunk (keep files locally)
+        chunk_rows = []
+        for vid_idx, (global_index, uri, mp4_path) in enumerate(local_videos, 1):
+            logger.info("Processing video %d/%d in chunk_%04d: %s", vid_idx, len(local_videos), chunk_num, os.path.basename(mp4_path))
             sid = _stable_id(uri)
 
-            for frame_number in frames:
+            for frame_idx, frame_number in enumerate(frames, 1):
+                logger.info("  Extracting frame %d/%d (frame#%d)", frame_idx, len(frames), frame_number)
                 out_base = f"{global_index:06d}_f{int(frame_number):04d}_{sid}.png"
                 out_img = os.path.join(images_dir, out_base)
                 out_mask = os.path.join(masks_dir, out_base)
@@ -844,6 +846,7 @@ def generate_fluxfill_training_data(
                     continue
 
                 pil_img = Image.open(out_img).convert("RGB")
+                logger.info("  Generating SAM2 mask...")
 
                 mask = _sam2_road_mask(
                     pil_img,
@@ -852,6 +855,7 @@ def generate_fluxfill_training_data(
                     device=sam2_device,
                 )
                 mask.save(out_mask)
+                logger.info("  Generating caption...")
 
                 focus_img = _focus_image_to_mask(pil_img, mask)
 
@@ -861,6 +865,7 @@ def generate_fluxfill_training_data(
                     qwen_device=qwen_device,
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
+                    max_new_tokens=64,
                 )
                 prompt = _lane_prompt_from_qwen_output(prompt_raw)
 
@@ -870,29 +875,7 @@ def generate_fluxfill_training_data(
                     "prompt": prompt,
                     "prompt_2": prompt,
                 }
-
-                # Upload image+mask immediately, then update train.csv on GCS.
-                _upload_file_to_gcs(fs, out_img, f"{remote_images_prefix}/{os.path.basename(out_img)}")
-                _upload_file_to_gcs(fs, out_mask, f"{remote_masks_prefix}/{os.path.basename(out_mask)}")
-
-                with open(csv_path, "a", newline="", encoding="utf-8") as f:
-                    wri = csv.DictWriter(f, fieldnames=["image", "mask", "prompt", "prompt_2"])
-                    wri.writerow(row)
-
-                # Overwrite remote CSV each time (simple + robust for resumability).
-                _upload_file_to_gcs(fs, csv_path, remote_csv_uri)
-
-                chunk_rows += 1
-
-                # Clean up local artifacts as we go to keep disk usage bounded.
-                try:
-                    os.remove(out_img)
-                except Exception:
-                    pass
-                try:
-                    os.remove(out_mask)
-                except Exception:
-                    pass
+                chunk_rows.append(row)
 
             # After all frames for this mp4, delete the local video.
             try:
@@ -900,8 +883,32 @@ def generate_fluxfill_training_data(
             except Exception:
                 pass
 
-            if chunk_rows and (chunk_rows % 50 == 0):
-                logger.info("Processed %d rows in chunk_%04d so far", chunk_rows, chunk_num)
+            if len(chunk_rows) and (len(chunk_rows) % 50 == 0):
+                logger.info("Processed %d rows in chunk_%04d so far", len(chunk_rows), chunk_num)
+        
+        # Batch upload all images and masks for this chunk
+        logger.info("Uploading %d images and masks for chunk_%04d...", len(chunk_rows), chunk_num)
+        for row in chunk_rows:
+            img_basename = row["image"].split("/")[-1]
+            mask_basename = row["mask"].split("/")[-1]
+            local_img = os.path.join(images_dir, img_basename)
+            local_mask = os.path.join(masks_dir, mask_basename)
+            
+            if os.path.exists(local_img):
+                _upload_file_to_gcs(fs, local_img, f"{remote_images_prefix}/{img_basename}")
+                os.remove(local_img)
+            if os.path.exists(local_mask):
+                _upload_file_to_gcs(fs, local_mask, f"{remote_masks_prefix}/{mask_basename}")
+                os.remove(local_mask)
+        
+        # Append all rows to CSV and upload once per chunk
+        with open(csv_path, "a", newline="", encoding="utf-8") as f:
+            wri = csv.DictWriter(f, fieldnames=["image", "mask", "prompt", "prompt_2"])
+            for row in chunk_rows:
+                wri.writerow(row)
+        
+        _upload_file_to_gcs(fs, csv_path, remote_csv_uri)
+        logger.info("Uploaded CSV for chunk_%04d (%d total rows)", chunk_num, len(chunk_rows))
 
         # Delete the whole chunk directory (should already be empty, but robust).
         shutil.rmtree(chunk_dir, ignore_errors=True)
