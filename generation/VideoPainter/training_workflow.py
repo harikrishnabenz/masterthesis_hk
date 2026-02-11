@@ -173,6 +173,8 @@ def _safe_run_id(text: str) -> str:
 		"PYTHONUNBUFFERED": "1",
 		"PYTHONPATH": BASE_WORKDIR,
 		"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+		"CUDA_HOME": "/usr/local/cuda-12.1",
+		"DS_SKIP_CUDA_CHECK": "1",
 	},
 	mounts=[
 		FuseBucket(
