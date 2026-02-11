@@ -159,10 +159,13 @@ def _list_mp4s_in_gcs_prefix(
 
     all_paths: list[str] = []
     scanned = 0
+    max_list = int(max_list_files)
+    if max_list <= 0:
+        max_list = 0  # 0 means unlimited
     for i, p in enumerate(fs.find(root)):
         scanned = i + 1
-        if scanned >= int(max_list_files):
-            logger.warning("Reached max_list_files=%d while listing %s", int(max_list_files), root)
+        if max_list and scanned > max_list:
+            logger.warning("Reached max_list_files=%d while listing %s", max_list, root)
             break
         if not p.lower().endswith(".mp4"):
             continue
@@ -576,7 +579,8 @@ def generate_fluxfill_training_data(
     sam2_device: str = "cuda:0",
     sam2_checkpoint_path: str = SAM2_CHECKPOINT_MOUNTED_PATH,
     sam2_config_name: str = "configs/sam2.1/sam2.1_hiera_l.yaml",
-    max_walk_files: int = 500000,
+    # 0 means unlimited walk; we still early-stop once enough .mp4s are found.
+    max_walk_files: int = 0,
     sort_gcs_listing: bool = False,
     download_batch_size: int = 100,
     output_run_id: Optional[str] = None,
@@ -775,7 +779,7 @@ def fluxfill_data_generation_wf(
     sam2_device: str = "cuda:0",
     sam2_checkpoint_path: str = SAM2_CHECKPOINT_MOUNTED_PATH,
     sam2_config_name: str = "configs/sam2.1/sam2.1_hiera_l.yaml",
-    max_walk_files: int = 500000,
+    max_walk_files: int = 0,
     sort_gcs_listing: bool = False,
     download_batch_size: int = 100,
     output_run_id: Optional[str] = None,

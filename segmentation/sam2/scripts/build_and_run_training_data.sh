@@ -10,13 +10,15 @@ DOMAIN="prod"
 
 NUM_VIDEOS="10000"
 START_INDEX="0"
-OUTPUT_RUN_ID="training_data_10000_clearroad"
+OUTPUT_RUN_ID="training_data_clearroad_10000"
 
 DOWNLOAD_BATCH_SIZE="100"
 
 QWEN_DEVICE="cuda:0"
 SAM2_DEVICE="cuda:0"
-MAX_WALK_FILES="1000000"
+
+# 0 means: keep walking the GCS prefix until enough .mp4s are found (or the prefix is exhausted).
+MAX_WALK_FILES="0"
 
 # Ensure we run from the sam2 repo root (docker-compose.yaml lives there)
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
