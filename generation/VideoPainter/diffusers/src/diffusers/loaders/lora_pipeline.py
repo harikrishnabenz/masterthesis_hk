@@ -28,6 +28,7 @@ from ..utils import (
     get_peft_kwargs,
     is_peft_version,
     is_transformers_available,
+    is_transformers_version,
     logging,
     scale_lora_layers,
 )
@@ -52,6 +53,10 @@ TRANSFORMER_NAME = "transformer"
 
 LORA_WEIGHT_NAME = "pytorch_lora_weights.bin"
 LORA_WEIGHT_NAME_SAFE = "pytorch_lora_weights.safetensors"
+
+# Mapping from module names to transformer config attributes for Flux models
+# Used when expanding transformer parameters for Control LoRA
+_MODULE_NAME_TO_ATTRIBUTE_MAP_FLUX = {}
 
 
 class StableDiffusionLoraLoaderMixin(LoraBaseMixin):
