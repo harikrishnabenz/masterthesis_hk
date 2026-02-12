@@ -11,20 +11,25 @@ DOMAIN="prod"
 # Source GCS prefix (chunk-based folder structure)
 SOURCE_GCS_PREFIX="workspace/user/hbaskar/Video_inpainting/videopainter/training/data_physical_ai/camera_front_tele_30fov"
 
+# Chunk range: process chunk_0026 to chunk_0049 (inclusive)
+# Each chunk folder contains 100+ mp4 files
+# Override these with command-line args for parallel processing
+CHUNK_START="${1:-26}"
+CHUNK_END="${2:-49}"
+GPU_ID="${3:-0}"
+
 NUM_VIDEOS="10000"
 START_INDEX="0"
-OUTPUT_RUN_ID="trainingdata_chunk199"
+OUTPUT_RUN_ID="trainingdata_chunk${CHUNK_START}_${CHUNK_END}"
 
 # Frame numbers (1-based) to extract per video. Comma-separated.
-FRAME_NUMBERS="1,100,200,300,400,500"
+FRAME_NUMBERS="1,250,500"
 
-# Chunk range: process chunk_0000 to chunk_0200 (inclusive)
-# Each chunk folder contains 100+ mp4 files
-CHUNK_START="0"
-CHUNK_END="199"
+QWEN_DEVICE="cuda:${GPU_ID}"
+SAM2_DEVICE="cuda:${GPU_ID}"
 
-QWEN_DEVICE="cuda:0"
-SAM2_DEVICE="cuda:0"
+echo "Processing chunks ${CHUNK_START} to ${CHUNK_END} on GPU ${GPU_ID}"
+echo "Output will be: trainingdata_chunk${CHUNK_START}_${CHUNK_END}"
 
 # 0 means: keep walking the GCS prefix until enough .mp4s are found (or the prefix is exhausted).
 MAX_WALK_FILES="0"

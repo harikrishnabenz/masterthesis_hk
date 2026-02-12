@@ -648,7 +648,7 @@ def _focus_image_to_mask(image_rgb: Image.Image, mask_l: Image.Image) -> Image.I
 
 @task(
     compute=DedicatedNode(
-        node=Node.A100_80GB_1GPU,
+        node=Node.L4_8GPU,
         ephemeral_storage="max",
         max_duration="3d",
     ),
