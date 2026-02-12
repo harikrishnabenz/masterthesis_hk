@@ -43,8 +43,8 @@ MAX_TRAIN_STEPS="${MAX_TRAIN_STEPS:-}"  # Empty = train on all data
 NUM_TRAIN_EPOCHS="${NUM_TRAIN_EPOCHS:-1}"  # Number of epochs (used when MAX_TRAIN_STEPS is empty)
 CHECKPOINTING_STEPS="${CHECKPOINTING_STEPS:-250}"
 LEARNING_RATE="${LEARNING_RATE:-1e-4}"
-TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-1}"
-GRAD_ACCUM="${GRAD_ACCUM:-1}"
+TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-1}"  # Keep at 1 due to FLUX memory requirements
+GRAD_ACCUM="${GRAD_ACCUM:-4}"  # Accumulate over 4 steps for effective batch size of 4
 MIXED_PRECISION="${MIXED_PRECISION:-bf16}"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
