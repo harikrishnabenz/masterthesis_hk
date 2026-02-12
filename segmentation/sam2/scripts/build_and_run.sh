@@ -3,17 +3,20 @@
 
 set -euo pipefail
 
-
+# Generate timestamp for unique image tagging
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
 # Build the Docker image
 docker compose build
 
 # Tag the image for Google Artifact Registry
-REMOTE_IMAGE="europe-west4-docker.pkg.dev/mb-adas-2015-p-a4db/research/harimt_sam2"
+REMOTE_IMAGE="europe-west4-docker.pkg.dev/mb-adas-2015-p-a4db/research/harimt_sam2:${TIMESTAMP}"
 docker tag sam2/frontend "${REMOTE_IMAGE}"
 
 # Push the image to the registry
 docker push "${REMOTE_IMAGE}"
+
+echo "Image built with timestamp: ${TIMESTAMP}"
 
 # Ensure workflow.py uses this exact image when hlx packages the workflow
 export SAM2_CONTAINER_IMAGE="${REMOTE_IMAGE}"

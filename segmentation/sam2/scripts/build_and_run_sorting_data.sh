@@ -5,7 +5,8 @@ set -euo pipefail
 # FluxFill dataset filtering/sorting (reads an existing run folder and creates a new one with suffix)
 # Hard-coded config: edit these constants when you want a different selection.
 
-REMOTE_IMAGE="europe-west4-docker.pkg.dev/mb-adas-2015-p-a4db/research/harimt_sam2"
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+REMOTE_IMAGE="europe-west4-docker.pkg.dev/mb-adas-2015-p-a4db/research/harimt_sam2:${TIMESTAMP}"
 TEAM_SPACE="research"
 DOMAIN="prod"
 
@@ -40,6 +41,8 @@ docker compose build
 echo "Tagging and pushing image: ${REMOTE_IMAGE}"
 docker tag sam2/frontend "${REMOTE_IMAGE}"
 docker push "${REMOTE_IMAGE}"
+
+echo "Image built with timestamp: ${TIMESTAMP}"
 
 # Ensure workflow uses the just-pushed image
 export SAM2_CONTAINER_IMAGE="${REMOTE_IMAGE}"

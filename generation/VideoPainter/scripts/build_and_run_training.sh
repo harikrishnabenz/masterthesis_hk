@@ -35,7 +35,7 @@ OUTPUT_CHECKPOINT_DIR="${OUTPUT_CHECKPOINT_DIR:-gs://mbadas-sandbox-research-9bb
 # Run naming
 # Override example:
 #   OUTPUT_RUN_ID="fluxfill_experiment_01" bash scripts/build_and_run_training.sh
-OUTPUT_RUN_ID="${OUTPUT_RUN_ID:-fluxfill_single_white_solid_clearroad}"
+OUTPUT_RUN_ID="${OUTPUT_RUN_ID:-fluxfill_single_white_solid_clearroad_$(date -u +%Y%m%d_%H%M%S)}"
 
 # Training hyperparameters (tweak as needed)
 MAX_TRAIN_STEPS="1000"

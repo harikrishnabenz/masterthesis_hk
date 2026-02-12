@@ -12,7 +12,7 @@ echo "  MODEL_PREFIX: $MODEL_PREFIX"
 
 # Declare a run suffix used by both this script and workflow.py
 # The model-size prefix is fixed to 7 (we only use Qwen2.5-VL-7B-Instruct).
-X="trained_checkpoint"
+X="trained_ckpt"
 export VP_RUN_SUFFIX="${X}"
 
 # Build image first (required for the tag below)

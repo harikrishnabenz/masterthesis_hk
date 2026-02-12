@@ -17,6 +17,7 @@ from typing import Callable, Dict, List, Optional, Union
 import torch
 from huggingface_hub.utils import validate_hf_hub_args
 
+from ..models.modeling_utils import _LOW_CPU_MEM_USAGE_DEFAULT
 from ..utils import (
     USE_PEFT_BACKEND,
     convert_state_dict_to_diffusers,
@@ -1663,7 +1664,7 @@ class FluxLoraLoaderMixin(LoraBaseMixin):
         if not USE_PEFT_BACKEND:
             raise ValueError("PEFT backend is required for this method.")
 
-        low_cpu_mem_usage = kwargs.pop("low_cpu_mem_usage", _LOW_CPU_MEM_USAGE_DEFAULT_LORA)
+        low_cpu_mem_usage = kwargs.pop("low_cpu_mem_usage", _LOW_CPU_MEM_USAGE_DEFAULT)
         if low_cpu_mem_usage and not is_peft_version(">=", "0.13.1"):
             raise ValueError(
                 "`low_cpu_mem_usage=True` is not compatible with this `peft` version. Please update it with `pip install -U peft`."
