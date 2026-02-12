@@ -115,23 +115,8 @@ LLM_MODEL_SIZE = "7B"
 
 USE_QWEN2_5_VL_7B = True
 
-
-def _compute_node_from_llm_model_size(llm_model_size: str) -> Node:
-	"""Map LLM_MODEL_SIZE to a compute node.
-
-	- "72B" -> 2 GPUs
-	- "7B"  -> 1 GPU
-	"""
-	s = (llm_model_size or "").strip().upper()
-	if s == "72B":
-		return Node.A100_80GB_2GPU
-	if s == "7B":
-		return Node.A100_80GB_1GPU
-	# Conservative default: 1 GPU.
-	return Node.A100_80GB_1GPU
-
-
-COMPUTE_NODE = _compute_node_from_llm_model_size(LLM_MODEL_SIZE)
+# Fixed to 1 GPU for 7B model
+COMPUTE_NODE = Node.A100_80GB_1GPU
 # To dedicate the second GPU to Qwen (VLM) when available, keep Flux on the same
 # GPU as CogVideoX by default.
 VP_FLUX_DEVICE_DEFAULT = "cuda:0"
@@ -171,6 +156,9 @@ VP_BUCKET_PREFIX = "workspace/user/hbaskar/Video_inpainting/videopainter"
 # NOTE: In our bucket layout, VLM checkpoints live under `ckpt/vlm/...`.
 VLM_7B_GCS_PREFIX = os.path.join(VP_BUCKET_PREFIX, "ckpt", "vlm", "Qwen2.5-VL-7B-Instruct")
 
+# Trained FluxFill checkpoint folder
+TRAINED_FLUXFILL_GCS_PREFIX = "workspace/user/hbaskar/Video_inpainting/videopainter/training/trained_checkpoint/fluxfill_single_white_solid_clearroad"
+
 # GCS bucket path for SAM2 preprocessed data.
 # IMPORTANT: we mount the *base* prefix so `data_run_id` can be chosen dynamically.
 DEFAULT_DATA_RUN_ID = os.environ.get("DATA_RUN_ID", "10")
@@ -185,6 +173,10 @@ VP_VLM_7B_FUSE_MOUNT_NAME = "vp-vlm-7b"
 VP_VLM_7B_FUSE_MOUNT_ROOT = os.path.join(MOUNTPOINT, VP_VLM_7B_FUSE_MOUNT_NAME)
 
 VLM_7B_DEST_PATH = os.path.join(DEFAULT_CKPT_DIR, "vlm", "Qwen2.5-VL-7B-Instruct")
+
+TRAINED_FLUXFILL_FUSE_MOUNT_NAME = "vp-trained-fluxfill"
+TRAINED_FLUXFILL_FUSE_MOUNT_ROOT = os.path.join(MOUNTPOINT, TRAINED_FLUXFILL_FUSE_MOUNT_NAME)
+TRAINED_FLUXFILL_DEST_PATH = os.path.join(DEFAULT_CKPT_DIR, "trained_fluxfill_lora")
 
 VP_DATA_FUSE_MOUNT_NAME = "data"
 VP_DATA_FUSE_MOUNT_ROOT = os.path.join(MOUNTPOINT, VP_DATA_FUSE_MOUNT_NAME)
@@ -660,6 +652,8 @@ def _run_edit_bench(
 	model_path: str,
 	inpainting_branch: str,
 	img_inpainting_model: str,
+	img_inpainting_lora_path: str,
+	img_inpainting_lora_scale: float,
 	num_inference_steps: int,
 	guidance_scale: float,
 	num_videos_per_prompt: int,
@@ -720,6 +714,10 @@ def _run_edit_bench(
 		str(float(strength)),
 		"--img_inpainting_model",
 		img_inpainting_model,
+		"--img_inpainting_lora_path",
+		img_inpainting_lora_path,
+		"--img_inpainting_lora_scale",
+		str(float(img_inpainting_lora_scale)),
 		"--video_editing_instruction",
 		video_editing_instruction,
 		"--llm_model",
@@ -858,6 +856,11 @@ def _upload_outputs(
 			name=VP_DATA_FUSE_MOUNT_NAME,
 			prefix=VP_DATA_PREFIX,
 		),
+		FuseBucket(
+			bucket=VP_BUCKET,
+			name=TRAINED_FLUXFILL_FUSE_MOUNT_NAME,
+			prefix=TRAINED_FLUXFILL_GCS_PREFIX,
+		),
 		*([
 			FuseBucket(
 				bucket=VP_BUCKET,
@@ -878,6 +881,8 @@ def run_videopainter_edit_many(
 	model_path: str = DEFAULT_MODEL_PATH,
 	inpainting_branch: str = DEFAULT_BRANCH_PATH,
 	img_inpainting_model: str = DEFAULT_IMG_INPAINT_PATH,
+	img_inpainting_lora_path: str = "",
+	img_inpainting_lora_scale: float = 1.0,
 	output_name_suffix: str = "vp_edit.mp4",
 	num_inference_steps: int = 50,
 	guidance_scale: float = 6.0,
@@ -945,6 +950,14 @@ def run_videopainter_edit_many(
 
 		# Create symlink for VLM 7B mount
 		ensure_symlink(VP_VLM_7B_FUSE_MOUNT_ROOT, VLM_7B_DEST_PATH)
+
+	# Mount and symlink the trained FluxFill checkpoint
+	try:
+		fuse_prefetch_metadata(TRAINED_FLUXFILL_FUSE_MOUNT_ROOT)
+	except Exception:
+		logger.info("Trained FluxFill prefetch skipped/failed; continuing.")
+	ensure_symlink(TRAINED_FLUXFILL_FUSE_MOUNT_ROOT, TRAINED_FLUXFILL_DEST_PATH)
+	logger.info("Trained FluxFill checkpoint mounted at: %s", TRAINED_FLUXFILL_DEST_PATH)
 
 	# Keep /workspace/VideoPainter/data present and pointing at the mounted dataset.
 	ensure_symlink(VP_DATA_FUSE_MOUNT_ROOT, DEFAULT_DATA_DIR)
@@ -1034,6 +1047,8 @@ def run_videopainter_edit_many(
 				model_path=model_path,
 				inpainting_branch=inpainting_branch,
 				img_inpainting_model=img_inpainting_model,
+				img_inpainting_lora_path=img_inpainting_lora_path,
+				img_inpainting_lora_scale=img_inpainting_lora_scale,
 				num_inference_steps=num_inference_steps,
 				guidance_scale=guidance_scale,
 				num_videos_per_prompt=num_videos_per_prompt,
@@ -1115,6 +1130,8 @@ def videopainter_many_wf(
 	model_path: str = DEFAULT_MODEL_PATH,
 	inpainting_branch: str = DEFAULT_BRANCH_PATH,
 	img_inpainting_model: str = DEFAULT_IMG_INPAINT_PATH,
+	img_inpainting_lora_path: str = "",
+	img_inpainting_lora_scale: float = 1.0,
 	output_name_suffix: str = "vp_edit.mp4",
 	num_inference_steps: int = 50,
 	guidance_scale: float = 6.0,
@@ -1145,6 +1162,8 @@ def videopainter_many_wf(
 		model_path=model_path,
 		inpainting_branch=inpainting_branch,
 		img_inpainting_model=img_inpainting_model,
+		img_inpainting_lora_path=img_inpainting_lora_path,
+		img_inpainting_lora_scale=img_inpainting_lora_scale,
 		output_name_suffix=output_name_suffix,
 		num_inference_steps=num_inference_steps,
 		guidance_scale=guidance_scale,

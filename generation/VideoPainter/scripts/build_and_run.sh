@@ -54,7 +54,7 @@ export VP_CONTAINER_IMAGE="${REMOTE_IMAGE_TAGGED}"
 #   trimming to 20 words.
 #
 # So: put the *core visual change* first, then optional constraints after ';'.
-VIDEO_EDITING_INSTRUCTIONS=$'Single solid white continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged\nDouble solid white continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged\nSingle solid yellow continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged\nDouble solid yellow continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged\nSingle dashed white intermitted line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged'
+VIDEO_EDITING_INSTRUCTIONS="Single solid white continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged"
 
 # -----------------------------------------------------------------------------
 # First-frame caption refinement (Qwen critic loop)
@@ -86,6 +86,8 @@ hlx wf run \
   --model_path "/workspace/VideoPainter/ckpt/CogVideoX-5b-I2V" \
   --inpainting_branch "/workspace/VideoPainter/ckpt/VideoPainter/checkpoints/branch" \
   --img_inpainting_model "/workspace/VideoPainter/ckpt/flux_inp" \
+  --img_inpainting_lora_path "/workspace/VideoPainter/ckpt/trained_fluxfill_lora" \
+  --img_inpainting_lora_scale 1.0 \
   --output_name_suffix "vp_edit_sample0.mp4" \
   --num_inference_steps 70 \
   --guidance_scale 6.0 \
