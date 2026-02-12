@@ -2,7 +2,7 @@
                     TECHNICAL DOCUMENTATION
               Master Thesis: Video Inpainting for Lane Marking Generation
                      Author: Hariharan Baskar
-                     Date: February 2026
+                     Last Updated: February 12, 2026
 ================================================================================
 
 TABLE OF CONTENTS
@@ -310,11 +310,14 @@ TRAINING SYSTEM:
    - A100 80GB GPU compute node
 
 HYPERPARAMETERS (configurable):
-  - max_train_steps: 1000
-  - learning_rate: 1e-4
+  - max_train_steps: Empty (trains on full dataset)
+  - num_train_epochs: 5 (default)
+  - learning_rate: 1e-5 (reduced for stability)
+  - lr_scheduler: "cosine"
+  - lr_warmup_steps: 50
   - train_batch_size: 1
-  - gradient_accumulation_steps: 1
-  - checkpointing_steps: 250
+  - gradient_accumulation_steps: 4 (effective batch size: 4)
+  - checkpointing_steps: 100
   - mixed_precision: "bf16"
 
 WORKFLOW FEATURES:
@@ -328,6 +331,9 @@ TRAINING SCRIPT: scripts/build_and_run_training.sh
   - Builds Docker container
   - Pushes to GCR
   - Launches HLX workflow
+  - Auto-generates timestamp-based run IDs
+  - Default training: 5 epochs on full dataset
+  - Configurable via environment variables
 
 OUTPUT: LoRA checkpoints compatible with FluxFillPipeline
 
@@ -748,9 +754,13 @@ IMAGE TAGGING STRATEGY
 Convention: {base_name}{run_suffix}:{timestamp}
 Examples:
   - sam2_container:latest
-  - videopainter_container:20260211_143052
+  - videopainter_container:20260212T144052Z
+  - harimt_vptrained_ckpt_20260212_144012:20260212T150230Z
   
-Purpose: Avoid stale ':latest' pulls, enable reproducibility
+Purpose: 
+  - Avoid stale ':latest' pulls with unique timestamps
+  - Enable reproducibility and checkpoint traceability
+  - Automatic extraction of checkpoint timestamps for run suffixes
 
 ================================================================================
 6. WORKFLOW ORCHESTRATION (HLX)
@@ -938,30 +948,37 @@ BUILD SCRIPTS
 All workflows include build_and_run_*.sh scripts:
 
 1. Build Docker image locally
-2. Tag with remote registry path
+2. Tag with remote registry path and unique timestamp
 3. Push to GCR
 4. Export environment variables
 5. Invoke hlx wf run with parameters
 
-Example: scripts/build_and_run_training_data.sh
+Example: scripts/build_and_run_training.sh
   #!/bin/bash
   set -euo pipefail
   
+  # Auto-generate run ID with timestamp
+  OUTPUT_RUN_ID="fluxfill_single_white_solid_clearroad_$(date -u +%Y%m%d_%H%M%S)"
   REMOTE_IMAGE="..."
-  SOURCE_GCS_PREFIX="..."
-  NUM_VIDEOS="10000"
+  INPUT_DATA_DIR="..."
   
-  # Build and push
+  # Build and push with unique tag
+  RUN_TAG="$(date -u +%Y%m%dT%H%M%SZ)"
   docker compose build
-  docker tag sam2/frontend "${REMOTE_IMAGE}"
-  docker push "${REMOTE_IMAGE}"
+  docker tag videopainter:latest "${REMOTE_IMAGE}:${RUN_TAG}"
+  docker push "${REMOTE_IMAGE}:${RUN_TAG}"
   
   # Run workflow
-  export SAM2_CONTAINER_IMAGE="${REMOTE_IMAGE}"
-  hlx wf run data_generation.fluxfill_data_generation_wf \
-    --team research --domain prod \
-    -p source_gcs_prefix="${SOURCE_GCS_PREFIX}" \
-    -p num_videos="${NUM_VIDEOS}"
+  export VP_CONTAINER_IMAGE="${REMOTE_IMAGE}:${RUN_TAG}"
+  hlx wf run training_workflow.fluxfill_lora_training_wf \
+    --team-space research --domain prod \
+    -p input_data_dir="${INPUT_DATA_DIR}" \
+    -p output_run_id="${OUTPUT_RUN_ID}"
+
+Image Tagging Strategy:
+  - Unique timestamp tags prevent stale ':latest' caching
+  - Run IDs include timestamps for checkpoint traceability
+  - VideoPainter run suffix extracted from checkpoint timestamp
 
 ================================================================================
 7. DATA GENERATION & PROCESSING
@@ -1078,52 +1095,63 @@ LoRA Hyperparameters:
   lora_dropout: 0.0
 
 Training Hyperparameters:
-  max_train_steps: 1000
-  learning_rate: 1e-4
+  max_train_steps: Empty (trains on full dataset)
+  num_train_epochs: 5
+  learning_rate: 1e-5
   lr_scheduler: "cosine"
-  lr_warmup_steps: 100
+  lr_warmup_steps: 50
   train_batch_size: 1
-  gradient_accumulation_steps: 1
+  gradient_accumulation_steps: 4
   mixed_precision: "bf16"
   optimizer: AdamW
   weight_decay: 1e-2
   max_grad_norm: 1.0
 
 Checkpointing:
-  checkpointing_steps: 250
+  checkpointing_steps: 100
   checkpoint_total_limit: 4
   resume_from_checkpoint: latest (if exists)
 
 Hardware:
   GPU: A100 80GB
   VRAM Usage: ~25GB
-  Training Time: ~3.5 hours
+  Training Time: ~5-8 hours (5 epochs, 10,000 samples)
 
 Output:
-  GCS Path: gs://[GCS_BUCKET]/training/trained_checkpoint/fluxfill_single_white_solid/
+  GCS Path: gs://[GCS_BUCKET]/training/trained_checkpoint/fluxfill_single_white_solid_clearroad_YYYYMMDD_HHMMSS/
   Checkpoint Structure:
-    checkpoint-250/
+    checkpoint-100/
       adapter_config.json
       adapter_model.safetensors
       optimizer.bin
       scheduler.bin
-    checkpoint-500/
-    checkpoint-750/
-    checkpoint-1000/
+    checkpoint-200/
+    checkpoint-300/
+    ...
+  
+  Note: Checkpoint naming automatically includes timestamp for traceability
 
-TRAINING LOGS (SAMPLE)
-──────────────────────
-Step 0    | Loss: 0.3521 | LR: 0.000010 | Time: 3.2s
-Step 100  | Loss: 0.1832 | LR: 0.000100 | Time: 3.1s
-Step 250  | Loss: 0.0945 | LR: 0.000095 | Time: 3.0s [CHECKPOINT]
-Step 500  | Loss: 0.0621 | LR: 0.000071 | Time: 2.9s [CHECKPOINT]
-Step 750  | Loss: 0.0418 | LR: 0.000035 | Time: 3.0s [CHECKPOINT]
-Step 1000 | Loss: 0.0287 | LR: 0.000005 | Time: 2.9s [CHECKPOINT]
+TRAINING LOGS (EXPECTED FORMAT)
+────────────────────────────────
+Note: The following is an example of expected training progress based on 
+      configuration parameters. Actual results will vary based on dataset 
+      and training dynamics.
+
+Epoch 1/5:
+Step 0    | Loss: [initial] | LR: 0.000002 | Time: ~3s
+Step 50   | Loss: [warmup]  | LR: 0.000010 | Time: ~3s [WARMUP COMPLETE]
+Step 100  | Loss: [epoch1]  | LR: 0.000010 | Time: ~3s [CHECKPOINT]
+
+Epoch 2-5:
+Checkpoints saved every 100 steps...
 
 Training Complete!
-Total Time: 3h 24m
-Final Loss: 0.0287
-Checkpoints saved: 4
+Total Time: ~5-8 hours (depends on dataset size and GPU)
+Final Loss: Typically converges to <0.05
+Checkpoints saved: ~9-10 (for 10K samples, 5 epochs, checkpoint every 100 steps)
+
+Note: Actual training logs are saved by Accelerate to the output directory.
+      Use tensorboard or wandb for detailed monitoring.
 
 LORA WEIGHTS ANALYSIS
 ─────────────────────
@@ -1147,9 +1175,9 @@ Loading LoRA-trained FluxFill:
     torch_dtype=torch.bfloat16
   )
   
-  # Load LoRA weights
+  # Load LoRA weights (automatically extracted from checkpoint timestamp)
   pipe.load_lora_weights(
-    "gs://[GCS_BUCKET]/trained_checkpoint/fluxfill_single_white_solid/checkpoint-1000"
+    "gs://[GCS_BUCKET]/trained_checkpoint/fluxfill_single_white_solid_clearroad_YYYYMMDD_HHMMSS/checkpoint-900"
   )
   
   # Inference
@@ -1163,6 +1191,9 @@ Performance Impact:
   - Inference time: ~8-10 seconds per image (1024x1024)
   - Memory: ~12GB VRAM
   - Quality: Significant improvement in lane marking realism
+  
+Note: The build_and_run.sh script automatically extracts the checkpoint 
+      timestamp from the TRAINED_FLUXFILL_GCS_PATH for proper tracking
 
 ================================================================================
 9. EVALUATION & RESULTS
@@ -1439,15 +1470,26 @@ SAM2 Workflows:
   VP_PREPROCESS_FPS           Output FPS for VideoPainter
 
 VideoPainter Workflows:
-  VP_CONTAINER_IMAGE          Container image override
-  VP_RUN_SUFFIX               Image naming suffix
+  VP_CONTAINER_IMAGE          Container image override (with timestamp tag)
+  VP_RUN_SUFFIX               Image naming suffix (extracted from checkpoint timestamp)
   DATA_RUN_ID                 SAM2 output run identifier to use
   LLM_MODEL_SIZE              Qwen model size (7B/72B)
+  TRAINED_FLUXFILL_GCS_PATH   Path to trained LoRA checkpoint
 
 Training:
   INPUT_DATA_DIR              GCS dataset path
   OUTPUT_CHECKPOINT_DIR       GCS output path
-  OUTPUT_RUN_ID               Training run identifier
+  OUTPUT_RUN_ID               Training run identifier (auto-generated with timestamp)
+  MAX_TRAIN_STEPS             Max training steps (empty = train on full dataset)
+  NUM_TRAIN_EPOCHS            Number of epochs (default: 5)
+  CHECKPOINTING_STEPS         Checkpoint frequency (default: 100)
+  LEARNING_RATE               Learning rate (default: 1e-5)
+  GRAD_ACCUM                  Gradient accumulation steps (default: 4)
+
+Inference:
+  CAPTION_REFINE_ITERS        VLM refinement iterations (default: 10)
+  CAPTION_REFINE_TEMPERATURE  VLM temperature (default: 0.1)
+  VP_STRENGTH                 Inpainting strength (default: 1.0)
 
 COMMAND-LINE INTERFACES
 ───────────────────────
@@ -1476,7 +1518,12 @@ COMMAND-LINE INTERFACES
      --train_data /path/to/train.csv \
      --pretrained_model_path /path/to/flux_inp \
      --output_dir /path/to/output \
-     --max_train_steps 1000
+     --num_train_epochs 5 \
+     --learning_rate 1e-5 \
+     --gradient_accumulation_steps 4 \
+     --checkpointing_steps 100
+
+   Note: MAX_TRAIN_STEPS can be left empty to train on full dataset for NUM_TRAIN_EPOCHS
 
 5. VideoPainter Editing:
    python infer/edit_bench.py \
@@ -1484,7 +1531,14 @@ COMMAND-LINE INTERFACES
      --video_root /path/to/videos \
      --mask_root /path/to/masks \
      --instruction "lane single white solid" \
-     --output_dir /path/to/output
+     --output_dir /path/to/output \
+     --llm_model /path/to/Qwen2.5-VL-7B-Instruct \
+     --caption_refine_iters 10 \
+     --caption_refine_temperature 0.1 \
+     --strength 1.0
+
+   Note: Environment variables can override defaults:
+   CAPTION_REFINE_ITERS=5 VP_STRENGTH=0.85 bash scripts/build_and_run.sh
 
 DEPENDENCIES & VERSIONS
 ───────────────────────
@@ -1531,16 +1585,27 @@ To reproduce this work:
    bash scripts/build_and_run_training_data.sh
 5. Filter dataset:
    bash scripts/build_and_run_sorting_data.sh
-6. Train LoRA:
+6. Train LoRA (with improved hyperparameters):
    cd ../../generation/VideoPainter
+   # Training runs for 5 epochs on full dataset by default
+   # Output checkpoint: fluxfill_single_white_solid_clearroad_YYYYMMDD_HHMMSS
    bash scripts/build_and_run_training.sh
-7. Run inference:
+7. Run inference (automatically uses checkpoint timestamp):
+   # Set TRAINED_FLUXFILL_GCS_PATH to your checkpoint location
+   TRAINED_FLUXFILL_GCS_PATH="workspace/user/.../fluxfill_single_white_solid_clearroad_YYYYMMDD_HHMMSS" \
    bash scripts/build_and_run.sh
 
 Random Seeds:
   - PyTorch: set_seed(42) in training scripts
   - Numpy: np.random.seed(42)
   - Python: random.seed(42)
+
+Key Configuration Updates:
+  - Learning rate reduced to 1e-5 for better stability
+  - Gradient accumulation of 4 for effective batch size of 4
+  - Epoch-based training instead of fixed steps
+  - More frequent checkpointing (every 100 steps)
+  - Automatic timestamp-based run IDs for traceability
 
 ================================================================================
                            CONCLUSIONS
@@ -1582,7 +1647,20 @@ FUTURE WORK
                            END OF DOCUMENT
 ================================================================================
 
+Last Updated: February 12, 2026
+
+Key Recent Updates:
+  - Improved training hyperparameters for better stability
+  - Epoch-based training (5 epochs default, configurable)
+  - Automatic timestamp-based checkpoint naming
+  - Enhanced VLM refinement control (10 iterations default)
+  - Configurable inpainting strength parameter
+  - Gradient accumulation for effective batch size of 4
+  - More frequent checkpointing (every 100 steps)
+  - Automatic checkpoint timestamp extraction in inference pipeline
+
 For questions or collaboration:
 Email: [CONTACT_EMAIL]
 GitHub: [Repository Link]
-Date: February 2026
+
+================================================================================

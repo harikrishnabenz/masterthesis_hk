@@ -514,7 +514,9 @@ def _get_sam2_image_predictor(*, ckpt_path: str, config_name: str, device: str):
     if not os.path.exists(ckpt_path):
         raise FileNotFoundError(f"SAM2 checkpoint not found: {ckpt_path}")
 
-    sam2_model = build_sam2(config_name, ckpt_path=ckpt_path, device=device, mode="eval")
+    # Load SAM2 without dtype conversion - the model handles mixed precision internally
+    # Apply_image in SAM2ImagePredictor automatically handles dtype conversion
+    sam2_model = build_sam2(config_name, ckpt_path=ckpt_path, device=device, mode="eval", apply_postprocessing=False)
     sam2_predictor = SAM2ImagePredictor(sam2_model)
     
     # Cache for this device
@@ -1003,20 +1005,11 @@ def generate_fluxfill_training_data(
                 chunk_num,
             ))
         
-        # Pre-load models on each GPU before processing to avoid repeated loads
-        logger.info("Pre-loading models on all GPUs...")
-        _preload_models_on_gpus(
-            sam2_checkpoint_path=sam2_checkpoint_path,
-            sam2_config_name=sam2_config_name,
-            qwen_model_path=QWEN_MODEL_FUSE_ROOT,
-            num_gpus=8,
-        )
-        logger.info("Models pre-loaded. Starting processing...")
-        
-        # Process videos in parallel using threading (shares model memory)
+        # Process videos in parallel using multiprocessing (isolated processes per GPU)
+        # Each process loads models on first use; global caching prevents reloads within process
         chunk_rows = []
-        logger.info("Starting parallel processing with %d workers (8 GPUs) using threading...", num_workers)
-        with ThreadPool(processes=num_workers) as pool:
+        logger.info("Starting parallel processing with %d workers (8 GPUs) using multiprocessing...", num_workers)
+        with Pool(processes=num_workers) as pool:
             results = pool.map(_process_single_video, process_args)
         
         # Flatten results

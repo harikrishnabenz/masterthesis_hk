@@ -18,8 +18,9 @@ echo "  MODEL_PREFIX: $MODEL_PREFIX"
 echo "  TRAINED_FLUXFILL_GCS_PATH: $TRAINED_FLUXFILL_GCS_PATH"
 
 # Declare a run suffix used by both this script and workflow.py
-# The model-size prefix is fixed to 7 (we only use Qwen2.5-VL-7B-Instruct).
-X="trained_ckpt"
+# Extract timestamp from the trained checkpoint folder name
+CHECKPOINT_TIMESTAMP=$(basename "$TRAINED_FLUXFILL_GCS_PATH" | grep -oE '[0-9]{8}_[0-9]{6}' | head -1)
+X="trained_ckpt_${CHECKPOINT_TIMESTAMP}"
 export VP_RUN_SUFFIX="${X}"
 
 # Build image first (required for the tag below)
