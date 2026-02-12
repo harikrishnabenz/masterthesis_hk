@@ -25,6 +25,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import cv2
+import numpy as np
+import torch
 import gcsfs
 
 from hlx.wf import DedicatedNode, Node, fuse_prefetch_metadata, task, workflow
@@ -517,6 +520,190 @@ def upload_file_to_gcs(local_path: str, gcs_path: str) -> None:
 	if remote_parent:
 		fs.makedirs(remote_parent, exist_ok=True)
 	fs.put(local_path, gcs_path)
+
+
+def _load_video_frames(video_path: str) -> tuple[list[np.ndarray], float]:
+	"""Load video frames from a video file."""
+	cap = cv2.VideoCapture(video_path)
+	frames = []
+	fps = cap.get(cv2.CAP_PROP_FPS)
+	
+	while True:
+		ret, frame = cap.read()
+		if not ret:
+			break
+		frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+		frames.append(frame_rgb)
+	
+	cap.release()
+	return frames, fps
+
+
+def _frames_to_tensor(frames: list[np.ndarray], device: torch.device) -> torch.Tensor:
+	"""Convert list of numpy frames to tensor [T, C, H, W]."""
+	frames_tensor = torch.from_numpy(np.stack(frames)).float() / 255.0
+	frames_tensor = frames_tensor.permute(0, 3, 1, 2)
+	return frames_tensor.to(device)
+
+
+def _load_mask_from_npz(mask_path: str, num_frames: int, frame_height: int, frame_width: int) -> np.ndarray:
+	"""Load mask frames from npz file."""
+	if os.path.exists(mask_path):
+		data = np.load(mask_path)
+		if 'masks' in data:
+			masks = data['masks'][:num_frames]
+			if masks.shape[1:3] != (frame_height, frame_width):
+				resized_masks = []
+				for mask in masks:
+					resized = cv2.resize(mask, (frame_width, frame_height))
+					resized_masks.append(resized)
+				return np.stack(resized_masks)
+			return masks
+	return np.ones((num_frames, frame_height, frame_width), dtype=np.uint8) * 255
+
+
+def _evaluate_video(
+	*,
+	original_path: str,
+	generated_path: str,
+	mask_path: str,
+	caption: str,
+	output_dir: str,
+	video_id: str,
+) -> dict:
+	"""Evaluate generated video against original using numerical metrics."""
+	try:
+		device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+		
+		# Import metrics calculator
+		sys.path.insert(0, os.path.join(BASE_WORKDIR, "evaluate"))
+		from metrics import MetricsCalculator
+		
+		logger.info("[EVAL][%s] Loading videos for evaluation", video_id)
+		original_frames, original_fps = _load_video_frames(original_path)
+		generated_frames, _ = _load_video_frames(generated_path)
+		
+		min_frames = min(len(original_frames), len(generated_frames))
+		original_frames = original_frames[:min_frames]
+		generated_frames = generated_frames[:min_frames]
+		
+		orig_h, orig_w = original_frames[0].shape[:2]
+		gen_h, gen_w = generated_frames[0].shape[:2]
+		
+		if (orig_h != gen_h) or (orig_w != gen_w):
+			generated_frames = [cv2.resize(f, (orig_w, orig_h)) for f in generated_frames]
+		
+		masks = _load_mask_from_npz(mask_path, min_frames, orig_h, orig_w)
+		mask_ratio = (masks > 127).sum() / masks.size
+		
+		original_tensor = _frames_to_tensor(original_frames, device)
+		generated_tensor = _frames_to_tensor(generated_frames, device)
+		mask_tensor = torch.from_numpy(masks).float().to(device) / 255.0
+		mask_tensor = mask_tensor.unsqueeze(1)
+		
+		metrics_calculator = MetricsCalculator(device)
+		
+		# Full-frame metrics
+		logger.info("[EVAL][%s] Calculating full-frame metrics", video_id)
+		full_metrics = {}
+		full_metrics['PSNR'] = metrics_calculator.calculate_psnr(original_tensor, generated_tensor)
+		full_metrics['SSIM'] = metrics_calculator.calculate_ssim(original_tensor, generated_tensor)
+		full_metrics['LPIPS'] = metrics_calculator.calculate_lpips(original_tensor, generated_tensor)
+		full_metrics['MSE'] = metrics_calculator.calculate_mse(original_tensor, generated_tensor)
+		full_metrics['MAE'] = metrics_calculator.calculate_mae(original_tensor, generated_tensor)
+		full_metrics['Temporal_Consistency'] = metrics_calculator.calculate_temporal_consistency(generated_tensor)
+		
+		if caption:
+			full_metrics['CLIP_Score'] = metrics_calculator.calculate_clip_score(generated_tensor, [caption])
+		
+		# Masked region metrics
+		logger.info("[EVAL][%s] Calculating masked-region metrics", video_id)
+		masked_metrics = {}
+		mask_binary = (mask_tensor > 0.5).float()
+		original_masked = original_tensor * mask_binary
+		generated_masked = generated_tensor * mask_binary
+		
+		masked_metrics['PSNR'] = metrics_calculator.calculate_psnr(original_masked, generated_masked, mask=mask_binary)
+		masked_metrics['SSIM'] = metrics_calculator.calculate_ssim(original_masked, generated_masked)
+		masked_metrics['LPIPS'] = metrics_calculator.calculate_lpips(original_masked, generated_masked)
+		masked_metrics['MSE'] = metrics_calculator.calculate_mse(original_masked, generated_masked)
+		masked_metrics['MAE'] = metrics_calculator.calculate_mae(original_masked, generated_masked)
+		masked_metrics['Temporal_Consistency'] = metrics_calculator.calculate_temporal_consistency(generated_masked)
+		
+		if caption:
+			masked_metrics['CLIP_Score'] = metrics_calculator.calculate_clip_score(generated_masked, [caption])
+		
+		# Save results
+		Path(output_dir).mkdir(parents=True, exist_ok=True)
+		output_path = os.path.join(output_dir, f"eval_{video_id}.txt")
+		
+		with open(output_path, 'w') as f:
+			f.write("="*80 + "\n")
+			f.write("VIDEO EVALUATION SUMMARY\n")
+			f.write("="*80 + "\n\n")
+			f.write(f"Video ID: {video_id}\n")
+			f.write(f"Evaluation Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC\n\n")
+			f.write(f"Original Video:  {original_path}\n")
+			f.write(f"Generated Video: {generated_path}\n")
+			f.write(f"Mask:            {mask_path}\n\n")
+			f.write(f"Frames:          {min_frames}\n")
+			f.write(f"Resolution:      {orig_w} x {orig_h}\n")
+			f.write(f"FPS:             {original_fps:.2f}\n")
+			f.write(f"Mask Coverage:   {mask_ratio*100:.2f}%\n\n")
+			f.write("="*80 + "\n")
+			f.write("FULL-FRAME METRICS\n")
+			f.write("="*80 + "\n")
+			f.write(f"  PSNR:                 {full_metrics['PSNR']:>10.4f} dB\n")
+			f.write(f"  SSIM:                 {full_metrics['SSIM']:>10.4f}\n")
+			f.write(f"  LPIPS:                {full_metrics['LPIPS']:>10.4f}\n")
+			f.write(f"  MSE:                  {full_metrics['MSE']:>10.6f}\n")
+			f.write(f"  MAE:                  {full_metrics['MAE']:>10.6f}\n")
+			f.write(f"  Temporal Consistency: {full_metrics['Temporal_Consistency']:>10.4f}\n")
+			if caption:
+				f.write(f"  CLIP Score:           {full_metrics['CLIP_Score']:>10.4f}\n")
+			f.write("\n" + "="*80 + "\n")
+			f.write("MASKED-REGION METRICS\n")
+			f.write("="*80 + "\n")
+			f.write(f"  PSNR:                 {masked_metrics['PSNR']:>10.4f} dB\n")
+			f.write(f"  SSIM:                 {masked_metrics['SSIM']:>10.4f}\n")
+			f.write(f"  LPIPS:                {masked_metrics['LPIPS']:>10.4f}\n")
+			f.write(f"  MSE:                  {masked_metrics['MSE']:>10.6f}\n")
+			f.write(f"  MAE:                  {masked_metrics['MAE']:>10.6f}\n")
+			f.write(f"  Temporal Consistency: {masked_metrics['Temporal_Consistency']:>10.4f}\n")
+			if caption:
+				f.write(f"  CLIP Score:           {masked_metrics['CLIP_Score']:>10.4f}\n")
+			f.write("\n" + "="*80 + "\n")
+			
+			quality_score = 0
+			if full_metrics['PSNR'] > 40:
+				quality_score += 1
+			if full_metrics['SSIM'] > 0.95:
+				quality_score += 1
+			if full_metrics['LPIPS'] < 0.1:
+				quality_score += 1
+			
+			f.write("QUALITY ASSESSMENT: ")
+			if quality_score >= 2:
+				f.write("EXCELLENT\n")
+			elif quality_score == 1:
+				f.write("GOOD\n")
+			else:
+				f.write("MODERATE\n")
+			f.write("="*80 + "\n")
+		
+		logger.info("[EVAL][%s] Evaluation complete: PSNR=%.2f SSIM=%.4f LPIPS=%.4f", 
+				   video_id, full_metrics['PSNR'], full_metrics['SSIM'], full_metrics['LPIPS'])
+		
+		return {
+			'output_path': output_path,
+			'full_metrics': full_metrics,
+			'masked_metrics': masked_metrics,
+			'mask_coverage': float(mask_ratio),
+		}
+		
+	except Exception as e:
+		logger.error("[EVAL][%s] Evaluation failed: %s", video_id, e, exc_info=True)
+		return {'error': str(e)}
 
 
 def _upload_run_source_files(*, gcs_save_path: str) -> list[str]:
@@ -1078,6 +1265,61 @@ def run_videopainter_edit_many(
 			uploaded = _upload_outputs(output_path=output_path, remote_output_path=remote_output)
 			upload_s = time.perf_counter() - upload_start
 			logger.info("[%s][%s] Uploaded: %s", instr_dir, vid, ", ".join(uploaded))
+			
+			# Run evaluation on the generated video
+			logger.info("[%s][%s] Running evaluation", instr_dir, vid)
+			eval_start = time.perf_counter()
+			try:
+				# Find original video and mask
+				meta_path, raw_root = _resolve_preprocessed_video_paths(
+					data_run_id=data_run_id,
+					data_video_id=vid,
+				)
+				video_base_name = _video_base_name_from_meta(
+					meta_csv_path=inpainting_mask_meta,
+					inpainting_sample_id=inpainting_sample_id,
+				)
+				
+				# Find original video file
+				expected_filename = f"{video_base_name}.0.mp4"
+				original_video_path = _select_video_file_under_root(
+					raw_root=raw_root,
+					video_base_name=video_base_name,
+					data_video_id=vid,
+					expected_filename=expected_filename,
+				)
+				
+				# Find mask file
+				mounted_video_dir = os.path.join(VP_DATA_FUSE_MOUNT_ROOT, data_run_id, vid)
+				mounted_masks_preferred = os.path.join(mounted_video_dir, "masks", vid, "all_masks.npz")
+				mounted_masks_legacy = os.path.join(mounted_video_dir, "mask_root", vid, "all_masks.npz")
+				
+				mask_path = mounted_masks_preferred if os.path.exists(mounted_masks_preferred) else mounted_masks_legacy
+				
+				# Run evaluation - save in same directory as video
+				eval_output_dir = os.path.join(staged_output_dir, instr_dir, vid)
+				eval_result = _evaluate_video(
+					original_path=original_video_path,
+					generated_path=output_path,
+					mask_path=mask_path,
+					caption=instruction,
+					output_dir=eval_output_dir,
+					video_id=vid,
+				)
+				
+				if 'error' not in eval_result:
+					# Upload evaluation results to GCS in same directory as video
+					eval_remote_path = os.path.join(gcs_save_path, instr_dir, vid, f"eval_{vid}.txt")
+					upload_file_to_gcs(eval_result['output_path'], eval_remote_path)
+					logger.info("[%s][%s] Evaluation uploaded: %s", instr_dir, vid, eval_remote_path)
+				else:
+					logger.warning("[%s][%s] Evaluation failed: %s", instr_dir, vid, eval_result['error'])
+				
+			except Exception as e:
+				logger.warning("[%s][%s] Evaluation failed: %s", instr_dir, vid, e)
+			
+			eval_s = time.perf_counter() - eval_start
+			logger.info("[%s][%s] Evaluation time: %.2fs", instr_dir, vid, eval_s)
 			logger.info("[%s][%s] Done", instr_dir, vid)
 
 			per_video_metrics.append(

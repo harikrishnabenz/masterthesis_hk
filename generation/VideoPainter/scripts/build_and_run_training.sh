@@ -25,7 +25,7 @@ REMOTE_IMAGE="europe-west4-docker.pkg.dev/mb-adas-2015-p-a4db/research/harimt_vp
 # Input dataset (filtered output from segmentation/sam2/filter_fluxfill_dataset.py)
 # Override example:
 #   INPUT_DATA_DIR="gs://.../training/data/my_dataset" bash scripts/build_and_run_training.sh
-INPUT_DATA_DIR="${INPUT_DATA_DIR:-mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Video_inpainting/videopainter/training/data/trainingdata_chunk199__chunk199_single_white_solid}"
+INPUT_DATA_DIR="${INPUT_DATA_DIR:-gs://mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Video_inpainting/videopainter/training/data/trainingdata_chunk199__chunk199_single_white_solid}"
 
 # Output checkpoint base prefix (workflow will create a subfolder per run_id)
 # Override example:
