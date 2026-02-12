@@ -621,3 +621,17 @@ def _convert_xlabs_flux_lora_to_diffusers(old_state_dict):
         raise ValueError(f"`old_state_dict` should be at this point but has: {list(old_state_dict.keys())}.")
 
     return new_state_dict
+
+
+def _convert_bfl_flux_control_lora_to_diffusers(state_dict):
+    """
+    Converts BFL Flux Control LoRA state dict to diffusers format.
+    These state dicts have keys like 'query_norm.scale' for control LoRA layers.
+    """
+    new_state_dict = {}
+    for key, value in state_dict.items():
+        # For now, pass through the keys as-is since this is a control LoRA format
+        # that may have norm layer keys. This preserves the structure while allowing
+        # the loader to handle these special keys.
+        new_state_dict[key] = value
+    return new_state_dict

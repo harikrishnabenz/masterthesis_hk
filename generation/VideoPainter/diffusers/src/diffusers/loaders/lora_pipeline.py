@@ -33,6 +33,7 @@ from ..utils import (
 )
 from .lora_base import LoraBaseMixin
 from .lora_conversion_utils import (
+    _convert_bfl_flux_control_lora_to_diffusers,
     _convert_kohya_flux_lora_to_diffusers,
     _convert_non_diffusers_lora_to_diffusers,
     _convert_xlabs_flux_lora_to_diffusers,
@@ -1575,7 +1576,7 @@ class FluxLoraLoaderMixin(LoraBaseMixin):
             "framework": "pytorch",
         }
 
-        state_dict = _fetch_state_dict(
+        state_dict = cls._fetch_state_dict(
             pretrained_model_name_or_path_or_dict=pretrained_model_name_or_path_or_dict,
             weight_name=weight_name,
             use_safetensors=use_safetensors,
