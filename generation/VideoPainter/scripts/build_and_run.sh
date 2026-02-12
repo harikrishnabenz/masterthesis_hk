@@ -7,8 +7,15 @@
 # mounted by workflow.py and exposed under the local path below.
 LLM_MODEL_PATH="/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct"
 
+# ----------------------------------------------------------------------------------
+# TRAINED FLUXFILL LORA CHECKPOINT (GCS)
+# ----------------------------------------------------------------------------------
+# Override with: TRAINED_FLUXFILL_GCS_PATH="workspace/user/.../my_checkpoint" bash scripts/build_and_run.sh
+TRAINED_FLUXFILL_GCS_PATH="${TRAINED_FLUXFILL_GCS_PATH:-workspace/user/hbaskar/Video_inpainting/videopainter/training/trained_checkpoint/fluxfill_single_white_solid_clearroad_20260212_144012}"
+export TRAINED_FLUXFILL_GCS_PATH
 
 echo "  MODEL_PREFIX: $MODEL_PREFIX"
+echo "  TRAINED_FLUXFILL_GCS_PATH: $TRAINED_FLUXFILL_GCS_PATH"
 
 # Declare a run suffix used by both this script and workflow.py
 # The model-size prefix is fixed to 7 (we only use Qwen2.5-VL-7B-Instruct).

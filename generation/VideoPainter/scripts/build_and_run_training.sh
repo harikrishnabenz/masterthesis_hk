@@ -37,12 +37,14 @@ OUTPUT_CHECKPOINT_DIR="${OUTPUT_CHECKPOINT_DIR:-gs://mbadas-sandbox-research-9bb
 #   OUTPUT_RUN_ID="fluxfill_experiment_01" bash scripts/build_and_run_training.sh
 OUTPUT_RUN_ID="${OUTPUT_RUN_ID:-fluxfill_single_white_solid_clearroad_$(date -u +%Y%m%d_%H%M%S)}"
 
-# Training hyperparameters (tweak as needed)
+# Training hyperparameters (improved defaults for stability)
 # Set MAX_TRAIN_STEPS="" to train on all images for NUM_TRAIN_EPOCHS epochs
 MAX_TRAIN_STEPS="${MAX_TRAIN_STEPS:-}"  # Empty = train on all data
-NUM_TRAIN_EPOCHS="${NUM_TRAIN_EPOCHS:-1}"  # Number of epochs (used when MAX_TRAIN_STEPS is empty)
-CHECKPOINTING_STEPS="${CHECKPOINTING_STEPS:-250}"
-LEARNING_RATE="${LEARNING_RATE:-1e-4}"
+NUM_TRAIN_EPOCHS="${NUM_TRAIN_EPOCHS:-5}"  # Number of epochs (used when MAX_TRAIN_STEPS is empty)
+CHECKPOINTING_STEPS="${CHECKPOINTING_STEPS:-100}"
+LEARNING_RATE="${LEARNING_RATE:-1e-5}"
+LR_SCHEDULER="${LR_SCHEDULER:-cosine}"
+LR_WARMUP_STEPS="${LR_WARMUP_STEPS:-50}"
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-1}"  # Keep at 1 due to FLUX memory requirements
 GRAD_ACCUM="${GRAD_ACCUM:-4}"  # Accumulate over 4 steps for effective batch size of 4
 MIXED_PRECISION="${MIXED_PRECISION:-bf16}"
@@ -88,6 +90,8 @@ WF_CMD="hlx wf run \
 	--train_batch_size \"${TRAIN_BATCH_SIZE}\" \
 	--gradient_accumulation_steps \"${GRAD_ACCUM}\" \
 	--learning_rate \"${LEARNING_RATE}\" \
+	--lr_scheduler \"${LR_SCHEDULER}\" \
+	--lr_warmup_steps \"${LR_WARMUP_STEPS}\" \
 	--num_train_epochs \"${NUM_TRAIN_EPOCHS}\" \
 	--checkpointing_steps \"${CHECKPOINTING_STEPS}\""
 

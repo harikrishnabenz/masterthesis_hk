@@ -159,8 +159,11 @@ VP_BUCKET_PREFIX = "workspace/user/hbaskar/Video_inpainting/videopainter"
 # NOTE: In our bucket layout, VLM checkpoints live under `ckpt/vlm/...`.
 VLM_7B_GCS_PREFIX = os.path.join(VP_BUCKET_PREFIX, "ckpt", "vlm", "Qwen2.5-VL-7B-Instruct")
 
-# Trained FluxFill checkpoint folder
-TRAINED_FLUXFILL_GCS_PREFIX = "workspace/user/hbaskar/Video_inpainting/videopainter/training/trained_checkpoint/fluxfill_single_white_solid_clearroad"
+# Trained FluxFill checkpoint folder (configurable via environment variable)
+TRAINED_FLUXFILL_GCS_PREFIX = os.environ.get(
+	"TRAINED_FLUXFILL_GCS_PATH",
+	"workspace/user/hbaskar/Video_inpainting/videopainter/training/trained_checkpoint/fluxfill_single_white_solid_clearroad_20260212_144012",
+)
 
 # GCS bucket path for SAM2 preprocessed data.
 # IMPORTANT: we mount the *base* prefix so `data_run_id` can be chosen dynamically.
