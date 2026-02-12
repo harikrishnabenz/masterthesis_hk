@@ -17,6 +17,7 @@ SOURCE_GCS_PREFIX="workspace/user/hbaskar/Video_inpainting/videopainter/training
 CHUNK_START="${1:-26}"
 CHUNK_END="${2:-49}"
 GPU_ID="${3:-0}"
+NUM_WORKERS="${4:-8}"
 
 NUM_VIDEOS="10000"
 START_INDEX="0"
@@ -28,7 +29,7 @@ FRAME_NUMBERS="1,250,500"
 QWEN_DEVICE="cuda:${GPU_ID}"
 SAM2_DEVICE="cuda:${GPU_ID}"
 
-echo "Processing chunks ${CHUNK_START} to ${CHUNK_END} on GPU ${GPU_ID}"
+echo "Processing chunks ${CHUNK_START} to ${CHUNK_END} with ${NUM_WORKERS} parallel workers"
 echo "Output will be: trainingdata_chunk${CHUNK_START}_${CHUNK_END}"
 
 # 0 means: keep walking the GCS prefix until enough .mp4s are found (or the prefix is exhausted).
@@ -54,6 +55,7 @@ echo "  SOURCE_GCS_PREFIX=${SOURCE_GCS_PREFIX}"
 echo "  NUM_VIDEOS=${NUM_VIDEOS} START_INDEX=${START_INDEX} OUTPUT_RUN_ID=${OUTPUT_RUN_ID}"
 echo "  FRAME_NUMBERS=${FRAME_NUMBERS}"
 echo "  CHUNK_START=${CHUNK_START} CHUNK_END=${CHUNK_END}"
+echo "  NUM_WORKERS=${NUM_WORKERS}"
 
 hlx wf run \
 	--team-space "${TEAM_SPACE}" \
@@ -68,7 +70,8 @@ hlx wf run \
 	--max_walk_files "${MAX_WALK_FILES}" \
 	--frame_numbers "${FRAME_NUMBERS}" \
 	--chunk_start "${CHUNK_START}" \
-	--chunk_end "${CHUNK_END}"
+	--chunk_end "${CHUNK_END}" \
+	--num_workers "${NUM_WORKERS}"
 
 echo "If successful, data is under:"
 echo "  gs://mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Video_inpainting/videopainter/training/data/${OUTPUT_RUN_ID}/"

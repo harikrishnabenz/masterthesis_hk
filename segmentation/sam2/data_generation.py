@@ -646,6 +646,96 @@ def _focus_image_to_mask(image_rgb: Image.Image, mask_l: Image.Image) -> Image.I
     return Image.fromarray(out, mode="RGB")
 
 
+def _process_single_video(
+    args: tuple,
+) -> list[dict]:
+    """Process a single video: extract frames, generate masks and captions.
+    
+    This function is designed to be called by multiprocessing workers.
+    Each worker operates on a dedicated GPU to avoid conflicts.
+    Returns a list of rows for the CSV.
+    """
+    (
+        global_index,
+        uri,
+        mp4_path,
+        frames,
+        images_dir,
+        masks_dir,
+        sam2_checkpoint_path,
+        sam2_config_name,
+        sam2_device,
+        qwen_model_path,
+        qwen_device,
+        system_prompt,
+        user_prompt,
+        chunk_num,
+    ) = args
+    
+    # Each worker gets its own logger
+    logger = logging.getLogger(f"{__name__}.worker.{sam2_device}")
+    rows = []
+    sid = _stable_id(uri)
+    
+    logger.info("Worker on %s processing %s (chunk_%04d)", sam2_device, os.path.basename(mp4_path), chunk_num)
+    
+    for frame_idx, frame_number in enumerate(frames, 1):
+        try:
+            out_base = f"{global_index:06d}_f{int(frame_number):04d}_{sid}.png"
+            out_img = os.path.join(images_dir, out_base)
+            out_mask = os.path.join(masks_dir, out_base)
+            
+            # Extract frame
+            _extract_frame_ffmpeg(mp4_path, frame_number=int(frame_number), out_png_path=out_img)
+            
+            # Load and process image
+            pil_img = Image.open(out_img).convert("RGB")
+            
+            # Generate mask
+            mask = _sam2_road_mask(
+                pil_img,
+                ckpt_path=sam2_checkpoint_path,
+                config_name=sam2_config_name,
+                device=sam2_device,
+            )
+            mask.save(out_mask)
+            
+            # Generate caption
+            focus_img = _focus_image_to_mask(pil_img, mask)
+            prompt_raw = _caption_qwen(
+                focus_img,
+                model_path=qwen_model_path,
+                qwen_device=qwen_device,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                max_new_tokens=64,
+            )
+            prompt = _lane_prompt_from_qwen_output(prompt_raw)
+            
+            row = {
+                "image": f"images/{os.path.basename(out_img)}",
+                "mask": f"masks/{os.path.basename(out_mask)}",
+                "prompt": prompt,
+                "prompt_2": prompt,
+            }
+            rows.append(row)
+            
+        except Exception as e:
+            logger.error("[%s] Failed to process frame %d of %s: %s", sam2_device, frame_number, uri, e)
+            # Clean up partial files
+            try:
+                if os.path.exists(out_img):
+                    os.remove(out_img)
+                if os.path.exists(out_mask):
+                    os.remove(out_mask)
+            except Exception:
+                pass
+            continue
+    
+    logger.info("Worker on %s completed %s: %d frames processed", sam2_device, os.path.basename(mp4_path), len(rows))
+    return rows
+
+
 @task(
     compute=DedicatedNode(
         node=Node.L4_8GPU,
@@ -682,6 +772,7 @@ def generate_fluxfill_training_data(
     chunk_start: int = 0,
     chunk_end: int = 200,
     output_run_id: Optional[str] = None,
+    num_workers: int = 8,
 ) -> str:
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -819,72 +910,51 @@ def generate_fluxfill_training_data(
             fs.get(remote, local_mp4)
             local_videos.append((global_index, uri, local_mp4))
         
-        logger.info("Processing %d videos from chunk_%04d (frames: %s)", len(local_videos), chunk_num, ",".join(str(f) for f in frames))
+        logger.info("Processing %d videos from chunk_%04d (frames: %s) using %d workers across 8 GPUs", len(local_videos), chunk_num, ",".join(str(f) for f in frames), num_workers)
         
-        # Process each video in this chunk (keep files locally)
+        # Prepare arguments for parallel processing
+        # Distribute videos across 8 GPUs in round-robin fashion
+        process_args = []
+        for vid_idx, (global_index, uri, mp4_path) in enumerate(local_videos):
+            gpu_id = vid_idx % 8  # Round-robin across 8 GPUs
+            worker_qwen_device = f"cuda:{gpu_id}"
+            worker_sam2_device = f"cuda:{gpu_id}"
+            
+            process_args.append((
+                global_index,
+                uri,
+                mp4_path,
+                frames,
+                images_dir,
+                masks_dir,
+                sam2_checkpoint_path,
+                sam2_config_name,
+                worker_sam2_device,
+                QWEN_MODEL_FUSE_ROOT,
+                worker_qwen_device,
+                system_prompt,
+                user_prompt,
+                chunk_num,
+            ))
+        
+        # Process videos in parallel using multiprocessing
         chunk_rows = []
-        for vid_idx, (global_index, uri, mp4_path) in enumerate(local_videos, 1):
-            logger.info("Processing video %d/%d in chunk_%04d: %s", vid_idx, len(local_videos), chunk_num, os.path.basename(mp4_path))
-            sid = _stable_id(uri)
-
-            for frame_idx, frame_number in enumerate(frames, 1):
-                logger.info("  Extracting frame %d/%d (frame#%d)", frame_idx, len(frames), frame_number)
-                out_base = f"{global_index:06d}_f{int(frame_number):04d}_{sid}.png"
-                out_img = os.path.join(images_dir, out_base)
-                out_mask = os.path.join(masks_dir, out_base)
-
-                try:
-                    _extract_frame_ffmpeg(mp4_path, frame_number=int(frame_number), out_png_path=out_img)
-                except Exception as e:
-                    # Short videos may not have all requested frames.
-                    logger.warning("Skipping %s frame %s: %s", uri, frame_number, e)
-                    try:
-                        if os.path.exists(out_img):
-                            os.remove(out_img)
-                    except Exception:
-                        pass
-                    continue
-
-                pil_img = Image.open(out_img).convert("RGB")
-                logger.info("  Generating SAM2 mask...")
-
-                mask = _sam2_road_mask(
-                    pil_img,
-                    ckpt_path=sam2_checkpoint_path,
-                    config_name=sam2_config_name,
-                    device=sam2_device,
-                )
-                mask.save(out_mask)
-                logger.info("  Generating caption...")
-
-                focus_img = _focus_image_to_mask(pil_img, mask)
-
-                prompt_raw = _caption_qwen(
-                    focus_img,
-                    model_path=QWEN_MODEL_FUSE_ROOT,
-                    qwen_device=qwen_device,
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                    max_new_tokens=64,
-                )
-                prompt = _lane_prompt_from_qwen_output(prompt_raw)
-
-                row = {
-                    "image": f"images/{os.path.basename(out_img)}",
-                    "mask": f"masks/{os.path.basename(out_mask)}",
-                    "prompt": prompt,
-                    "prompt_2": prompt,
-                }
-                chunk_rows.append(row)
-
-            # After all frames for this mp4, delete the local video.
+        logger.info("Starting parallel processing with %d workers (8 GPUs)...", num_workers)
+        with Pool(processes=num_workers) as pool:
+            results = pool.map(_process_single_video, process_args)
+        
+        # Flatten results
+        for video_rows in results:
+            chunk_rows.extend(video_rows)
+        
+        logger.info("Completed processing %d videos from chunk_%04d, generated %d image/mask pairs", len(local_videos), chunk_num, len(chunk_rows))
+        
+        # Delete downloaded video files
+        for _, _, mp4_path in local_videos:
             try:
                 os.remove(mp4_path)
             except Exception:
                 pass
-
-            if len(chunk_rows) and (len(chunk_rows) % 50 == 0):
-                logger.info("Processed %d rows in chunk_%04d so far", len(chunk_rows), chunk_num)
         
         # Batch upload all images and masks for this chunk
         logger.info("Uploading %d images and masks for chunk_%04d...", len(chunk_rows), chunk_num)
@@ -943,6 +1013,7 @@ def fluxfill_data_generation_wf(
     chunk_start: int = 0,
     chunk_end: int = 200,
     output_run_id: Optional[str] = None,
+    num_workers: int = 8,
 ) -> str:
     return generate_fluxfill_training_data(
         num_videos=num_videos,
@@ -960,4 +1031,5 @@ def fluxfill_data_generation_wf(
         chunk_start=chunk_start,
         chunk_end=chunk_end,
         output_run_id=output_run_id,
+        num_workers=num_workers,
     )
