@@ -9,10 +9,13 @@ Expected CSV columns (configurable):
 
 import argparse
 import csv
+import json
 import logging
 import math
 import os
+import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import List, Optional
 
 import torch
@@ -133,7 +136,8 @@ def parse_args() -> argparse.Namespace:
         choices=["constant", "cosine", "linear", "cosine_with_restarts"],
     )
     parser.add_argument("--lr_warmup_steps", type=int, default=0)
-    parser.add_argument("--max_train_steps", type=int, default=1000)
+    parser.add_argument("--max_train_steps", type=int, default=None, help="Max training steps. If None, trains for full epochs to cover all data")
+    parser.add_argument("--num_train_epochs", type=int, default=1, help="Number of epochs to train (used if max_train_steps is None)")
 
     parser.add_argument("--rank", type=int, default=16)
     parser.add_argument("--lora_alpha", type=int, default=16)
@@ -155,6 +159,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    
+    training_start_time = time.time()
+    training_start_datetime = datetime.now()
 
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -217,6 +224,9 @@ def main() -> None:
         caption_column=args.caption_column,
         caption_2_column=args.caption_2_column,
     )
+    
+    dataset_size = len(dataset)
+    logger.info(f"Dataset loaded: {dataset_size} training examples")
 
     def collate(examples: List[InpaintExample]):
         images = [_load_rgb(e.image_path) for e in examples]
@@ -235,7 +245,17 @@ def main() -> None:
     )
 
     num_update_steps_per_epoch = math.ceil(len(dataloader) / args.gradient_accumulation_steps)
-    num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
+    
+    # Calculate training steps and epochs
+    if args.max_train_steps is None:
+        # Train for specified epochs to cover all data
+        num_train_epochs = args.num_train_epochs
+        args.max_train_steps = num_train_epochs * num_update_steps_per_epoch
+        logger.info(f"Training for {num_train_epochs} epoch(s) = {args.max_train_steps} steps to cover all {dataset_size} images")
+    else:
+        # Use specified max_train_steps
+        num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
+        logger.info(f"Training for {args.max_train_steps} steps (~{num_train_epochs} epoch(s))")
 
     lr_scheduler = get_scheduler(
         args.lr_scheduler,
@@ -306,6 +326,8 @@ def main() -> None:
     pipe.text_encoder_2.to(accelerator.device, dtype=weight_dtype)
 
     global_step = 0
+    loss_history = []  # Track loss for summary
+    epoch_losses = []  # Track average loss per epoch
 
     if args.resume_from_checkpoint:
         accelerator.load_state(args.resume_from_checkpoint)
@@ -318,7 +340,13 @@ def main() -> None:
                 global_step = 0
         logger.info(f"Resumed from checkpoint: {args.resume_from_checkpoint} (global_step={global_step})")
 
-    for _epoch in range(num_train_epochs):
+    logger.info(f"Starting training for {num_train_epochs} epoch(s), {args.max_train_steps} total steps")
+    epoch_step_losses = []  # Track losses within current epoch
+
+    for epoch in range(num_train_epochs):
+        epoch_start_time = time.time()
+        epoch_step_losses = []
+        
         for images, masks, prompts, prompts_2 in dataloader:
             with accelerator.accumulate(pipe.transformer):
                 device = accelerator.device
@@ -409,12 +437,17 @@ def main() -> None:
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
+                
+                # Track loss
+                current_loss = loss.detach().item()
+                epoch_step_losses.append(current_loss)
 
             if accelerator.sync_gradients:
                 global_step += 1
+                loss_history.append((global_step, current_loss))
 
                 if accelerator.is_main_process and (global_step % 10 == 0):
-                    logger.info(f"step={global_step} loss={loss.detach().item():.6f}")
+                    logger.info(f"epoch={epoch+1}/{num_train_epochs} step={global_step}/{args.max_train_steps} loss={current_loss:.6f}")
 
                 if (
                     accelerator.is_main_process
@@ -426,13 +459,146 @@ def main() -> None:
                 if global_step >= args.max_train_steps:
                     break
 
+        # Log epoch summary
+        if epoch_step_losses:
+            epoch_avg_loss = sum(epoch_step_losses) / len(epoch_step_losses)
+            epoch_losses.append((epoch + 1, epoch_avg_loss))
+            epoch_duration = time.time() - epoch_start_time
+            if accelerator.is_main_process:
+                logger.info(f"Epoch {epoch+1}/{num_train_epochs} completed in {epoch_duration:.2f}s - Average loss: {epoch_avg_loss:.6f}")
+        
         if global_step >= args.max_train_steps:
             break
+
+    training_duration = time.time() - training_start_time
+    training_end_datetime = datetime.now()
 
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         accelerator.save_state(args.output_dir)
         logger.info(f"Done. LoRA weights saved to: {args.output_dir}")
+        
+        # Generate training summary
+        summary_path = os.path.join(args.output_dir, "training_summary.txt")
+        with open(summary_path, "w", encoding="utf-8") as f:
+            f.write("=" * 80 + "\n")
+            f.write("FLUX.1 FILL LORA TRAINING SUMMARY\n")
+            f.write("=" * 80 + "\n\n")
+            
+            f.write("TRAINING INFORMATION\n")
+            f.write("-" * 80 + "\n")
+            f.write(f"Training Start:     {training_start_datetime.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Training End:       {training_end_datetime.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Total Duration:     {training_duration/3600:.2f} hours ({training_duration/60:.2f} minutes)\n")
+            f.write(f"Output Directory:   {args.output_dir}\n\n")
+            
+            f.write("MODEL INFORMATION\n")
+            f.write("-" * 80 + "\n")
+            f.write(f"Model Type:         FLUX.1 Fill (FluxFillPipeline)\n")
+            f.write(f"Training Method:    LoRA (Low-Rank Adaptation)\n")
+            f.write(f"Base Model Path:    {args.pretrained_model_name_or_path}\n\n")
+            
+            f.write("DATASET INFORMATION\n")
+            f.write("-" * 80 + "\n")
+            f.write(f"Training CSV:       {args.train_csv}\n")
+            f.write(f"Total Images:       {dataset_size}\n")
+            f.write(f"Image Column:       {args.image_column}\n")
+            f.write(f"Mask Column:        {args.mask_column}\n")
+            f.write(f"Caption Column:     {args.caption_column}\n")
+            f.write(f"Caption 2 Column:   {args.caption_2_column}\n")
+            f.write(f"Image Resolution:   {args.height}x{args.width}\n")
+            f.write(f"Mask Inverted:      {args.invert_mask}\n\n")
+            
+            f.write("TRAINING HYPERPARAMETERS\n")
+            f.write("-" * 80 + "\n")
+            f.write(f"Number of Epochs:           {num_train_epochs}\n")
+            f.write(f"Total Training Steps:       {global_step} / {args.max_train_steps}\n")
+            f.write(f"Steps per Epoch:            {num_update_steps_per_epoch}\n")
+            f.write(f"Batch Size:                 {args.train_batch_size}\n")
+            f.write(f"Gradient Accumulation:      {args.gradient_accumulation_steps}\n")
+            f.write(f"Effective Batch Size:       {args.train_batch_size * args.gradient_accumulation_steps}\n")
+            f.write(f"Learning Rate:              {args.learning_rate}\n")
+            f.write(f"LR Scheduler:               {args.lr_scheduler}\n")
+            f.write(f"LR Warmup Steps:            {args.lr_warmup_steps}\n")
+            f.write(f"Mixed Precision:            {args.mixed_precision}\n")
+            f.write(f"Gradient Checkpointing:     {args.gradient_checkpointing}\n")
+            f.write(f"Random Seed:                {args.seed if args.seed is not None else 'Not set'}\n\n")
+            
+            f.write("LORA CONFIGURATION\n")
+            f.write("-" * 80 + "\n")
+            f.write(f"LoRA Rank (r):              {args.rank}\n")
+            f.write(f"LoRA Alpha:                 {args.lora_alpha}\n")
+            f.write(f"Target Modules:             to_q, to_k, to_v, to_out.0\n")
+            f.write(f"Trainable Parameters:       Transformer LoRA layers only\n")
+            f.write(f"Frozen Components:          VAE, Text Encoders, Base Transformer\n\n")
+            
+            f.write("TRAINING PROGRESS\n")
+            f.write("-" * 80 + "\n")
+            f.write(f"Images Processed:           ~{global_step * args.train_batch_size * args.gradient_accumulation_steps}\n")
+            f.write(f"Checkpointing Interval:     Every {args.checkpointing_steps} steps\n")
+            if args.resume_from_checkpoint:
+                f.write(f"Resumed from:               {args.resume_from_checkpoint}\n")
+            f.write("\n")
+            
+            f.write("LOSS METRICS\n")
+            f.write("-" * 80 + "\n")
+            if loss_history:
+                f.write(f"Loss Function:              MSE (Mean Squared Error)\n")
+                f.write(f"Initial Loss (step 1):      {loss_history[0][1]:.6f}\n")
+                f.write(f"Final Loss (step {loss_history[-1][0]}):     {loss_history[-1][1]:.6f}\n")
+                
+                # Calculate average loss in first and last 10% of training
+                first_10_percent = max(1, len(loss_history) // 10)
+                last_10_percent = max(1, len(loss_history) // 10)
+                early_avg = sum(l[1] for l in loss_history[:first_10_percent]) / first_10_percent
+                late_avg = sum(l[1] for l in loss_history[-last_10_percent:]) / last_10_percent
+                
+                f.write(f"Early Training Avg Loss:    {early_avg:.6f} (first 10%)\n")
+                f.write(f"Late Training Avg Loss:     {late_avg:.6f} (last 10%)\n")
+                f.write(f"Loss Reduction:             {((early_avg - late_avg) / early_avg * 100):.2f}%\n")
+                f.write(f"Min Loss:                   {min(l[1] for l in loss_history):.6f}\n")
+                f.write(f"Max Loss:                   {max(l[1] for l in loss_history):.6f}\n")
+            
+            if epoch_losses:
+                f.write("\nPer-Epoch Average Loss:\n")
+                for epoch_num, avg_loss in epoch_losses:
+                    f.write(f"  Epoch {epoch_num}: {avg_loss:.6f}\n")
+            f.write("\n")
+            
+            f.write("SYSTEM CONFIGURATION\n")
+            f.write("-" * 80 + "\n")
+            f.write(f"Accelerator State:          {accelerator.state}\n")
+            f.write(f"Distributed Training:       {accelerator.num_processes > 1}\n")
+            f.write(f"Number of Processes:        {accelerator.num_processes}\n")
+            f.write(f"Device:                     {accelerator.device}\n")
+            f.write(f"Data Loader Workers:        4\n\n")
+            
+            f.write("=" * 80 + "\n")
+            f.write("DETAILED LOSS HISTORY\n")
+            f.write("=" * 80 + "\n")
+            f.write(f"{'Step':<10} {'Loss':<15}\n")
+            f.write("-" * 25 + "\n")
+            for step, loss_val in loss_history:
+                f.write(f"{step:<10} {loss_val:<15.6f}\n")
+            
+        logger.info(f"Training summary saved to: {summary_path}")
+        
+        # Also save loss history as JSON for easier parsing
+        json_path = os.path.join(args.output_dir, "loss_history.json")
+        with open(json_path, "w") as f:
+            json.dump({
+                "loss_history": [{"step": s, "loss": l} for s, l in loss_history],
+                "epoch_losses": [{"epoch": e, "avg_loss": l} for e, l in epoch_losses],
+                "training_info": {
+                    "dataset_size": dataset_size,
+                    "total_steps": global_step,
+                    "num_epochs": num_train_epochs,
+                    "batch_size": args.train_batch_size,
+                    "learning_rate": args.learning_rate,
+                    "duration_seconds": training_duration
+                }
+            }, f, indent=2)
+        logger.info(f"Loss history JSON saved to: {json_path}")
 
 
 if __name__ == "__main__":

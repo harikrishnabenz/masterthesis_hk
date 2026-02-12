@@ -200,7 +200,8 @@ def train_fluxfill_lora_task(
 	learning_rate: float = 1e-4,
 	lr_scheduler: str = "constant",
 	lr_warmup_steps: int = 0,
-	max_train_steps: int = 1000,
+	max_train_steps: Optional[int] = None,
+	num_train_epochs: int = 1,
 	rank: int = 16,
 	lora_alpha: int = 16,
 	checkpointing_steps: int = 250,
@@ -264,8 +265,8 @@ def train_fluxfill_lora_task(
 		str(lr_scheduler),
 		"--lr_warmup_steps",
 		str(int(lr_warmup_steps)),
-		"--max_train_steps",
-		str(int(max_train_steps)),
+		"--num_train_epochs",
+		str(int(num_train_epochs)),
 		"--rank",
 		str(int(rank)),
 		"--lora_alpha",
@@ -273,6 +274,10 @@ def train_fluxfill_lora_task(
 		"--checkpointing_steps",
 		str(int(checkpointing_steps)),
 	]
+	
+	# Add max_train_steps only if specified (otherwise trains for full epochs)
+	if max_train_steps is not None:
+		cmd.extend(["--max_train_steps", str(int(max_train_steps))])
 
 	if seed is not None:
 		cmd.extend(["--seed", str(int(seed))])
@@ -333,7 +338,8 @@ def fluxfill_training_wf(
 	learning_rate: float = 1e-4,
 	lr_scheduler: str = "constant",
 	lr_warmup_steps: int = 0,
-	max_train_steps: int = 1000,
+	max_train_steps: Optional[int] = None,
+	num_train_epochs: int = 1,
 	rank: int = 16,
 	lora_alpha: int = 16,
 	checkpointing_steps: int = 250,
@@ -354,6 +360,7 @@ def fluxfill_training_wf(
 		lr_scheduler=lr_scheduler,
 		lr_warmup_steps=lr_warmup_steps,
 		max_train_steps=max_train_steps,
+		num_train_epochs=num_train_epochs,
 		rank=rank,
 		lora_alpha=lora_alpha,
 		checkpointing_steps=checkpointing_steps,

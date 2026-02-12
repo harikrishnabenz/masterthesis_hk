@@ -38,12 +38,14 @@ OUTPUT_CHECKPOINT_DIR="${OUTPUT_CHECKPOINT_DIR:-gs://mbadas-sandbox-research-9bb
 OUTPUT_RUN_ID="${OUTPUT_RUN_ID:-fluxfill_single_white_solid_clearroad_$(date -u +%Y%m%d_%H%M%S)}"
 
 # Training hyperparameters (tweak as needed)
-MAX_TRAIN_STEPS="1000"
-CHECKPOINTING_STEPS="250"
-LEARNING_RATE="1e-4"
-TRAIN_BATCH_SIZE="1"
-GRAD_ACCUM="1"
-MIXED_PRECISION="bf16"
+# Set MAX_TRAIN_STEPS="" to train on all images for NUM_TRAIN_EPOCHS epochs
+MAX_TRAIN_STEPS="${MAX_TRAIN_STEPS:-}"  # Empty = train on all data
+NUM_TRAIN_EPOCHS="${NUM_TRAIN_EPOCHS:-1}"  # Number of epochs (used when MAX_TRAIN_STEPS is empty)
+CHECKPOINTING_STEPS="${CHECKPOINTING_STEPS:-250}"
+LEARNING_RATE="${LEARNING_RATE:-1e-4}"
+TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-1}"
+GRAD_ACCUM="${GRAD_ACCUM:-1}"
+MIXED_PRECISION="${MIXED_PRECISION:-bf16}"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
@@ -68,20 +70,33 @@ echo "Running HLX workflow: training_workflow.fluxfill_training_wf"
 echo "  INPUT_DATA_DIR=${INPUT_DATA_DIR}"
 echo "  OUTPUT_CHECKPOINT_DIR=${OUTPUT_CHECKPOINT_DIR}"
 echo "  OUTPUT_RUN_ID=${OUTPUT_RUN_ID}"
+echo "  NUM_TRAIN_EPOCHS=${NUM_TRAIN_EPOCHS}"
+if [ -n "${MAX_TRAIN_STEPS}" ]; then
+	echo "  MAX_TRAIN_STEPS=${MAX_TRAIN_STEPS}"
+else
+	echo "  Training on all images for ${NUM_TRAIN_EPOCHS} epoch(s)"
+fi
 
-hlx wf run \
-	--team-space "${TEAM_SPACE}" \
-	--domain "${DOMAIN}" \
+WF_CMD="hlx wf run \
+	--team-space \"${TEAM_SPACE}\" \
+	--domain \"${DOMAIN}\" \
 	training_workflow.fluxfill_training_wf \
-	--input_data_dir "${INPUT_DATA_DIR}" \
-	--output_checkpoint_dir "${OUTPUT_CHECKPOINT_DIR}" \
-	--output_run_id "${OUTPUT_RUN_ID}" \
-	--mixed_precision "${MIXED_PRECISION}" \
-	--train_batch_size "${TRAIN_BATCH_SIZE}" \
-	--gradient_accumulation_steps "${GRAD_ACCUM}" \
-	--learning_rate "${LEARNING_RATE}" \
-	--max_train_steps "${MAX_TRAIN_STEPS}" \
-	--checkpointing_steps "${CHECKPOINTING_STEPS}"
+	--input_data_dir \"${INPUT_DATA_DIR}\" \
+	--output_checkpoint_dir \"${OUTPUT_CHECKPOINT_DIR}\" \
+	--output_run_id \"${OUTPUT_RUN_ID}\" \
+	--mixed_precision \"${MIXED_PRECISION}\" \
+	--train_batch_size \"${TRAIN_BATCH_SIZE}\" \
+	--gradient_accumulation_steps \"${GRAD_ACCUM}\" \
+	--learning_rate \"${LEARNING_RATE}\" \
+	--num_train_epochs \"${NUM_TRAIN_EPOCHS}\" \
+	--checkpointing_steps \"${CHECKPOINTING_STEPS}\""
+
+# Add max_train_steps only if specified
+if [ -n "${MAX_TRAIN_STEPS}" ]; then
+	WF_CMD="${WF_CMD} --max_train_steps \"${MAX_TRAIN_STEPS}\""
+fi
+
+eval "${WF_CMD}"
 
 echo "If successful, checkpoints are under:"
 echo "  ${OUTPUT_CHECKPOINT_DIR}/${OUTPUT_RUN_ID}/"
