@@ -34,6 +34,7 @@ import subprocess
 import tempfile
 from datetime import datetime
 from multiprocessing import Pool
+from multiprocessing.pool import ThreadPool
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -157,12 +158,14 @@ def _gcs_strip_scheme(uri: str) -> str:
     return uri[len("gs://") :] if uri.startswith("gs://") else uri
 
 
-def _upload_file_to_gcs(fs: gcsfs.GCSFileSystem, local_path: str, gcs_uri: str) -> None:
+def _upload_file_to_gcs(fs: gcsfs.GCSFileSystem, local_path: str, gcs_uri: str, log_upload: bool = True) -> None:
     remote = _gcs_strip_scheme(gcs_uri)
     remote_parent = os.path.dirname(remote)
     if remote_parent:
         fs.makedirs(remote_parent, exist_ok=True)
     fs.put(local_path, remote)
+    if log_upload:
+        logger.info("Uploaded: %s -> gs://%s", os.path.basename(local_path), remote)
 
 
 def _list_mp4s_in_gcs_prefix(
@@ -316,16 +319,19 @@ def _local_mp4_name_for_uri(uri: str, index: int) -> str:
 # --------------------------------------------------------------------------------------
 # QWEN CAPTIONING
 # --------------------------------------------------------------------------------------
-_qwen_model = None
-_qwen_processor = None
-_qwen_model_id = None
+# Store models per device to support multiple GPUs
+_qwen_models = {}  # device -> (model, processor, model_path)
 _process_vision_info = None
 
 
 def _get_qwen_model(model_path: str, *, qwen_device: str = "cuda:1"):
-    global _qwen_model, _qwen_processor, _qwen_model_id
-    if _qwen_model is not None and _qwen_processor is not None and _qwen_model_id == model_path:
-        return _qwen_model, _qwen_processor
+    global _qwen_models
+    
+    # Check if model already loaded for this device
+    if qwen_device in _qwen_models:
+        cached_model, cached_processor, cached_path = _qwen_models[qwen_device]
+        if cached_path == model_path:
+            return cached_model, cached_processor
 
     try:
         from transformers import Qwen2_5_VLForConditionalGeneration as _Qwen, AutoProcessor
@@ -364,13 +370,16 @@ def _get_qwen_model(model_path: str, *, qwen_device: str = "cuda:1"):
                     max_memory[i] = "1GiB"
             load_kwargs["max_memory"] = max_memory
 
-    load_kwargs["offload_folder"] = os.path.join(tempfile.gettempdir(), "qwen_offload")
+    load_kwargs["offload_folder"] = os.path.join(tempfile.gettempdir(), f"qwen_offload_{qwen_device.replace(':', '_')}")
     load_kwargs["offload_state_dict"] = True
 
-    _qwen_model = _Qwen.from_pretrained(model_path, torch_dtype=torch.bfloat16, **load_kwargs)
-    _qwen_processor = AutoProcessor.from_pretrained(model_path, local_files_only=True)
-    _qwen_model_id = model_path
-    return _qwen_model, _qwen_processor
+    model = _Qwen.from_pretrained(model_path, torch_dtype=torch.bfloat16, **load_kwargs)
+    processor = AutoProcessor.from_pretrained(model_path, local_files_only=True)
+    
+    # Cache for this device
+    _qwen_models[qwen_device] = (model, processor, model_path)
+    
+    return model, processor
 
 
 def _caption_qwen(
@@ -484,16 +493,20 @@ def _lane_prompt_from_qwen_output(text: str) -> str:
 # --------------------------------------------------------------------------------------
 # SAM2 MASKING (FIRST FRAME)
 # --------------------------------------------------------------------------------------
-_sam2_model = None
-_sam2_predictor = None
-_sam2_key = None
+# Store SAM2 models per device
+_sam2_predictors = {}  # device -> (predictor, key)
 
 
 def _get_sam2_image_predictor(*, ckpt_path: str, config_name: str, device: str):
-    global _sam2_model, _sam2_predictor, _sam2_key
+    global _sam2_predictors
+    
     key = f"{ckpt_path}|{config_name}|{device}"
-    if _sam2_predictor is not None and _sam2_key == key:
-        return _sam2_predictor
+    
+    # Check if predictor already loaded for this device
+    if device in _sam2_predictors:
+        cached_predictor, cached_key = _sam2_predictors[device]
+        if cached_key == key:
+            return cached_predictor
 
     from sam2.build_sam import build_sam2
     from sam2.sam2_image_predictor import SAM2ImagePredictor
@@ -501,10 +514,13 @@ def _get_sam2_image_predictor(*, ckpt_path: str, config_name: str, device: str):
     if not os.path.exists(ckpt_path):
         raise FileNotFoundError(f"SAM2 checkpoint not found: {ckpt_path}")
 
-    _sam2_model = build_sam2(config_name, ckpt_path=ckpt_path, device=device, mode="eval")
-    _sam2_predictor = SAM2ImagePredictor(_sam2_model)
-    _sam2_key = key
-    return _sam2_predictor
+    sam2_model = build_sam2(config_name, ckpt_path=ckpt_path, device=device, mode="eval")
+    sam2_predictor = SAM2ImagePredictor(sam2_model)
+    
+    # Cache for this device
+    _sam2_predictors[device] = (sam2_predictor, key)
+    
+    return sam2_predictor
 
 
 def _fill_binary_mask_holes(mask_255):
@@ -737,6 +753,55 @@ def _process_single_video(
     return rows
 
 
+def _preload_models_on_gpus(
+    *,
+    sam2_checkpoint_path: str,
+    sam2_config_name: str,
+    qwen_model_path: str,
+    num_gpus: int = 8,
+) -> None:
+    """Pre-load models on each GPU to avoid repeated loading during multiprocessing.
+    
+    This loads one model instance per GPU and stores them in global variables.
+    Using threading instead of multiprocessing allows all threads to share these models.
+    """
+    import threading
+    
+    def _load_on_gpu(gpu_id: int):
+        device = f"cuda:{gpu_id}"
+        logger.info("Pre-loading models on %s...", device)
+        
+        # Pre-load SAM2
+        try:
+            _ = _get_sam2_image_predictor(
+                ckpt_path=sam2_checkpoint_path,
+                config_name=sam2_config_name,
+                device=device,
+            )
+            logger.info("SAM2 loaded on %s", device)
+        except Exception as e:
+            logger.warning("Failed to pre-load SAM2 on %s: %s", device, e)
+        
+        # Pre-load Qwen
+        try:
+            _ = _get_qwen_model(qwen_model_path, qwen_device=device)
+            logger.info("Qwen loaded on %s", device)
+        except Exception as e:
+            logger.warning("Failed to pre-load Qwen on %s: %s", device, e)
+    
+    # Load models in parallel on all GPUs
+    threads = []
+    for gpu_id in range(num_gpus):
+        t = threading.Thread(target=_load_on_gpu, args=(gpu_id,))
+        t.start()
+        threads.append(t)
+    
+    for t in threads:
+        t.join()
+    
+    logger.info("All models pre-loaded on %d GPUs", num_gpus)
+
+
 @task(
     compute=DedicatedNode(
         node=Node.L4_8GPU,
@@ -938,10 +1003,20 @@ def generate_fluxfill_training_data(
                 chunk_num,
             ))
         
-        # Process videos in parallel using multiprocessing
+        # Pre-load models on each GPU before processing to avoid repeated loads
+        logger.info("Pre-loading models on all GPUs...")
+        _preload_models_on_gpus(
+            sam2_checkpoint_path=sam2_checkpoint_path,
+            sam2_config_name=sam2_config_name,
+            qwen_model_path=QWEN_MODEL_FUSE_ROOT,
+            num_gpus=8,
+        )
+        logger.info("Models pre-loaded. Starting processing...")
+        
+        # Process videos in parallel using threading (shares model memory)
         chunk_rows = []
-        logger.info("Starting parallel processing with %d workers (8 GPUs)...", num_workers)
-        with Pool(processes=num_workers) as pool:
+        logger.info("Starting parallel processing with %d workers (8 GPUs) using threading...", num_workers)
+        with ThreadPool(processes=num_workers) as pool:
             results = pool.map(_process_single_video, process_args)
         
         # Flatten results
@@ -959,18 +1034,25 @@ def generate_fluxfill_training_data(
         
         # Batch upload all images and masks for this chunk
         logger.info("Uploading %d images and masks for chunk_%04d...", len(chunk_rows), chunk_num)
-        for row in chunk_rows:
+        upload_count = 0
+        for idx, row in enumerate(chunk_rows):
             img_basename = row["image"].split("/")[-1]
             mask_basename = row["mask"].split("/")[-1]
             local_img = os.path.join(images_dir, img_basename)
             local_mask = os.path.join(masks_dir, mask_basename)
             
             if os.path.exists(local_img):
-                _upload_file_to_gcs(fs, local_img, f"{remote_images_prefix}/{img_basename}")
+                _upload_file_to_gcs(fs, local_img, f"{remote_images_prefix}/{img_basename}", log_upload=False)
                 os.remove(local_img)
+                upload_count += 1
             if os.path.exists(local_mask):
-                _upload_file_to_gcs(fs, local_mask, f"{remote_masks_prefix}/{mask_basename}")
+                _upload_file_to_gcs(fs, local_mask, f"{remote_masks_prefix}/{mask_basename}", log_upload=False)
                 os.remove(local_mask)
+                upload_count += 1
+            
+            # Log progress every 10 files
+            if (idx + 1) % 10 == 0 or (idx + 1) == len(chunk_rows):
+                logger.info("Upload progress: %d/%d pairs (%d files)", idx + 1, len(chunk_rows), upload_count)
         
         # Append all rows to CSV and upload once per chunk
         with open(csv_path, "a", newline="", encoding="utf-8") as f:
