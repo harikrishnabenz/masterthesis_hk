@@ -305,6 +305,32 @@ def run_inference_on_video(
         with open(output_file, "w") as f:
             json.dump(results, f, indent=2)
 
+        # 9. Save visualization data (tensors) for offline plotting
+        vis_file = os.path.join(output_dir, f"{video_id}_vis_data.npz")
+        try:
+            # image_frames: (N_cameras, num_frames, 3, H, W) -> (N_cams*num_frames, H, W, 3) uint8
+            image_frames_np = (
+                data["image_frames"]
+                .cpu()
+                .numpy()
+                .transpose(0, 1, 3, 4, 2)          # (N_cam, T, H, W, 3)
+                .reshape(-1, *data["image_frames"].shape[-2:], 3)  # (N_cam*T, H, W, 3)
+            )
+            vis_data = {
+                "pred_xyz": pred_xyz.cpu().numpy()[0, 0],       # (S, 64, 3)
+                "pred_rot": pred_rot.cpu().numpy()[0, 0],       # (S, 64, 3, 3)
+                "gt_future_xyz": data["ego_future_xyz"].cpu().numpy()[0, 0],   # (64, 3)
+                "gt_future_rot": data["ego_future_rot"].cpu().numpy()[0, 0],   # (64, 3, 3)
+                "ego_history_xyz": data["ego_history_xyz"].cpu().numpy()[0, 0],  # (16, 3)
+                "ego_history_rot": data["ego_history_rot"].cpu().numpy()[0, 0],  # (16, 3, 3)
+                "image_frames": image_frames_np,                # (N_cam*T, H, W, 3)
+                "camera_indices": data["camera_indices"].cpu().numpy(),  # (N_cam,)
+            }
+            np.savez_compressed(vis_file, **vis_data)
+            logger.info(f"  Visualization data saved → {vis_file}")
+        except Exception as vis_err:
+            logger.warning(f"  Failed to save visualization data: {vis_err}")
+
         logger.info(f"  minADE = {min_ade:.4f} m | time = {inference_time:.1f}s | saved → {output_file}")
         return results
 

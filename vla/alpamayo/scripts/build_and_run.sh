@@ -24,7 +24,7 @@ VIDEO_DATA_GCS_PATH="${VIDEO_DATA_GCS_PATH:-gs://mbadas-sandbox-research-9bb9c7f
 # RUN CONFIGURATION
 # ----------------------------------------------------------------------------------
 # Unique identifier for this run (default: timestamp)
-RUN_ID="${RUN_ID:-alpamayo_$(date -u +%Y%m%d_%H%M%S)}"
+RUN_ID="${RUN_ID:-alpamayo_1_$(date -u +%Y%m%d_%H%M%S)}"
 
 # Number of trajectory samples per video
 NUM_TRAJ_SAMPLES="${NUM_TRAJ_SAMPLES:-1}"

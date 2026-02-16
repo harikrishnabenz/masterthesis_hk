@@ -3,6 +3,7 @@
 Runs the Alpamayo-R1-10B model inference on video data and produces
 trajectory predictions with reasoning traces.
 """
+import json
 import logging
 import os
 import re
@@ -13,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import gcsfs
 import psutil
 
 from hlx.wf import DedicatedNode, Node, task, workflow
@@ -56,10 +58,6 @@ VIDEO_DATA_GCS_PREFIX = os.environ.get(
 )
 VIDEO_DATA_FUSE_MOUNT_NAME = "alpamayo-video-data"
 VIDEO_DATA_FUSE_MOUNT_ROOT = os.path.join(MOUNTPOINT, VIDEO_DATA_FUSE_MOUNT_NAME)
-
-# FuseBucket for output
-OUTPUT_FUSE_MOUNT_NAME = "alpamayo-output"
-OUTPUT_FUSE_MOUNT_ROOT = os.path.join(MOUNTPOINT, OUTPUT_FUSE_MOUNT_NAME)
 
 # Local paths inside container
 BASE_WORKDIR = "/workspace/alpamayo"
@@ -181,110 +179,78 @@ def _stage_video_data(video_gcs_path: str) -> list[str]:
     return video_paths
 
 
+def _load_model(model_id: str, device: str = "cuda"):
+    """Load Alpamayo model, processor, and helper once.
+
+    Returns (model, processor, helper_mod, device_str).
+    """
+    import torch
+    from alpamayo_r1.models.alpamayo_r1 import AlpamayoR1
+    from alpamayo_r1 import helper as helper_mod
+
+    resolved_device = device if device != "auto" else "cuda"
+    logger.info(f"Loading Alpamayo model from {model_id} …")
+    model = AlpamayoR1.from_pretrained(model_id, dtype=torch.bfloat16).to(resolved_device)
+    processor = helper_mod.get_processor(model.tokenizer)
+    logger.info("Model loaded successfully")
+    return model, processor, helper_mod, resolved_device
+
+
 def _run_alpamayo_inference(
     video_path: str,
     output_dir: str,
-    model_id: str = "nvidia/Alpamayo-R1-10B",
+    model,
+    processor,
+    helper_mod,
+    device: str = "cuda",
     num_traj_samples: int = 1,
 ) -> VLAVideoMetrics:
-    """Run Alpamayo inference on a single video using the run_inference.py script."""
+    """Run Alpamayo inference on a single video *in-process* (no subprocess)."""
+    from run_inference import run_inference_on_video
+
     video_id = Path(video_path).stem
     logger.info(f"Running inference on video: {video_id}")
-    
-    # Reset metrics
-    _reset_gpu_memory_stats()
-    ram_start = _get_ram_mb()
-    
-    start_time = time.time()
-    
+
     # Create output directory for this video
     video_output_dir = os.path.join(output_dir, video_id)
     Path(video_output_dir).mkdir(parents=True, exist_ok=True)
-    
-    # Run the inference script
-    inference_script = os.path.join(BASE_WORKDIR, "run_inference.py")
-    cmd = [
-        "python",
-        inference_script,
-        "--video_path", video_path,
-        "--output_dir", video_output_dir,
-        "--model_id", model_id,
-        "--num_traj_samples", str(num_traj_samples),
-        "--device", "auto",
-    ]
-    
-    logger.info(f"Running command: {' '.join(cmd)}")
-    
+
     try:
-        import subprocess
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        
-        logger.info(f"Inference stdout: {result.stdout}")
-        if result.stderr:
-            logger.warning(f"Inference stderr: {result.stderr}")
-        
-        # Load the inference results
-        inference_result_file = os.path.join(video_output_dir, f"{video_id}_inference.json")
-        if os.path.exists(inference_result_file):
-            import json
-            with open(inference_result_file, "r") as f:
-                inference_data = json.load(f)
-            
-            inference_time = time.time() - start_time
-            
-            return VLAVideoMetrics(
-                video_id=video_id,
-                video_path=video_path,
-                inference_time_seconds=inference_data["metrics"]["inference_time_seconds"],
-                gpu_memory_used_gb=inference_data["metrics"]["gpu_memory_used_gb"],
-                gpu_memory_peak_gb=inference_data["metrics"]["gpu_memory_peak_gb"],
-                ram_used_mb=inference_data["metrics"]["ram_used_mb"],
-                ram_peak_mb=inference_data["metrics"]["ram_peak_mb"],
-                num_trajectories=inference_data.get("num_trajectories", 0),
-                success=inference_data["success"],
-                min_ade_meters=inference_data.get("min_ade_meters"),
-                clip_id=inference_data.get("clip_id"),
-                camera_name=inference_data.get("camera_name"),
-                error_message=inference_data.get("error"),
-            )
-        else:
-            raise FileNotFoundError(f"Inference result file not found: {inference_result_file}")
-        
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Inference script failed: {e}")
-        logger.error(f"stdout: {e.stdout}")
-        logger.error(f"stderr: {e.stderr}")
-        
-        inference_time = time.time() - start_time
-        gpu_current, gpu_peak = _get_gpu_memory_gb()
-        
-        return VLAVideoMetrics(
-            video_id=video_id,
+        result = run_inference_on_video(
             video_path=video_path,
-            inference_time_seconds=inference_time,
-            gpu_memory_used_gb=gpu_current,
-            gpu_memory_peak_gb=gpu_peak,
-            ram_used_mb=_get_ram_mb(),
-            ram_peak_mb=_get_ram_mb(),
-            num_trajectories=0,
-            success=False,
-            error_message=f"Script failed: {e.stderr}",
+            model=model,
+            processor=processor,
+            helper_mod=helper_mod,
+            output_dir=video_output_dir,
+            num_traj_samples=num_traj_samples,
+            device=device,
         )
+
+        return VLAVideoMetrics(
+            video_id=result.get("video_id", video_id),
+            video_path=video_path,
+            inference_time_seconds=result["metrics"]["inference_time_seconds"],
+            gpu_memory_used_gb=result["metrics"]["gpu_memory_used_gb"],
+            gpu_memory_peak_gb=result["metrics"]["gpu_memory_peak_gb"],
+            ram_used_mb=result["metrics"]["ram_used_mb"],
+            ram_peak_mb=result["metrics"]["ram_peak_mb"],
+            num_trajectories=result.get("num_trajectories", 0),
+            success=result["success"],
+            min_ade_meters=result.get("min_ade_meters"),
+            clip_id=result.get("clip_id"),
+            camera_name=result.get("camera_name"),
+            error_message=result.get("error"),
+        )
+
     except Exception as e:
-        logger.error(f"Error during inference on {video_id}: {e}")
-        
-        inference_time = time.time() - start_time
+        logger.error(f"Error during inference on {video_id}: {e}", exc_info=True)
+
         gpu_current, gpu_peak = _get_gpu_memory_gb()
-        
+
         return VLAVideoMetrics(
             video_id=video_id,
             video_path=video_path,
-            inference_time_seconds=inference_time,
+            inference_time_seconds=0.0,
             gpu_memory_used_gb=gpu_current,
             gpu_memory_peak_gb=gpu_peak,
             ram_used_mb=_get_ram_mb(),
@@ -376,19 +342,34 @@ def _write_report(
     return report_path
 
 
+def _upload_directory_to_gcs(local_dir: str, gcs_prefix: str) -> None:
+    """Recursively upload a local directory to a GCS prefix using gcsfs."""
+    fs = gcsfs.GCSFileSystem(token="google_default")
+    base = Path(local_dir)
+    for path in base.rglob("*"):
+        if path.is_dir():
+            continue
+        rel = path.relative_to(base).as_posix()
+        remote = f"{gcs_prefix.rstrip('/')}/{rel}"
+        remote_parent = os.path.dirname(remote)
+        if remote_parent:
+            fs.makedirs(remote_parent, exist_ok=True)
+        fs.put(path.as_posix(), remote)
+
+
 def _upload_outputs(local_dir: str, gcs_base: str, run_id: str) -> str:
-    """Copy outputs to the FuseBucket output mount (no gsutil needed)."""
-    dest = os.path.join(OUTPUT_FUSE_MOUNT_ROOT, run_id)
-    gcs_dest = os.path.join(gcs_base, run_id)
-    logger.info(f"Copying outputs from {local_dir} to {dest}")
+    """Upload outputs to GCS using gcsfs (reliable write path)."""
+    gcs_dest = f"{VP_BUCKET}/{gcs_base}/{run_id}"
+    logger.info(f"Uploading outputs from {local_dir} to gs://{gcs_dest}")
 
     try:
-        shutil.copytree(local_dir, dest, dirs_exist_ok=True)
-        logger.info(f"Outputs available at gs://{VP_BUCKET}/{gcs_dest}")
+        _upload_directory_to_gcs(local_dir, gcs_dest)
+        logger.info(f"Outputs available at gs://{gcs_dest}")
     except Exception as e:
-        logger.error(f"Failed to copy outputs to FuseBucket mount: {e}")
+        logger.error(f"Failed to upload outputs to GCS: {e}", exc_info=True)
+        raise
 
-    return f"gs://{VP_BUCKET}/{gcs_dest}"
+    return f"gs://{gcs_dest}"
 
 
 @task(
@@ -414,11 +395,6 @@ def _upload_outputs(local_dir: str, gcs_base: str, run_id: str) -> str:
             bucket=VP_BUCKET,
             name=VIDEO_DATA_FUSE_MOUNT_NAME,
             prefix=VIDEO_DATA_GCS_PREFIX,
-        ),
-        FuseBucket(
-            bucket=VP_BUCKET,
-            name=OUTPUT_FUSE_MOUNT_NAME,
-            prefix=VLA_OUTPUT_PREFIX,
         ),
     ],
 )
@@ -460,11 +436,14 @@ def run_alpamayo_inference_task(
     
     logger.info(f"Processing {len(video_paths)} videos")
     
+    # Load model ONCE for all videos
+    model, processor, helper_mod, device = _load_model(model_id)
+    
     # Create output directory
     local_output_dir = os.path.join(SCRATCH_OUTPUT_BASE, output_run_id)
     Path(local_output_dir).mkdir(parents=True, exist_ok=True)
     
-    # Run inference on each video
+    # Run inference on each video (in-process, reusing loaded model)
     all_metrics = []
     for i, video_path in enumerate(video_paths, 1):
         logger.info(f"Processing video {i}/{len(video_paths)}: {video_path}")
@@ -473,7 +452,10 @@ def run_alpamayo_inference_task(
         metrics = _run_alpamayo_inference(
             video_path=video_path,
             output_dir=video_output_dir,
-            model_id=model_id,
+            model=model,
+            processor=processor,
+            helper_mod=helper_mod,
+            device=device,
             num_traj_samples=num_traj_samples,
         )
         all_metrics.append(metrics)

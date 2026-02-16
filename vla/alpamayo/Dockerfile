@@ -56,6 +56,7 @@ RUN pip install --no-cache-dir \
         "accelerate>=1.12.0" \
         "av>=16.0.1" \
         "einops>=0.8.1" \
+        "gcsfs>=2024.2.0" \
         "hydra-colorlog>=1.2.0" \
         "hydra-core>=1.3.2" \
         "pandas>=2.3.3" \
@@ -79,6 +80,11 @@ COPY hlx_wf-2.4.2.dev9-py3-none-any.whl /workspace/alpamayo/
 
 # Install the hlx_wf wheel into system Python
 RUN python3 -m pip install /workspace/alpamayo/hlx_wf-2.4.2.dev9-py3-none-any.whl
+
+# Patch physical_ai_av: .to_numpy() returns read-only arrays with Arrow backend,
+# which breaks scipy.spatial.transform.Rotation.from_quat (needs writable buffer).
+RUN sed -i 's/\.to_numpy())/\.to_numpy().copy())/' \
+    /usr/local/lib/python3.12/dist-packages/physical_ai_av/egomotion.py
 
 # Copy project files (at the end for better layer caching)
 COPY . /workspace/alpamayo
