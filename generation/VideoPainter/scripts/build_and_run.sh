@@ -11,7 +11,7 @@ LLM_MODEL_PATH="/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct"
 # TRAINED FLUXFILL LORA CHECKPOINT (GCS)
 # ----------------------------------------------------------------------------------
 # Override with: TRAINED_FLUXFILL_GCS_PATH="workspace/user/.../my_checkpoint" bash scripts/build_and_run.sh
-TRAINED_FLUXFILL_GCS_PATH="${TRAINED_FLUXFILL_GCS_PATH:-workspace/user/hbaskar/Video_inpainting/videopainter/training/trained_checkpoint/fluxfill_single_white_solid_clearroad_20260212_144012}"
+TRAINED_FLUXFILL_GCS_PATH="${TRAINED_FLUXFILL_GCS_PATH:-workspace/user/hbaskar/Video_inpainting/videopainter/training/trained_checkpoint/fluxfill_single_white_solid_clearroad_20260212_151908}"
 export TRAINED_FLUXFILL_GCS_PATH
 
 echo "  MODEL_PREFIX: $MODEL_PREFIX"
@@ -20,7 +20,7 @@ echo "  TRAINED_FLUXFILL_GCS_PATH: $TRAINED_FLUXFILL_GCS_PATH"
 # Declare a run suffix used by both this script and workflow.py
 # Extract timestamp from the trained checkpoint folder name
 CHECKPOINT_TIMESTAMP=$(basename "$TRAINED_FLUXFILL_GCS_PATH" | grep -oE '[0-9]{8}_[0-9]{6}' | head -1)
-X="trained_ckpt_${CHECKPOINT_TIMESTAMP}"
+X="withoutlora_5prompt_${CHECKPOINT_TIMESTAMP}"
 export VP_RUN_SUFFIX="${X}"
 
 # Build image first (required for the tag below)
@@ -62,8 +62,7 @@ export VP_CONTAINER_IMAGE="${REMOTE_IMAGE_TAGGED}"
 #   trimming to 20 words.
 #
 # So: put the *core visual change* first, then optional constraints after ';'.
-VIDEO_EDITING_INSTRUCTIONS="Single solid white continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged"
-
+VIDEO_EDITING_INSTRUCTIONS=$'Single solid white continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged\nDouble solid white continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged\nSingle solid yellow continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged\nDouble solid yellow continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged\nSingle dashed white intermitted line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged'
 # -----------------------------------------------------------------------------
 # First-frame caption refinement (Qwen critic loop)
 # Set these env vars to override defaults:
@@ -95,7 +94,7 @@ hlx wf run \
   --inpainting_branch "/workspace/VideoPainter/ckpt/VideoPainter/checkpoints/branch" \
   --img_inpainting_model "/workspace/VideoPainter/ckpt/flux_inp" \
   --img_inpainting_lora_path "/workspace/VideoPainter/ckpt/trained_fluxfill_lora" \
-  --img_inpainting_lora_scale 1.0 \
+  --img_inpainting_lora_scale 0.0 \
   --output_name_suffix "vp_edit_sample0.mp4" \
   --num_inference_steps 70 \
   --guidance_scale 6.0 \
