@@ -1,9 +1,52 @@
+#!/bin/bash
+# ==================================================================================
+# VideoPainter Editing - Build and Run Script
+# ==================================================================================
+#
+# PIPELINE POSITION: Stage 2 of 3  (SAM2 --> VP --> Alpamayo)
+#
+# INPUT:
+#   SAM2-preprocessed video data from Stage 1:
+#     gs://<bucket>/.../outputs/preprocessed_data_vp/<data_run_id>/<video_id>/
+#       ├── meta.csv
+#       ├── raw_videos/
+#       └── masks/
+#
+# OUTPUT:
+#   Edited videos written to:
+#     gs://<bucket>/.../training/output/vp/<output_run_id>/
+#   This is the INPUT for Stage 3 (Alpamayo).
+# ==================================================================================
 
+set -euo pipefail
 
-# ----------------------------------------------------------------------------------
-# OUTPUT FOLDER (override: VP_OUTPUT_BASE="gs://..." bash scripts/build_and_run.sh)
-# ----------------------------------------------------------------------------------
-VP_OUTPUT_BASE="${VP_OUTPUT_BASE:-gs://mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Video_inpainting/videopainter/training/output/vp}"
+# ==============================================================================
+# GCS BUCKET
+# ==============================================================================
+GCS_BUCKET="mbadas-sandbox-research-9bb9c7f"
+
+# ==============================================================================
+# RUN ID  (set this to identify your run; combined with timestamp for output folders)
+# ==============================================================================
+RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+RUN_ID="${RUN_ID:-001}"
+
+# ==============================================================================
+# INPUT PATHS
+# ==============================================================================
+# SAM2 preprocessed data (output of Stage 1).
+# The workflow mounts this prefix via FuseBucket and uses data_run_id as subfolder.
+# Override: VP_INPUT_BASE="gs://bucket/path" bash scripts/build_and_run.sh
+VP_INPUT_BASE="${VP_INPUT_BASE:-gs://${GCS_BUCKET}/workspace/user/hbaskar/outputs/preprocessed_data_vp}"
+export VP_INPUT_BASE
+
+# ==============================================================================
+# OUTPUT PATHS
+# ==============================================================================
+# Final edited videos.  Path: ${VP_OUTPUT_BASE}/<output_run_id>/
+# This is consumed by Stage 3 (Alpamayo).
+# Override: VP_OUTPUT_BASE="gs://..." bash scripts/build_and_run.sh
+VP_OUTPUT_BASE="${VP_OUTPUT_BASE:-gs://${GCS_BUCKET}/workspace/user/hbaskar/outputs/vp}"
 export VP_OUTPUT_BASE
 
 # ----------------------------------------------------------------------------------
@@ -20,9 +63,15 @@ LLM_MODEL_PATH="/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct"
 TRAINED_FLUXFILL_GCS_PATH="${TRAINED_FLUXFILL_GCS_PATH:-workspace/user/hbaskar/Video_inpainting/videopainter/training/trained_checkpoint/fluxfill_single_white_solid_clearroad_20260212_151908}"
 export TRAINED_FLUXFILL_GCS_PATH
 
-echo "  MODEL_PREFIX: $MODEL_PREFIX"
-echo "  TRAINED_FLUXFILL_GCS_PATH: $TRAINED_FLUXFILL_GCS_PATH"
-echo "  VP_OUTPUT_BASE: $VP_OUTPUT_BASE"
+echo "================================================================================"
+echo "VIDEOPAINTER EDITING - BUILD AND RUN"
+echo "================================================================================"
+echo "  RUN_ID:                    ${RUN_ID}"
+echo "  RUN_TIMESTAMP:             ${RUN_TIMESTAMP}"
+echo "  INPUT (SAM2 preprocessed): ${VP_INPUT_BASE}/<data_run_id>/"
+echo "  OUTPUT (edited videos):    ${VP_OUTPUT_BASE}/<output_run_id>/"
+echo "  TRAINED_FLUXFILL_GCS_PATH: ${TRAINED_FLUXFILL_GCS_PATH}"
+echo "================================================================================"
 
 # Declare a run suffix used by both this script and workflow.py
 # Extract timestamp from the trained checkpoint folder name
@@ -88,13 +137,16 @@ CAPTION_REFINE_TEMPERATURE="${CAPTION_REFINE_TEMPERATURE:-0.1}"
 VP_STRENGTH="${VP_STRENGTH:-1.0}"
 
 
+VP_OUTPUT_RUN_ID="${VP_OUTPUT_RUN_ID:-${RUN_ID}_${RUN_TIMESTAMP}}"
+VP_DATA_RUN_ID="${VP_DATA_RUN_ID:-001}"
+
 hlx wf run \
   --team-space research \
   --domain prod \
   --execution-name "vp-${X//_/-}-$(date -u +%Y%m%d-%H%M%S)" \
   workflow.videopainter_many_wf \
-  --data_run_id "10_150f_caption_fps8" \
-  --output_run_id "10_${X}" \
+  --data_run_id "${VP_DATA_RUN_ID}" \
+  --output_run_id "${VP_OUTPUT_RUN_ID}" \
   --data_video_ids "auto" \
   --inpainting_sample_id 0 \
   --model_path "/workspace/VideoPainter/ckpt/CogVideoX-5b-I2V" \
@@ -116,7 +168,14 @@ hlx wf run \
   --mask_feather 8 \
   --keep_masked_pixels
 
-echo "VideoPainter report will be uploaded as: ${VP_OUTPUT_BASE}/10_${X}/10_${X}.txt"
+echo ""
+echo "================================================================================"
+echo "WORKFLOW SUBMITTED"
+echo "================================================================================"
+echo "  Input (SAM2 data):   ${VP_INPUT_BASE}/${VP_DATA_RUN_ID}/"
+echo "  Output (→ Alpamayo): ${VP_OUTPUT_BASE}/${VP_OUTPUT_RUN_ID}/"
+echo "  Report:              ${VP_OUTPUT_BASE}/${VP_OUTPUT_RUN_ID}/${VP_OUTPUT_RUN_ID}.txt"
+echo "================================================================================"
 
 # llm_model options:
 # --llm_model "/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct"  # Local (mounted)

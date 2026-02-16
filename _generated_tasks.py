@@ -29,8 +29,7 @@ BUCKET = "mbadas-sandbox-research-9bb9c7f"
 
 # Output base path used by the master pipeline
 OUTPUT_BASE = (
-    "gs://mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar"
-    "/Video_inpainting/videopainter/training/output"
+    "gs://mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/outputs"
 )
 
 
@@ -72,7 +71,10 @@ def create_fuse_buckets():
         "sam2_input_videos": FuseBucket(
             bucket=BUCKET,
             name="input-videos",
-            prefix="datasets/public/physical_ai_av/camera/camera_front_tele_30fov",
+            prefix=os.environ.get(
+                "SAM2_INPUT_PREFIX",
+                "workspace/user/hbaskar/Input/data_physical_ai",
+            ),
         ),
 
         # ── VideoPainter ────────────────────────────────────────────────────
@@ -111,7 +113,7 @@ def create_fuse_buckets():
             name="alpamayo-video-data",
             prefix=os.environ.get(
                 "ALPAMAYO_VIDEO_DATA_PREFIX",
-                "workspace/user/hbaskar/Video_inpainting/videopainter/output_vp_final",
+                "workspace/user/hbaskar/outputs/vp",
             ),
         ),
         "alpamayo_output": FuseBucket(
@@ -119,7 +121,7 @@ def create_fuse_buckets():
             name="alpamayo-output",
             prefix=os.environ.get(
                 "ALPAMAYO_OUTPUT_BASE",
-                "workspace/user/hbaskar/Video_inpainting/videopainter/training/output/alpamayo",
+                "workspace/user/hbaskar/outputs/alpamayo",
             ),
         ),
     }
@@ -136,22 +138,29 @@ SAM2_DEFAULT_CHECKPOINT = os.path.join(SAM2_BASE_WORKDIR, "checkpoints", "sam2.1
 SAM2_DEFAULT_CONFIG = "configs/sam2.1/sam2.1_hiera_l.yaml"
 SAM2_OUTPUT_BUCKET_BASE = os.environ.get(
     "SAM2_OUTPUT_BASE",
-    "gs://mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Video_inpainting/videopainter/training/output/sam2",
+    "gs://mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/outputs/sam2",
 )
-SAM2_PREPROCESSED_BUCKET_BASE = "gs://mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/outputs/preprocessed_data_vp"
+SAM2_PREPROCESSED_BUCKET_BASE = os.environ.get(
+    "SAM2_PREPROCESSED_OUTPUT_BASE",
+    "gs://mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/outputs/preprocessed_data_vp",
+)
 
-SAM2_DEFAULT_VIDEO_URIS = [
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/datasets/public/physical_ai_av/camera/camera_front_tele_30fov/25534c8d-4d02-463a-84c9-dad015f320ac.camera_front_tele_30fov.mp4",
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/datasets/public/physical_ai_av/camera/camera_front_tele_30fov/13e7d364-6476-4f2f-b94e-060440bf1a36.camera_front_tele_30fov.mp4",
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/datasets/public/physical_ai_av/camera/camera_front_tele_30fov/025887fd-9f6a-4ba4-aa30-60d7ab1e137f.camera_front_tele_30fov.mp4",
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/datasets/public/physical_ai_av/camera/camera_front_tele_30fov/ee680a47-b981-468f-b817-8712af5953d5.camera_front_tele_30fov.mp4",
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/datasets/public/physical_ai_av/camera/camera_front_tele_30fov/d3317bae-0c7e-4e34-8975-50b6bd715dc3.camera_front_tele_30fov.mp4",
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/datasets/public/physical_ai_av/camera/camera_front_tele_30fov/4809025e-0cef-414c-bf59-8c86a5177ef7.camera_front_tele_30fov.mp4",
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/datasets/public/physical_ai_av/camera/camera_front_tele_30fov/83563feb-695f-4152-a0bf-346d56f89373.camera_front_tele_30fov.mp4",
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/datasets/public/physical_ai_av/camera/camera_front_tele_30fov/99b474d6-9ea5-4e17-87a2-84267728763d.camera_front_tele_30fov.mp4",
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/datasets/public/physical_ai_av/camera/camera_front_tele_30fov/d2cadb4e-585e-4b7f-890f-2fa198713203.camera_front_tele_30fov.mp4",
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/datasets/public/physical_ai_av/camera/camera_front_tele_30fov/6e08b4de-9282-409f-be26-2d24e066baac.camera_front_tele_30fov.mp4",
-]
+# Chunk-based video selection defaults
+SAM2_INPUT_BASE = os.environ.get(
+    "SAM2_INPUT_BASE",
+    f"gs://{BUCKET}/workspace/user/hbaskar/Input/data_physical_ai/camera_front_tele_30fov",
+)
+SAM2_DEFAULT_CHUNK_FROM = int(os.environ.get("SAM2_CHUNK_START", "0"))
+SAM2_DEFAULT_CHUNK_TO = int(os.environ.get("SAM2_CHUNK_END", "19"))
+SAM2_DEFAULT_FILES_PER_CHUNK = int(os.environ.get("SAM2_FILES_PER_CHUNK", "1"))
+
+# Build a chunks:// URI from chunk parameters – resolved at runtime inside the GPU container
+_SAM2_INPUT_BASE_NO_GS = SAM2_INPUT_BASE.replace("gs://", "", 1)
+SAM2_DEFAULT_VIDEO_URI = (
+    f"chunks://{_SAM2_INPUT_BASE_NO_GS}"
+    f"?start={SAM2_DEFAULT_CHUNK_FROM}&end={SAM2_DEFAULT_CHUNK_TO}"
+    f"&per_chunk={SAM2_DEFAULT_FILES_PER_CHUNK}"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +170,7 @@ VP_BASE_WORKDIR = "/workspace/VideoPainter"
 VP_DEFAULT_MODEL_PATH = os.path.join(VP_BASE_WORKDIR, "ckpt", "CogVideoX-5b-I2V")
 VP_DEFAULT_BRANCH_PATH = os.path.join(VP_BASE_WORKDIR, "ckpt", "VideoPainter/checkpoints/branch")
 VP_DEFAULT_IMG_INPAINT_PATH = os.path.join(VP_BASE_WORKDIR, "ckpt", "flux_inp")
-VP_DEFAULT_DATA_RUN_ID = os.environ.get("DATA_RUN_ID", "10_150f_caption_fps8")
+VP_DEFAULT_DATA_RUN_ID = os.environ.get("DATA_RUN_ID", "001")
 VP_DEFAULT_LLM_MODEL = "/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct"
 VP_DEFAULT_LORA_PATH = "/workspace/VideoPainter/ckpt/trained_fluxfill_lora"
 VP_FLUX_DEVICE_DEFAULT = "cuda:0"
@@ -209,7 +218,7 @@ def task_sam2_segmentation(
     from hlx.wf import fuse_prefetch_metadata
 
     if video_uris is None:
-        video_uris = SAM2_DEFAULT_VIDEO_URIS
+        video_uris = [SAM2_DEFAULT_VIDEO_URI]
 
     # ── Resolve video URIs from various input formats ───────────────────────
     def _resolve_video_uris(uris):
@@ -309,6 +318,8 @@ def task_sam2_segmentation(
         raise FileNotFoundError(f"SAM2 checkpoint not found: {checkpoint_path}")
 
     # Setup input video symlinks
+    # The FuseBucket now mounts data_physical_ai, so camera subfolder is inside the mount
+    CAMERA_SUBFOLDER = os.environ.get("SAM2_CAMERA_SUBFOLDER", "camera_front_tele_30fov")
     try:
         fuse_prefetch_metadata(INPUT_VIDEOS_MOUNT_ROOT)
     except Exception as e:
@@ -320,11 +331,18 @@ def task_sam2_segmentation(
     local_video_paths = []
     for uri in video_uris:
         video_filename = uri.split("/")[-1]
-        mounted_video_path = os.path.join(INPUT_VIDEOS_MOUNT_ROOT, video_filename)
+        # Try with camera subfolder first (new layout)
+        mounted_video_path = os.path.join(INPUT_VIDEOS_MOUNT_ROOT, CAMERA_SUBFOLDER, video_filename)
+        # Fallback: direct under mount root (old layout)
+        mounted_video_path_flat = os.path.join(INPUT_VIDEOS_MOUNT_ROOT, video_filename)
         local_video_path = video_cache_dir / video_filename
         if os.path.exists(mounted_video_path):
             if not local_video_path.exists():
                 os.symlink(mounted_video_path, local_video_path)
+            local_video_paths.append(str(local_video_path))
+        elif os.path.exists(mounted_video_path_flat):
+            if not local_video_path.exists():
+                os.symlink(mounted_video_path_flat, local_video_path)
             local_video_paths.append(str(local_video_path))
         else:
             local_video_paths.append(uri)
@@ -617,7 +635,7 @@ TASKS_BY_STAGE = {
 
 @workflow
 def eval_sam2_segmentation(
-    run_id: str = "10_150f_caption_fps8",
+    run_id: str = "001",
     max_frames: int = 150,
 ) -> str:
     """Run SAM2 segmentation with default video list."""
@@ -629,8 +647,8 @@ def eval_sam2_segmentation(
 
 @workflow
 def eval_sam2_single_video(
-    run_id: str = "experiment_01",
-    video_uri: str = SAM2_DEFAULT_VIDEO_URIS[0],
+    run_id: str = "001",
+    video_uri: str = SAM2_DEFAULT_VIDEO_URI,
     max_frames: int = 150,
 ) -> str:
     """Run SAM2 segmentation on a single video."""
@@ -701,8 +719,8 @@ def eval_videopainter_edit_many(
 
 @workflow
 def eval_alpamayo_inference(
-    video_data_gcs_path: str = f"gs://{BUCKET}/{os.environ.get('ALPAMAYO_VIDEO_DATA_PREFIX', 'workspace/user/hbaskar/Video_inpainting/videopainter/output_vp_final')}",
-    output_run_id: str = "experiment_01",
+    video_data_gcs_path: str = f"gs://{BUCKET}/{os.environ.get('ALPAMAYO_VIDEO_DATA_PREFIX', 'workspace/user/hbaskar/outputs/vp')}",
+    output_run_id: str = "001",
     model_id: str = ALPAMAYO_DEFAULT_MODEL_ID,
     num_traj_samples: int = 1,
 ) -> dict:
@@ -721,7 +739,7 @@ def eval_alpamayo_inference(
 
 @workflow
 def eval_stage_sam2(
-    run_id: str = "10_150f_caption_fps8",
+    run_id: str = "001",
     max_frames: int = 150,
 ) -> str:
     """Run all SAM2 tasks."""
@@ -786,8 +804,8 @@ def eval_stage_videopainter(
 
 @workflow
 def eval_stage_alpamayo(
-    video_data_gcs_path: str = f"gs://{BUCKET}/{os.environ.get('ALPAMAYO_VIDEO_DATA_PREFIX', 'workspace/user/hbaskar/Video_inpainting/videopainter/output_vp_final')}",
-    output_run_id: str = "experiment_01",
+    video_data_gcs_path: str = f"gs://{BUCKET}/{os.environ.get('ALPAMAYO_VIDEO_DATA_PREFIX', 'workspace/user/hbaskar/outputs/vp')}",
+    output_run_id: str = "001",
     model_id: str = ALPAMAYO_DEFAULT_MODEL_ID,
     num_traj_samples: int = 1,
 ) -> dict:
@@ -807,7 +825,7 @@ def eval_stage_alpamayo(
 @workflow
 def eval_all(
     # SAM2
-    run_id: str = "10_150f_caption_fps8",
+    run_id: str = "001",
     max_frames: int = 150,
     # VideoPainter
     vp_data_run_id: str = VP_DEFAULT_DATA_RUN_ID,
@@ -820,7 +838,7 @@ def eval_all(
     vp_llm_model: str = VP_DEFAULT_LLM_MODEL,
     vp_caption_refine_iters: int = 10,
     # Alpamayo
-    alpamayo_video_data_gcs_path: str = f"gs://{BUCKET}/{os.environ.get('ALPAMAYO_VIDEO_DATA_PREFIX', 'workspace/user/hbaskar/Video_inpainting/videopainter/output_vp_final')}",
+    alpamayo_video_data_gcs_path: str = f"gs://{BUCKET}/{os.environ.get('ALPAMAYO_VIDEO_DATA_PREFIX', 'workspace/user/hbaskar/outputs/vp')}",
     alpamayo_model_id: str = ALPAMAYO_DEFAULT_MODEL_ID,
     alpamayo_num_traj_samples: int = 1,
 ) -> None:

@@ -32,16 +32,24 @@ DEFAULT_CONFIG = "configs/sam2.1/sam2.1_hiera_l.yaml"
 # Override via SAM2_OUTPUT_BASE env var in build_and_run.sh
 SAM2_OUTPUT_BUCKET_BASE = os.environ.get(
     "SAM2_OUTPUT_BASE",
-    "gs://mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Video_inpainting/videopainter/training/output/sam2",
+    "gs://mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/outputs/sam2",
 )
-SAM2_PREPROCESSED_BUCKET_BASE = "gs://mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/outputs/preprocessed_data_vp"
+SAM2_PREPROCESSED_BUCKET_BASE = os.environ.get(
+    "SAM2_PREPROCESSED_OUTPUT_BASE",
+    "gs://mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/outputs/preprocessed_data_vp",
+)
 
 # GCS bucket paths for checkpoints (mounted via FuseBucket)
 SAM2_BUCKET = "mbadas-sandbox-research-9bb9c7f"
 SAM2_CHECKPOINT_PREFIX = "workspace/user/hbaskar/Video_inpainting/sam2_checkpoint"
 
 # GCS bucket paths for input videos (mounted via FuseBucket)
-INPUT_VIDEOS_PREFIX = "datasets/public/physical_ai_av/camera/camera_front_tele_30fov"
+INPUT_VIDEOS_PREFIX = os.environ.get(
+    "SAM2_INPUT_PREFIX",
+    "workspace/user/hbaskar/Input/data_physical_ai",
+)
+# Camera subfolder within the input parent
+INPUT_CAMERA_SUBFOLDER = os.environ.get("SAM2_CAMERA_SUBFOLDER", "camera_front_tele_30fov")
 
 # IMPORTANT: FuseBucket mounts at /mnt/{name}, not /mnt/{bucket}.
 # Because we mount with a prefix, /mnt/{name} corresponds to gs://{bucket}/{prefix}.
@@ -54,16 +62,16 @@ INPUT_VIDEOS_MOUNT_ROOT = os.path.join(MOUNTPOINT, INPUT_VIDEOS_MOUNT_NAME)
 
 # Default video URIs (can be overridden)
 DEFAULT_VIDEO_URIS = [
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/datasets/public/physical_ai_av/camera/camera_front_tele_30fov/25534c8d-4d02-463a-84c9-dad015f320ac.camera_front_tele_30fov.mp4",
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/datasets/public/physical_ai_av/camera/camera_front_tele_30fov/13e7d364-6476-4f2f-b94e-060440bf1a36.camera_front_tele_30fov.mp4",
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/datasets/public/physical_ai_av/camera/camera_front_tele_30fov/025887fd-9f6a-4ba4-aa30-60d7ab1e137f.camera_front_tele_30fov.mp4",
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/datasets/public/physical_ai_av/camera/camera_front_tele_30fov/ee680a47-b981-468f-b817-8712af5953d5.camera_front_tele_30fov.mp4",
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/datasets/public/physical_ai_av/camera/camera_front_tele_30fov/d3317bae-0c7e-4e34-8975-50b6bd715dc3.camera_front_tele_30fov.mp4",
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/datasets/public/physical_ai_av/camera/camera_front_tele_30fov/4809025e-0cef-414c-bf59-8c86a5177ef7.camera_front_tele_30fov.mp4",
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/datasets/public/physical_ai_av/camera/camera_front_tele_30fov/83563feb-695f-4152-a0bf-346d56f89373.camera_front_tele_30fov.mp4",
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/datasets/public/physical_ai_av/camera/camera_front_tele_30fov/99b474d6-9ea5-4e17-87a2-84267728763d.camera_front_tele_30fov.mp4",
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/datasets/public/physical_ai_av/camera/camera_front_tele_30fov/d2cadb4e-585e-4b7f-890f-2fa198713203.camera_front_tele_30fov.mp4",
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/datasets/public/physical_ai_av/camera/camera_front_tele_30fov/6e08b4de-9282-409f-be26-2d24e066baac.camera_front_tele_30fov.mp4",
+    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Input/data_physical_ai/camera_front_tele_30fov/25534c8d-4d02-463a-84c9-dad015f320ac.camera_front_tele_30fov.mp4",
+    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Input/data_physical_ai/camera_front_tele_30fov/13e7d364-6476-4f2f-b94e-060440bf1a36.camera_front_tele_30fov.mp4",
+    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Input/data_physical_ai/camera_front_tele_30fov/025887fd-9f6a-4ba4-aa30-60d7ab1e137f.camera_front_tele_30fov.mp4",
+    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Input/data_physical_ai/camera_front_tele_30fov/ee680a47-b981-468f-b817-8712af5953d5.camera_front_tele_30fov.mp4",
+    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Input/data_physical_ai/camera_front_tele_30fov/d3317bae-0c7e-4e34-8975-50b6bd715dc3.camera_front_tele_30fov.mp4",
+    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Input/data_physical_ai/camera_front_tele_30fov/4809025e-0cef-414c-bf59-8c86a5177ef7.camera_front_tele_30fov.mp4",
+    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Input/data_physical_ai/camera_front_tele_30fov/83563feb-695f-4152-a0bf-346d56f89373.camera_front_tele_30fov.mp4",
+    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Input/data_physical_ai/camera_front_tele_30fov/99b474d6-9ea5-4e17-87a2-84267728763d.camera_front_tele_30fov.mp4",
+    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Input/data_physical_ai/camera_front_tele_30fov/d2cadb4e-585e-4b7f-890f-2fa198713203.camera_front_tele_30fov.mp4",
+    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Input/data_physical_ai/camera_front_tele_30fov/6e08b4de-9282-409f-be26-2d24e066baac.camera_front_tele_30fov.mp4",
 ]
 
 
@@ -193,8 +201,10 @@ def run_sam2_segmentation(
         )
     
     # Setup input videos - create symlinks from mounted videos
+    # The FuseBucket mounts data_physical_ai, so camera subfolder is inside the mount
     logger.info("Setting up input videos from mounted GCS path...")
     logger.info(f"INPUT_VIDEOS_MOUNT_ROOT={INPUT_VIDEOS_MOUNT_ROOT}")
+    logger.info(f"INPUT_CAMERA_SUBFOLDER={INPUT_CAMERA_SUBFOLDER}")
     
     # Create a local cache directory for symlinks
     video_cache_dir = Path("/tmp/sam2_video_cache")
@@ -207,18 +217,26 @@ def run_sam2_segmentation(
         logger.warning(f"Video mount prefetch failed (non-fatal): {e}")
     
     # For each video URI, extract the filename and create a symlink from mounted path
+    # Videos are under <mount_root>/<camera_subfolder>/<filename> or <mount_root>/<camera_subfolder>/chunk_XXXX/<filename>
     local_video_paths = []
     for uri in video_uris:
         # Extract filename from URI (last part after /)
         video_filename = uri.split("/")[-1]
-        mounted_video_path = os.path.join(INPUT_VIDEOS_MOUNT_ROOT, video_filename)
+        # Try direct path under camera subfolder first
+        mounted_video_path = os.path.join(INPUT_VIDEOS_MOUNT_ROOT, INPUT_CAMERA_SUBFOLDER, video_filename)
+        # Also try without camera subfolder (for backward compat)
+        mounted_video_path_flat = os.path.join(INPUT_VIDEOS_MOUNT_ROOT, video_filename)
         local_video_path = video_cache_dir / video_filename
         
         if os.path.exists(mounted_video_path):
-            # Create symlink to mounted video
             if not local_video_path.exists():
                 os.symlink(mounted_video_path, local_video_path)
                 logger.info(f"Linked video: {mounted_video_path} -> {local_video_path}")
+            local_video_paths.append(str(local_video_path))
+        elif os.path.exists(mounted_video_path_flat):
+            if not local_video_path.exists():
+                os.symlink(mounted_video_path_flat, local_video_path)
+                logger.info(f"Linked video (flat): {mounted_video_path_flat} -> {local_video_path}")
             local_video_paths.append(str(local_video_path))
         else:
             logger.warning(f"Video not found in mounted path: {mounted_video_path}")

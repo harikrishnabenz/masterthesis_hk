@@ -36,7 +36,7 @@ ALPAMAYO_CKPT_PREFIX = os.path.join(VLA_BASE_PREFIX, "alpamayo", "checkpoints")
 # Override via ALPAMAYO_OUTPUT_BASE env var in build_and_run.sh
 VLA_OUTPUT_PREFIX = os.environ.get(
     "ALPAMAYO_OUTPUT_BASE",
-    "workspace/user/hbaskar/Video_inpainting/videopainter/training/output/alpamayo",
+    "workspace/user/hbaskar/outputs/alpamayo",
 )
 
 # Container image (set by build_and_run.sh)
@@ -54,7 +54,7 @@ CKPT_FUSE_MOUNT_ROOT = os.path.join(MOUNTPOINT, CKPT_FUSE_MOUNT_NAME)
 # Override: ALPAMAYO_VIDEO_DATA_PREFIX="workspace/..." bash scripts/build_and_run.sh
 VIDEO_DATA_GCS_PREFIX = os.environ.get(
     "ALPAMAYO_VIDEO_DATA_PREFIX",
-    "workspace/user/hbaskar/Video_inpainting/videopainter/output_vp_final",
+    "workspace/user/hbaskar/outputs/vp",
 )
 VIDEO_DATA_FUSE_MOUNT_NAME = "alpamayo-video-data"
 VIDEO_DATA_FUSE_MOUNT_ROOT = os.path.join(MOUNTPOINT, VIDEO_DATA_FUSE_MOUNT_NAME)

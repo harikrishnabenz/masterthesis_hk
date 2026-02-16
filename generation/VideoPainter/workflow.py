@@ -190,7 +190,7 @@ VP_DATA_FUSE_MOUNT_ROOT = os.path.join(MOUNTPOINT, VP_DATA_FUSE_MOUNT_NAME)
 # Override via VP_OUTPUT_BASE env var in build_and_run.sh
 GCS_OUTPUT_BASE = os.environ.get(
 	"VP_OUTPUT_BASE",
-	f"gs://{VP_BUCKET}/workspace/user/hbaskar/Video_inpainting/videopainter/training/output/vp",
+	f"gs://{VP_BUCKET}/workspace/user/hbaskar/outputs/vp",
 )
 
 DEFAULT_MODEL_PATH = os.path.join(DEFAULT_CKPT_DIR, "CogVideoX-5b-I2V")

@@ -1,30 +1,56 @@
 #!/bin/bash
-# ----------------------------------------------------------------------------------
+# ==================================================================================
 # Alpamayo VLA Inference - Build and Run Script
-# ----------------------------------------------------------------------------------
+# ==================================================================================
+#
+# PIPELINE POSITION: Stage 3 of 3  (SAM2 --> VP --> Alpamayo)
+#
+# INPUT:
+#   VideoPainter-edited videos from Stage 2:
+#     gs://<bucket>/.../training/output/vp/<run_id>/
+#
+# OUTPUT:
+#   VLA trajectory predictions + visualizations:
+#     gs://<bucket>/.../training/output/alpamayo/<run_id>/
+#       ├── <video_id>_result.json      (trajectory predictions)
+#       ├── <video_id>_vis_data.npz     (visualization tensors)
+#       └── <run_id>_report.txt         (summary report)
+# ==================================================================================
 
 set -e
 
-# ----------------------------------------------------------------------------------
-# OUTPUT FOLDER (override: ALPAMAYO_OUTPUT_BASE="workspace/user/..." bash scripts/build_and_run.sh)
-# ----------------------------------------------------------------------------------
-# NOTE: This is a GCS prefix (no gs:// scheme). The workflow appends gs://<bucket>/ itself.
-ALPAMAYO_OUTPUT_BASE="${ALPAMAYO_OUTPUT_BASE:-workspace/user/hbaskar/Video_inpainting/videopainter/training/output/alpamayo}"
-export ALPAMAYO_OUTPUT_BASE
+# ==============================================================================
+# GCS BUCKET
+# ==============================================================================
+GCS_BUCKET="mbadas-sandbox-research-9bb9c7f"
 
-# ----------------------------------------------------------------------------------
-# VIDEO DATA SOURCE (CONFIGURE THIS)
-# ----------------------------------------------------------------------------------
-# Set the GCS path to your video data
-# Example: gs://bucket/path/to/videos
-# Override with: VIDEO_DATA_GCS_PATH="gs://bucket/my/videos" bash scripts/build_and_run.sh
-VIDEO_DATA_GCS_PATH="${VIDEO_DATA_GCS_PATH:-gs://mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Video_inpainting/videopainter/output_vp_final/10_withoutlora_5prompt_20260212_151908}"
+# ==============================================================================
+# RUN ID  (set this to identify your run; combined with timestamp for output folders)
+# ==============================================================================
+RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+RUN_ID="${RUN_ID:-001}"
+
+# ==============================================================================
+# INPUT PATHS
+# ==============================================================================
+# VideoPainter edited videos (output of Stage 2).
+# Override: VIDEO_DATA_GCS_PATH="gs://bucket/my/videos" bash scripts/build_and_run.sh
+VIDEO_DATA_GCS_PATH="${VIDEO_DATA_GCS_PATH:-gs://${GCS_BUCKET}/workspace/user/hbaskar/outputs/vp}"
+export VIDEO_DATA_GCS_PATH
+
+# ==============================================================================
+# OUTPUT PATHS
+# ==============================================================================
+# NOTE: This is a GCS prefix (no gs:// scheme). The workflow appends gs://<bucket>/ itself.
+# Final path: gs://<bucket>/${ALPAMAYO_OUTPUT_BASE}/<run_id>/
+ALPAMAYO_OUTPUT_BASE="${ALPAMAYO_OUTPUT_BASE:-workspace/user/hbaskar/outputs/alpamayo}"
+export ALPAMAYO_OUTPUT_BASE
 
 # ----------------------------------------------------------------------------------
 # RUN CONFIGURATION
 # ----------------------------------------------------------------------------------
-# Unique identifier for this run (default: timestamp)
-RUN_ID="${RUN_ID:-alpamayo_1_$(date -u +%Y%m%d_%H%M%S)}"
+# Unique identifier for this run (RUN_ID + timestamp)
+ALPAMAYO_RUN_ID="${ALPAMAYO_RUN_ID:-${RUN_ID}_${RUN_TIMESTAMP}}"
 
 # Number of trajectory samples per video
 NUM_TRAJ_SAMPLES="${NUM_TRAJ_SAMPLES:-1}"
@@ -45,16 +71,17 @@ export HF_TOKEN
 # Set to HuggingFace ID to download instead: MODEL_ID="nvidia/Alpamayo-R1-10B"
 MODEL_ID="${MODEL_ID:-/workspace/alpamayo/checkpoints/alpamayo-r1-10b}"
 
-echo "=" ================================================================
+echo "================================================================================"
 echo "ALPAMAYO VLA INFERENCE - BUILD AND RUN"
-echo "=" ================================================================
-echo "  VIDEO_DATA_GCS_PATH: $VIDEO_DATA_GCS_PATH"
-echo "  RUN_ID: $RUN_ID"
-echo "  NUM_TRAJ_SAMPLES: $NUM_TRAJ_SAMPLES"
-echo "  MODEL_ID: $MODEL_ID"
-echo "  HF_TOKEN: ${HF_TOKEN:+set (hidden)}"
-echo "  ALPAMAYO_OUTPUT_BASE: gs://mbadas-sandbox-research-9bb9c7f/$ALPAMAYO_OUTPUT_BASE"
-echo "=" ================================================================
+echo "================================================================================"
+echo "  RUN_ID:                ${RUN_ID}"
+echo "  ALPAMAYO_RUN_ID:       ${ALPAMAYO_RUN_ID}"
+echo "  INPUT  (VP videos):    ${VIDEO_DATA_GCS_PATH}"
+echo "  OUTPUT (predictions):  gs://${GCS_BUCKET}/${ALPAMAYO_OUTPUT_BASE}/${ALPAMAYO_RUN_ID}/"
+echo "  NUM_TRAJ_SAMPLES:      ${NUM_TRAJ_SAMPLES}"
+echo "  MODEL_ID:              ${MODEL_ID}"
+echo "  HF_TOKEN:              ${HF_TOKEN:+set (hidden)}"
+echo "================================================================================"
 
 # ----------------------------------------------------------------------------------
 # DOCKER BUILD AND PUSH
@@ -83,27 +110,25 @@ export ALPAMAYO_CONTAINER_IMAGE="${REMOTE_IMAGE_TAGGED}"
 # RUN WORKFLOW
 # ----------------------------------------------------------------------------------
 echo ""
-echo "=" ================================================================
+echo "================================================================================"
 echo "LAUNCHING WORKFLOW"
-echo "=" ================================================================
+echo "================================================================================"
 
 hlx wf run \
   --team-space research \
   --domain prod \
-  --execution-name "alpamayo-vla-${RUN_ID//_/-}-$(date -u +%Y%m%d-%H%M%S)" \
+  --execution-name "alpamayo-vla-${ALPAMAYO_RUN_ID//_/-}-$(date -u +%Y%m%d-%H%M%S)" \
   workflow.alpamayo_vla_inference_wf \
   --video_data_gcs_path "${VIDEO_DATA_GCS_PATH}" \
-  --output_run_id "${RUN_ID}" \
+  --output_run_id "${ALPAMAYO_RUN_ID}" \
   --model_id "${MODEL_ID}" \
   --num_traj_samples "${NUM_TRAJ_SAMPLES}"
 
 echo ""
-echo "=" ================================================================
-echo "WORKFLOW LAUNCHED"
-echo "=" ================================================================
-echo "Output will be uploaded to:"
-echo "  gs://mbadas-sandbox-research-9bb9c7f/${ALPAMAYO_OUTPUT_BASE}/${RUN_ID}/"
-echo ""
-echo "Report will be available at:"
-echo "  gs://mbadas-sandbox-research-9bb9c7f/${ALPAMAYO_OUTPUT_BASE}/${RUN_ID}/${RUN_ID}_report.txt"
-echo "=" ================================================================
+echo "================================================================================"
+echo "WORKFLOW SUBMITTED"
+echo "================================================================================"
+echo "  Input (VP videos):  ${VIDEO_DATA_GCS_PATH}"
+echo "  Output:             gs://${GCS_BUCKET}/${ALPAMAYO_OUTPUT_BASE}/${ALPAMAYO_RUN_ID}/"
+echo "  Report:             gs://${GCS_BUCKET}/${ALPAMAYO_OUTPUT_BASE}/${ALPAMAYO_RUN_ID}/${ALPAMAYO_RUN_ID}_report.txt"
+echo "================================================================================"

@@ -57,11 +57,12 @@ def _build_gcs_path(prev_result: str, base: str, suffix: str) -> str:
 )
 def _master_pipeline_dynamic(
     # SAM2 parameters
-    sam2_run_id: str = "10_150f_caption_fps8",
+    sam2_run_id: str = "001",
     sam2_max_frames: int = 150,
     sam2_video_uris: str = "default",
     # VideoPainter parameters
     vp_data_run_id: str = "",
+    vp_output_run_id: str = "",
     vp_instruction: str = "",
     vp_num_samples: int = 1,
     # Alpamayo parameters
@@ -76,6 +77,7 @@ def _master_pipeline_dynamic(
     """
     # -- resolve defaults that depend on other args ---------------------------
     effective_vp_data_run_id = vp_data_run_id if vp_data_run_id else sam2_run_id
+    effective_vp_output_run_id = vp_output_run_id if vp_output_run_id else sam2_run_id
     effective_alpamayo_run_id = alpamayo_run_id if alpamayo_run_id else sam2_run_id
 
     # -- parse video URIs: chunks://, folder, comma-separated, or "default" --
@@ -95,7 +97,7 @@ def _master_pipeline_dynamic(
     logger.info("MASTER PIPELINE – SEQUENTIAL EXECUTION")
     logger.info("=" * 80)
     logger.info("Stage 1: SAM2 Segmentation  (run_id=%s)", sam2_run_id)
-    logger.info("Stage 2: VideoPainter Editing (data_run_id=%s)", effective_vp_data_run_id)
+    logger.info("Stage 2: VideoPainter Editing (data_run_id=%s, output_run_id=%s)", effective_vp_data_run_id, effective_vp_output_run_id)
     logger.info("Stage 3: Alpamayo VLA Inference (run_id=%s)", effective_alpamayo_run_id)
     logger.info("=" * 80)
 
@@ -123,7 +125,7 @@ def _master_pipeline_dynamic(
     vp_output_gcs = _build_gcs_path(
         prev_result=vp_result,
         base=f"{_OUTPUT_BASE}/vp",
-        suffix=effective_vp_data_run_id,
+        suffix=effective_vp_output_run_id,
     )
     alpamayo_run_id_after_vp = _barrier(
         prev_result=vp_result,
@@ -152,11 +154,12 @@ def _master_pipeline_dynamic(
 @workflow
 def master_pipeline_wf(
     # SAM2 parameters
-    sam2_run_id: str = "10_150f_caption_fps8",
+    sam2_run_id: str = "001",
     sam2_max_frames: int = 150,
     sam2_video_uris: str = "default",
     # VideoPainter parameters
     vp_data_run_id: str = "",
+    vp_output_run_id: str = "",
     vp_instruction: str = "",
     vp_num_samples: int = 1,
     # Alpamayo parameters
@@ -170,6 +173,7 @@ def master_pipeline_wf(
         sam2_max_frames=sam2_max_frames,
         sam2_video_uris=sam2_video_uris,
         vp_data_run_id=vp_data_run_id,
+        vp_output_run_id=vp_output_run_id,
         vp_instruction=vp_instruction,
         vp_num_samples=vp_num_samples,
         alpamayo_run_id=alpamayo_run_id,
