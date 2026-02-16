@@ -31,22 +31,22 @@ Thumbs.db
 .gitattributes
 
 # Data and checkpoints (heavy files)
-*/ckpt/*
-*/checkpoints/*
-*/data*/
-*/cache/
-*.pth
-*.pt
-*.safetensors
-*.ckpt
-*.bin
+**/ckpt/
+**/checkpoints/
+**/data*/
+**/cache/
+**/*.pth
+**/*.pt
+**/*.safetensors
+**/*.ckpt
+**/*.bin
 
 # Outputs
-*/output*/
-*/results/
-*.mp4
-*.avi
-*.mov
+**/output*/
+**/results/
+**/*.mp4
+**/*.avi
+**/*.mov
 
 # Logs
 *.log
@@ -76,4 +76,4 @@ CONTRIBUTING.md
 # Keep only necessary files for master orchestrator
 # The hlx_wf wheel and workflow.py files are needed
 !segmentation/sam2/hlx_wf-*.whl
-!*/workflow.py
+!**/workflow.py
