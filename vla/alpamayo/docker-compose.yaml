@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  alpamayo:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: alpamayo:latest
+    container_name: alpamayo
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - HF_HOME=/workspace/cache/huggingface
+    volumes:
+      - .:/workspace/alpamayo
+      - ./cache:/workspace/cache
+    ports:
+      - "8888:8888"
+    shm_size: '16gb'
+    stdin_open: true
+    tty: true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
