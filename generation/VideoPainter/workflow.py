@@ -146,7 +146,7 @@ DEFAULT_DATA_DIR = os.path.join(BASE_WORKDIR, "data")
 DEFAULT_CKPT_DIR = os.path.join(BASE_WORKDIR, "ckpt")
 DEFAULT_OUTPUT_DIR = os.path.join(BASE_WORKDIR, "output_vp")
 
-OUTPUT_SUBDIR = "output_vp_final"
+OUTPUT_SUBDIR = "output/vp"
 SCRATCH_BASE = "/tmp/videopainter_output"
 SCRATCH_DATA_BASE = "/tmp/videopainter_data"
 
@@ -187,7 +187,11 @@ TRAINED_FLUXFILL_DEST_PATH = os.path.join(DEFAULT_CKPT_DIR, "trained_fluxfill_lo
 VP_DATA_FUSE_MOUNT_NAME = "data"
 VP_DATA_FUSE_MOUNT_ROOT = os.path.join(MOUNTPOINT, VP_DATA_FUSE_MOUNT_NAME)
 
-GCS_OUTPUT_BASE = os.path.join(f"gs://{VP_BUCKET}", VP_BUCKET_PREFIX, OUTPUT_SUBDIR)
+# Override via VP_OUTPUT_BASE env var in build_and_run.sh
+GCS_OUTPUT_BASE = os.environ.get(
+	"VP_OUTPUT_BASE",
+	f"gs://{VP_BUCKET}/workspace/user/hbaskar/Video_inpainting/videopainter/training/output/vp",
+)
 
 DEFAULT_MODEL_PATH = os.path.join(DEFAULT_CKPT_DIR, "CogVideoX-5b-I2V")
 DEFAULT_BRANCH_PATH = os.path.join(DEFAULT_CKPT_DIR, "VideoPainter/checkpoints/branch")

@@ -1,0 +1,99 @@
+version: '3.8'
+
+services:
+  master-pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: master-pipeline:latest
+    container_name: master_pipeline_orchestrator
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONPATH=/workspace
+      # GCP credentials (mount from host or use workload identity)
+      - GOOGLE_APPLICATION_CREDENTIALS=/workspace/.gcp/credentials.json
+    volumes:
+      # Mount the entire workspace for live editing
+      - ./:/workspace
+      # Mount GCP credentials if available locally
+      - ${HOME}/.config/gcloud:/root/.config/gcloud:ro
+      # Optional: mount GCP service account key
+      # - ./gcp-credentials.json:/workspace/.gcp/credentials.json:ro
+    working_dir: /workspace
+    stdin_open: true
+    tty: true
+    # No GPU needed for orchestration (only for individual pipelines)
+    command: ["/bin/bash"]
+
+  # Optional: Include individual pipeline services for local testing
+  # Uncomment if you want to run all containers together locally
+  
+  # sam2:
+  #   build:
+  #     context: ./segmentation/sam2
+  #     dockerfile: Dockerfile
+  #   image: sam2/frontend
+  #   container_name: sam2_local
+  #   runtime: nvidia
+  #   shm_size: 16g
+  #   environment:
+  #     - NVIDIA_VISIBLE_DEVICES=all
+  #   volumes:
+  #     - ./segmentation/sam2:/workspace/sam2
+  #   working_dir: /workspace/sam2
+  #   command: ["/bin/bash"]
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: 1
+  #             capabilities: [gpu]
+
+  # videopainter:
+  #   build:
+  #     context: ./generation/VideoPainter
+  #     dockerfile: Dockerfile
+  #   image: videopainter:latest
+  #   container_name: videopainter_local
+  #   runtime: nvidia
+  #   shm_size: 16g
+  #   environment:
+  #     - NVIDIA_VISIBLE_DEVICES=all
+  #   volumes:
+  #     - ./generation/VideoPainter:/workspace/VideoPainter
+  #   working_dir: /workspace/VideoPainter
+  #   ports:
+  #     - "7860:7860"
+  #   command: ["/bin/bash"]
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: 1
+  #             capabilities: [gpu]
+
+  # alpamayo:
+  #   build:
+  #     context: ./vla/alpamayo
+  #     dockerfile: Dockerfile
+  #   image: alpamayo:latest
+  #   container_name: alpamayo_local
+  #   runtime: nvidia
+  #   shm_size: 16g
+  #   environment:
+  #     - NVIDIA_VISIBLE_DEVICES=all
+  #   volumes:
+  #     - ./vla/alpamayo:/workspace/alpamayo
+  #   working_dir: /workspace/alpamayo
+  #   ports:
+  #     - "8888:8888"
+  #   command: ["/bin/bash"]
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: 1
+  #             capabilities: [gpu]

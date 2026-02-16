@@ -33,7 +33,11 @@ VLA_BASE_PREFIX = "workspace/user/hbaskar/Video_inpainting/vla"
 ALPAMAYO_CKPT_PREFIX = os.path.join(VLA_BASE_PREFIX, "alpamayo", "checkpoints")
 
 # Output path in GCS
-VLA_OUTPUT_PREFIX = os.path.join(VLA_BASE_PREFIX, "output")
+# Override via ALPAMAYO_OUTPUT_BASE env var in build_and_run.sh
+VLA_OUTPUT_PREFIX = os.environ.get(
+    "ALPAMAYO_OUTPUT_BASE",
+    "workspace/user/hbaskar/Video_inpainting/videopainter/training/output/alpamayo",
+)
 
 # Container image (set by build_and_run.sh)
 REMOTE_IMAGE_DEFAULT = "europe-west4-docker.pkg.dev/mb-adas-2015-p-a4db/research/alpamayo_vla"

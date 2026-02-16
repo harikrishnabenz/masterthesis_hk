@@ -6,6 +6,13 @@
 set -e
 
 # ----------------------------------------------------------------------------------
+# OUTPUT FOLDER (override: ALPAMAYO_OUTPUT_BASE="workspace/user/..." bash scripts/build_and_run.sh)
+# ----------------------------------------------------------------------------------
+# NOTE: This is a GCS prefix (no gs:// scheme). The workflow appends gs://<bucket>/ itself.
+ALPAMAYO_OUTPUT_BASE="${ALPAMAYO_OUTPUT_BASE:-workspace/user/hbaskar/Video_inpainting/videopainter/training/output/alpamayo}"
+export ALPAMAYO_OUTPUT_BASE
+
+# ----------------------------------------------------------------------------------
 # VIDEO DATA SOURCE (CONFIGURE THIS)
 # ----------------------------------------------------------------------------------
 # Set the GCS path to your video data
@@ -34,6 +41,7 @@ echo "  VIDEO_DATA_GCS_PATH: $VIDEO_DATA_GCS_PATH"
 echo "  RUN_ID: $RUN_ID"
 echo "  NUM_TRAJ_SAMPLES: $NUM_TRAJ_SAMPLES"
 echo "  MODEL_ID: $MODEL_ID"
+echo "  ALPAMAYO_OUTPUT_BASE: gs://mbadas-sandbox-research-9bb9c7f/$ALPAMAYO_OUTPUT_BASE"
 echo "=" ================================================================
 
 # ----------------------------------------------------------------------------------
@@ -82,8 +90,8 @@ echo "=" ================================================================
 echo "WORKFLOW LAUNCHED"
 echo "=" ================================================================
 echo "Output will be uploaded to:"
-echo "  gs://mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Video_inpainting/vla/output/${RUN_ID}/"
+echo "  gs://mbadas-sandbox-research-9bb9c7f/${ALPAMAYO_OUTPUT_BASE}/${RUN_ID}/"
 echo ""
 echo "Report will be available at:"
-echo "  gs://mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Video_inpainting/vla/output/${RUN_ID}/${RUN_ID}_report.txt"
+echo "  gs://mbadas-sandbox-research-9bb9c7f/${ALPAMAYO_OUTPUT_BASE}/${RUN_ID}/${RUN_ID}_report.txt"
 echo "=" ================================================================

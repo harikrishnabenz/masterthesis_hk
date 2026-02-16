@@ -1,6 +1,12 @@
 
 
 # ----------------------------------------------------------------------------------
+# OUTPUT FOLDER (override: VP_OUTPUT_BASE="gs://..." bash scripts/build_and_run.sh)
+# ----------------------------------------------------------------------------------
+VP_OUTPUT_BASE="${VP_OUTPUT_BASE:-gs://mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Video_inpainting/videopainter/training/output/vp}"
+export VP_OUTPUT_BASE
+
+# ----------------------------------------------------------------------------------
 # LLM MODEL SELECTION
 # ----------------------------------------------------------------------------------
 # This repo is configured to use ONLY the Qwen2.5-VL-7B-Instruct checkpoint
@@ -16,6 +22,7 @@ export TRAINED_FLUXFILL_GCS_PATH
 
 echo "  MODEL_PREFIX: $MODEL_PREFIX"
 echo "  TRAINED_FLUXFILL_GCS_PATH: $TRAINED_FLUXFILL_GCS_PATH"
+echo "  VP_OUTPUT_BASE: $VP_OUTPUT_BASE"
 
 # Declare a run suffix used by both this script and workflow.py
 # Extract timestamp from the trained checkpoint folder name
@@ -109,7 +116,7 @@ hlx wf run \
   --mask_feather 8 \
   --keep_masked_pixels
 
-echo "VideoPainter report will be uploaded as: gs://.../videopainter/output_vp/10_${X}/10_${X}.txt"
+echo "VideoPainter report will be uploaded as: ${VP_OUTPUT_BASE}/10_${X}/10_${X}.txt"
 
 # llm_model options:
 # --llm_model "/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct"  # Local (mounted)

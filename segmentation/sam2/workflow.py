@@ -29,7 +29,11 @@ DEFAULT_CHECKPOINT = os.path.join(BASE_WORKDIR, "checkpoints", "sam2.1_hiera_lar
 DEFAULT_CONFIG = "configs/sam2.1/sam2.1_hiera_l.yaml"
 
 # GCS bucket paths for outputs (run_id will be passed as parameter)
-SAM2_OUTPUT_BUCKET_BASE = "gs://mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/outputs/sam2_final_output"
+# Override via SAM2_OUTPUT_BASE env var in build_and_run.sh
+SAM2_OUTPUT_BUCKET_BASE = os.environ.get(
+    "SAM2_OUTPUT_BASE",
+    "gs://mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Video_inpainting/videopainter/training/output/sam2",
+)
 SAM2_PREPROCESSED_BUCKET_BASE = "gs://mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/outputs/preprocessed_data_vp"
 
 # GCS bucket paths for checkpoints (mounted via FuseBucket)

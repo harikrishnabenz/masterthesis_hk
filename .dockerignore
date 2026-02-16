@@ -1,0 +1,79 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Data and checkpoints (heavy files)
+*/ckpt/*
+*/checkpoints/*
+*/data*/
+*/cache/
+*.pth
+*.pt
+*.safetensors
+*.ckpt
+*.bin
+
+# Outputs
+*/output*/
+*/results/
+*.mp4
+*.avi
+*.mov
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Docker
+.dockerignore
+Dockerfile
+docker-compose.yaml
+*/Dockerfile
+*/docker-compose.yaml
+
+# Documentation (already in image)
+*.md
+LICENSE
+CONTRIBUTING.md
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+
+# Keep only necessary files for master orchestrator
+# The hlx_wf wheel and workflow.py files are needed
+!segmentation/sam2/hlx_wf-*.whl
+!*/workflow.py
