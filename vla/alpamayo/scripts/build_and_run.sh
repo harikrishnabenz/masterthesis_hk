@@ -29,6 +29,17 @@ RUN_ID="${RUN_ID:-alpamayo_$(date -u +%Y%m%d_%H%M%S)}"
 # Number of trajectory samples per video
 NUM_TRAJ_SAMPLES="${NUM_TRAJ_SAMPLES:-1}"
 
+# HuggingFace token for streaming the NVIDIA PhysicalAI-AV dataset
+# Required for ego-motion + multi-camera data from HuggingFace
+# Override: HF_TOKEN="hf_xxx" bash scripts/build_and_run.sh
+HF_TOKEN="${HF_TOKEN:-}"
+if [ -z "$HF_TOKEN" ]; then
+    echo "WARNING: HF_TOKEN not set. The workflow needs it to stream ego-motion"
+    echo "         data from HuggingFace (nvidia/PhysicalAI-Autonomous-Vehicles)."
+    echo "         Set it with: HF_TOKEN=hf_xxx bash scripts/build_and_run.sh"
+fi
+export HF_TOKEN
+
 # Model ID (default: use mounted checkpoint from GCS)
 # The checkpoint is mounted from GCS and symlinked to /workspace/alpamayo/checkpoints
 # Set to HuggingFace ID to download instead: MODEL_ID="nvidia/Alpamayo-R1-10B"
@@ -41,6 +52,7 @@ echo "  VIDEO_DATA_GCS_PATH: $VIDEO_DATA_GCS_PATH"
 echo "  RUN_ID: $RUN_ID"
 echo "  NUM_TRAJ_SAMPLES: $NUM_TRAJ_SAMPLES"
 echo "  MODEL_ID: $MODEL_ID"
+echo "  HF_TOKEN: ${HF_TOKEN:+set (hidden)}"
 echo "  ALPAMAYO_OUTPUT_BASE: gs://mbadas-sandbox-research-9bb9c7f/$ALPAMAYO_OUTPUT_BASE"
 echo "=" ================================================================
 

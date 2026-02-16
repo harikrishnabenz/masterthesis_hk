@@ -13,9 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
 import psutil
-import torch
 
 from hlx.wf import DedicatedNode, Node, task, workflow
 from hlx.wf.mounts import MOUNTPOINT, FuseBucket
@@ -43,17 +41,29 @@ VLA_OUTPUT_PREFIX = os.environ.get(
 REMOTE_IMAGE_DEFAULT = "europe-west4-docker.pkg.dev/mb-adas-2015-p-a4db/research/alpamayo_vla"
 CONTAINER_IMAGE = os.environ.get("ALPAMAYO_CONTAINER_IMAGE", f"{REMOTE_IMAGE_DEFAULT}:latest")
 
-# Compute node - requires ≥24 GB VRAM
-COMPUTE_NODE = Node.A100_40GB_1GPU
+# Compute node - A100_40GB no longer offered; use A100_80GB instead
+COMPUTE_NODE = Node.A100_80GB_1GPU
 
 # FuseBucket mount paths
 CKPT_FUSE_MOUNT_NAME = "alpamayo-ckpt"
 CKPT_FUSE_MOUNT_ROOT = os.path.join(MOUNTPOINT, CKPT_FUSE_MOUNT_NAME)
 
+# FuseBucket for video data input
+# Override: ALPAMAYO_VIDEO_DATA_PREFIX="workspace/..." bash scripts/build_and_run.sh
+VIDEO_DATA_GCS_PREFIX = os.environ.get(
+    "ALPAMAYO_VIDEO_DATA_PREFIX",
+    "workspace/user/hbaskar/Video_inpainting/videopainter/output_vp_final",
+)
+VIDEO_DATA_FUSE_MOUNT_NAME = "alpamayo-video-data"
+VIDEO_DATA_FUSE_MOUNT_ROOT = os.path.join(MOUNTPOINT, VIDEO_DATA_FUSE_MOUNT_NAME)
+
+# FuseBucket for output
+OUTPUT_FUSE_MOUNT_NAME = "alpamayo-output"
+OUTPUT_FUSE_MOUNT_ROOT = os.path.join(MOUNTPOINT, OUTPUT_FUSE_MOUNT_NAME)
+
 # Local paths inside container
 BASE_WORKDIR = "/workspace/alpamayo"
 CKPT_LOCAL_PATH = os.path.join(BASE_WORKDIR, "checkpoints")
-SCRATCH_DATA_BASE = "/tmp/alpamayo_data"
 SCRATCH_OUTPUT_BASE = "/tmp/alpamayo_output"
 
 
@@ -69,6 +79,9 @@ class VLAVideoMetrics:
     ram_peak_mb: float
     num_trajectories: int
     success: bool
+    min_ade_meters: Optional[float] = None
+    clip_id: Optional[str] = None
+    camera_name: Optional[str] = None
     error_message: Optional[str] = None
 
 
@@ -80,6 +93,7 @@ def _sanitize_path_component(text: str, max_len: int = 100) -> str:
 
 def _get_gpu_memory_gb() -> tuple[float, float]:
     """Get current and peak GPU memory usage in GB."""
+    import torch
     if not torch.cuda.is_available():
         return 0.0, 0.0
     
@@ -90,6 +104,7 @@ def _get_gpu_memory_gb() -> tuple[float, float]:
 
 def _reset_gpu_memory_stats():
     """Reset GPU memory statistics."""
+    import torch
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
         torch.cuda.empty_cache()
@@ -125,27 +140,44 @@ def ensure_symlink(src: str, dest: str) -> None:
     logger.info(f"Created symlink: {dest} -> {src}")
 
 
-def _stage_video_data(video_gcs_path: str, local_dir: str) -> list[str]:
-    """Download video data from GCS to local directory."""
-    Path(local_dir).mkdir(parents=True, exist_ok=True)
-    
-    logger.info(f"Downloading video data from {video_gcs_path} to {local_dir}")
-    
-    # Use gsutil to download the data
-    cmd = f"gsutil -m cp -r {video_gcs_path}/* {local_dir}/"
-    ret = os.system(cmd)
-    
-    if ret != 0:
-        raise RuntimeError(f"Failed to download video data from {video_gcs_path}")
-    
+def _resolve_fuse_data_path(video_data_gcs_path: str) -> str:
+    """Resolve a GCS URI to the corresponding FuseBucket local path.
+
+    The video data GCS path is expected to fall under VIDEO_DATA_GCS_PREFIX.
+    e.g. gs://bucket/<prefix>/subdir  ->  <VIDEO_DATA_FUSE_MOUNT_ROOT>/subdir
+    """
+    expected_prefix = f"gs://{VP_BUCKET}/{VIDEO_DATA_GCS_PREFIX}"
+    stripped = video_data_gcs_path.rstrip("/")
+    if not stripped.startswith(expected_prefix):
+        raise ValueError(
+            f"video_data_gcs_path={video_data_gcs_path!r} does not start with "
+            f"expected prefix {expected_prefix!r}. "
+            f"Set ALPAMAYO_VIDEO_DATA_PREFIX env var to the correct GCS prefix."
+        )
+    relative = stripped[len(expected_prefix):].lstrip("/")
+    return os.path.join(VIDEO_DATA_FUSE_MOUNT_ROOT, relative) if relative else VIDEO_DATA_FUSE_MOUNT_ROOT
+
+
+def _stage_video_data(video_gcs_path: str) -> list[str]:
+    """Discover video files via the FuseBucket mount (no gsutil needed)."""
+    fuse_path = _resolve_fuse_data_path(video_gcs_path)
+
+    if not os.path.isdir(fuse_path):
+        raise FileNotFoundError(
+            f"Video data directory not found at FuseBucket path: {fuse_path} "
+            f"(resolved from {video_gcs_path})"
+        )
+
+    logger.info(f"Scanning video data at FuseBucket path: {fuse_path}")
+
     # Find all video files
     video_files = []
     for ext in [".mp4", ".avi", ".mov", ".mkv"]:
-        video_files.extend(list(Path(local_dir).rglob(f"*{ext}")))
-    
-    video_paths = [str(p) for p in video_files]
-    logger.info(f"Found {len(video_paths)} video files in {local_dir}")
-    
+        video_files.extend(list(Path(fuse_path).rglob(f"*{ext}")))
+
+    video_paths = sorted(str(p) for p in video_files)
+    logger.info(f"Found {len(video_paths)} video files")
+
     return video_paths
 
 
@@ -213,8 +245,11 @@ def _run_alpamayo_inference(
                 gpu_memory_peak_gb=inference_data["metrics"]["gpu_memory_peak_gb"],
                 ram_used_mb=inference_data["metrics"]["ram_used_mb"],
                 ram_peak_mb=inference_data["metrics"]["ram_peak_mb"],
-                num_trajectories=inference_data["num_trajectories"],
+                num_trajectories=inference_data.get("num_trajectories", 0),
                 success=inference_data["success"],
+                min_ade_meters=inference_data.get("min_ade_meters"),
+                clip_id=inference_data.get("clip_id"),
+                camera_name=inference_data.get("camera_name"),
                 error_message=inference_data.get("error"),
             )
         else:
@@ -269,6 +304,8 @@ def _write_report(
     """Write comprehensive report with all metrics."""
     report_path = os.path.join(output_dir, f"{run_id}_report.txt")
     
+    import numpy as np
+
     total_time = sum(m.inference_time_seconds for m in metrics)
     successful = sum(1 for m in metrics if m.success)
     failed = len(metrics) - successful
@@ -280,6 +317,11 @@ def _write_report(
     max_ram_peak = max([m.ram_peak_mb for m in metrics], default=0.0)
     
     avg_time = np.mean([m.inference_time_seconds for m in metrics if m.success])
+
+    ade_values = [m.min_ade_meters for m in metrics if m.success and m.min_ade_meters is not None]
+    avg_min_ade = np.mean(ade_values) if ade_values else float("nan")
+    best_min_ade = min(ade_values) if ade_values else float("nan")
+    worst_min_ade = max(ade_values) if ade_values else float("nan")
     
     with open(report_path, "w") as f:
         f.write("=" * 80 + "\n")
@@ -303,6 +345,9 @@ def _write_report(
         f.write(f"Maximum GPU Memory Peak: {max_gpu_peak:.2f} GB\n")
         f.write(f"Average RAM Peak: {avg_ram_peak:.2f} MB\n")
         f.write(f"Maximum RAM Peak: {max_ram_peak:.2f} MB\n")
+        f.write(f"Average minADE: {avg_min_ade:.4f} m\n")
+        f.write(f"Best minADE: {best_min_ade:.4f} m\n")
+        f.write(f"Worst minADE: {worst_min_ade:.4f} m\n")
         f.write("\n")
         
         f.write("-" * 80 + "\n")
@@ -319,6 +364,12 @@ def _write_report(
             f.write(f"  GPU Memory (current/peak): {m.gpu_memory_used_gb:.2f} / {m.gpu_memory_peak_gb:.2f} GB\n")
             f.write(f"  RAM (current/peak): {m.ram_used_mb:.2f} / {m.ram_peak_mb:.2f} MB\n")
             f.write(f"  Num Trajectories: {m.num_trajectories}\n")
+            if m.min_ade_meters is not None:
+                f.write(f"  minADE: {m.min_ade_meters:.4f} m\n")
+            if m.clip_id:
+                f.write(f"  Clip ID: {m.clip_id}\n")
+            if m.camera_name:
+                f.write(f"  Camera: {m.camera_name}\n")
             f.write("\n")
     
     logger.info(f"Report written to: {report_path}")
@@ -326,18 +377,17 @@ def _write_report(
 
 
 def _upload_outputs(local_dir: str, gcs_base: str, run_id: str) -> str:
-    """Upload output directory to GCS."""
+    """Copy outputs to the FuseBucket output mount (no gsutil needed)."""
+    dest = os.path.join(OUTPUT_FUSE_MOUNT_ROOT, run_id)
     gcs_dest = os.path.join(gcs_base, run_id)
-    logger.info(f"Uploading outputs from {local_dir} to gs://{VP_BUCKET}/{gcs_dest}")
-    
-    cmd = f"gsutil -m cp -r {local_dir}/* gs://{VP_BUCKET}/{gcs_dest}/"
-    ret = os.system(cmd)
-    
-    if ret != 0:
-        logger.error(f"Failed to upload outputs to GCS")
-    else:
-        logger.info(f"Outputs uploaded to gs://{VP_BUCKET}/{gcs_dest}")
-    
+    logger.info(f"Copying outputs from {local_dir} to {dest}")
+
+    try:
+        shutil.copytree(local_dir, dest, dirs_exist_ok=True)
+        logger.info(f"Outputs available at gs://{VP_BUCKET}/{gcs_dest}")
+    except Exception as e:
+        logger.error(f"Failed to copy outputs to FuseBucket mount: {e}")
+
     return f"gs://{VP_BUCKET}/{gcs_dest}"
 
 
@@ -352,13 +402,23 @@ def _upload_outputs(local_dir: str, gcs_base: str, run_id: str) -> str:
         "PYTHONUNBUFFERED": "1",
         "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
         "HF_HOME": "/root/.cache/huggingface",
-        "TRANSFORMERS_CACHE": "/root/.cache/huggingface",
+        "HF_TOKEN": os.environ.get("HF_TOKEN", ""),
     },
     mounts=[
         FuseBucket(
             bucket=VP_BUCKET,
             name=CKPT_FUSE_MOUNT_NAME,
             prefix=ALPAMAYO_CKPT_PREFIX,
+        ),
+        FuseBucket(
+            bucket=VP_BUCKET,
+            name=VIDEO_DATA_FUSE_MOUNT_NAME,
+            prefix=VIDEO_DATA_GCS_PREFIX,
+        ),
+        FuseBucket(
+            bucket=VP_BUCKET,
+            name=OUTPUT_FUSE_MOUNT_NAME,
+            prefix=VLA_OUTPUT_PREFIX,
         ),
     ],
 )
@@ -392,9 +452,8 @@ def run_alpamayo_inference_task(
     logger.info(f"Setting up checkpoint symlink from {CKPT_FUSE_MOUNT_ROOT} to {CKPT_LOCAL_PATH}")
     ensure_symlink(CKPT_FUSE_MOUNT_ROOT, CKPT_LOCAL_PATH)
     
-    # Stage video data
-    local_data_dir = os.path.join(SCRATCH_DATA_BASE, output_run_id)
-    video_paths = _stage_video_data(video_data_gcs_path, local_data_dir)
+    # Discover video files via FuseBucket mount
+    video_paths = _stage_video_data(video_data_gcs_path)
     
     if not video_paths:
         raise ValueError(f"No videos found in {video_data_gcs_path}")

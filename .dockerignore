@@ -69,6 +69,9 @@ docker-compose.yaml
 LICENSE
 CONTRIBUTING.md
 
+# Example workflows
+example_workflows/
+
 # CI/CD
 .github/
 .gitlab-ci.yml

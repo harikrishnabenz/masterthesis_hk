@@ -46,38 +46,39 @@ RUN ln -sf /usr/bin/python3 /usr/bin/python
 # Create working directory
 WORKDIR /workspace/alpamayo
 
-# Install uv package manager
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
-    /root/.local/bin/uv --version
-
-# Copy only dependency manifests first (better layer caching)
-COPY pyproject.toml uv.lock* /workspace/alpamayo/
-
-# Copy source files needed for editable install
-COPY src/ /workspace/alpamayo/src/
-
 # Bootstrap pip for Python 3.12 and install setuptools
 RUN python3 -m ensurepip --upgrade && \
     python3 -m pip install --upgrade pip setuptools wheel
 
-# Create virtual environment and install dependencies
-# Note: This will download ~22GB model weights on first inference run
-RUN /root/.local/bin/uv venv ar1_venv && \
-    . ar1_venv/bin/activate && \
-    /root/.local/bin/uv sync --active && \
+# Install Python dependencies directly into system Python (like VideoPainter)
+# so flytekit and torch share the same interpreter.
+RUN pip install --no-cache-dir \
+        "accelerate>=1.12.0" \
+        "av>=16.0.1" \
+        "einops>=0.8.1" \
+        "hydra-colorlog>=1.2.0" \
+        "hydra-core>=1.3.2" \
+        "pandas>=2.3.3" \
+        "physical_ai_av>=0.1.0" \
+        "pillow>=12.0.0" \
+        "torch==2.8.0" \
+        "torchvision>=0.23.0" \
+        "transformers==4.57.1" \
+        psutil && \
+    pip install --no-cache-dir --no-build-isolation "flash-attn>=2.8.3" && \
     python3 -c "import torch; print('torch', torch.__version__)" && \
     python3 -c "import transformers; print('transformers', transformers.__version__)" && \
     python3 -c "from transformers import AutoTokenizer; print('AutoTokenizer import ok')"
 
+# Copy and install the editable project (src/)
+COPY src/ /workspace/alpamayo/src/
+COPY pyproject.toml /workspace/alpamayo/
+RUN pip install --no-cache-dir -e .
 
-COPY hlx_wf-2.4.2.dev9-py3-none-any.whl /workspace/VideoPainter//
+COPY hlx_wf-2.4.2.dev9-py3-none-any.whl /workspace/alpamayo/
 
-# Install the wheel
-RUN python3 -m pip install /workspace/VideoPainter/hlx_wf-2.4.2.dev9-py3-none-any.whl
-
-
-# Set the virtual environment in PATH
-ENV PATH="/workspace/alpamayo/ar1_venv/bin:$PATH"
+# Install the hlx_wf wheel into system Python
+RUN python3 -m pip install /workspace/alpamayo/hlx_wf-2.4.2.dev9-py3-none-any.whl
 
 # Copy project files (at the end for better layer caching)
 COPY . /workspace/alpamayo
