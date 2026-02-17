@@ -2,7 +2,6 @@ import base64
 import os
 from io import BytesIO
 
-import clip
 import numpy as np
 import torch
 import torch.nn as nn
@@ -17,7 +16,7 @@ from torchmetrics.multimodal.clip_score import CLIPScore
 from torchmetrics.regression import MeanAbsoluteError, MeanSquaredError
 from torchvision import transforms
 from torchvision.transforms import Resize
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, CLIPModel, CLIPProcessor
 
 from utils import to_tensors
 
@@ -687,6 +686,14 @@ _CLIP_CKPT_LOCAL = os.path.join(
 )
 _CLIP_MODEL_NAME = _CLIP_CKPT_LOCAL if os.path.isdir(_CLIP_CKPT_LOCAL) else "openai/clip-vit-large-patch14"
 
+
+def _load_clip_from_local():
+    """Factory for CLIPScore: loads CLIP from the mounted local checkpoint."""
+    model = CLIPModel.from_pretrained(_CLIP_MODEL_NAME, local_files_only=os.path.isdir(_CLIP_CKPT_LOCAL))
+    processor = CLIPProcessor.from_pretrained(_CLIP_MODEL_NAME, local_files_only=os.path.isdir(_CLIP_CKPT_LOCAL))
+    return model, processor
+
+
 _CAPTION_CKPT_LOCAL = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ckpt", "cogvlm2-llama3-caption"
 )
@@ -695,7 +702,9 @@ _CAPTION_CKPT_LOCAL = os.path.join(
 class MetricsCalculator:
     def __init__(self, device) -> None:
         self.device=device
-        self.clip_metric_calculator = CLIPScore(model_name_or_path=_CLIP_MODEL_NAME).to(device)
+        # CLIPScore accepts a callable that returns (model, processor) — avoids
+        # the "openai" substring check that rejects local paths.
+        self.clip_metric_calculator = CLIPScore(model_name_or_path=_load_clip_from_local).to(device)
         self.psnr_metric_calculator = PeakSignalNoiseRatio(data_range=1.0).to(device)
         self.lpips_metric_calculator = LearnedPerceptualImagePatchSimilarity(net_type='squeeze').to(device)
         self.mse_metric_calculator = MeanSquaredError().to(device)
@@ -720,7 +729,16 @@ class MetricsCalculator:
                 _logging.getLogger(__name__).warning("Failed to load cogvlm2-llama3-caption: %s", _e)
         self.llm_model = _DEFAULT_QWEN_MODEL_PATH
         self.l1_metric_calculator = MeanAbsoluteError().to(device)
-        self.clip_model = clip.load("ViT-B/32", device=device)[0]
+        # Use the mounted clip-vit-large-patch14 for temporal consistency
+        # (avoids downloading the 338 MB OpenAI ViT-B/32 at runtime).
+        self.clip_model = CLIPModel.from_pretrained(
+            _CLIP_CKPT_LOCAL if os.path.isdir(_CLIP_CKPT_LOCAL) else "openai/clip-vit-large-patch14",
+            local_files_only=os.path.isdir(_CLIP_CKPT_LOCAL),
+        ).to(device).eval()
+        self.clip_processor = CLIPProcessor.from_pretrained(
+            _CLIP_CKPT_LOCAL if os.path.isdir(_CLIP_CKPT_LOCAL) else "openai/clip-vit-large-patch14",
+            local_files_only=os.path.isdir(_CLIP_CKPT_LOCAL),
+        )
         
     def video_editing_prompt(self, masked_image, images):
         '''
@@ -812,126 +830,152 @@ class MetricsCalculator:
 
         return video_caption, mask_description
 
-    @staticmethod
-    def _to_numpy(x):
-        """Convert a torch Tensor, PIL Image, or ndarray to a numpy array."""
-        if isinstance(x, torch.Tensor):
-            return x.detach().cpu().numpy()
-        return np.array(x)
+    def _prepare_tensor(self, img, mask=None, need_batch_dim=True):
+        """Normalise an image to a float32 tensor on *self.device* in [0, 1].
+
+        Accepted inputs
+        ---------------
+        * torch.Tensor  – 4-D (N, C, H, W) already in [0, 1]  → used as-is.
+        * torch.Tensor  – 3-D (H, W, C) in [0, 255]           → permute + scale.
+        * np.ndarray     – 3-D (H, W, C) in [0, 255]          → convert + permute + scale.
+        * PIL.Image      – converted via np.array first.
+
+        If *need_batch_dim* is True the result is guaranteed to be 4-D.
+        Mask (if given) is applied **before** returning.
+        """
+        if isinstance(img, torch.Tensor):
+            t = img.detach().float()
+            if t.ndim == 4:
+                # Already (N, C, H, W) – assume [0, 1]
+                if t.max() > 1.0:
+                    t = t / 255.0
+            elif t.ndim == 3:
+                # (H, W, C) – convert to (C, H, W)
+                t = t.permute(2, 0, 1)
+                if t.max() > 1.0:
+                    t = t / 255.0
+                if need_batch_dim:
+                    t = t.unsqueeze(0)
+            t = t.to(self.device)
+        else:
+            arr = np.array(img).astype(np.float32) / 255.0
+            t = torch.tensor(arr).permute(2, 0, 1)
+            if need_batch_dim:
+                t = t.unsqueeze(0)
+            t = t.to(self.device)
+
+        if mask is not None:
+            if isinstance(mask, torch.Tensor):
+                m = mask.detach().float().to(self.device)
+            else:
+                m = torch.tensor(np.array(mask).astype(np.float32)).to(self.device)
+            # Broadcast mask to match img tensor shape
+            while m.ndim < t.ndim:
+                m = m.unsqueeze(0)
+            t = t * m
+
+        return t
 
     def calculate_clip_similarity(self, img, txt, mask=None):
-        img = self._to_numpy(img).astype(np.uint8)
-        
-        if mask is not None:
-            mask = self._to_numpy(mask)
-            img = np.uint8(img * mask)
-            
-        img_tensor=torch.tensor(img).permute(2,0,1).to(self.device)
+        # CLIPScore expects a single (C, H, W) uint8 tensor
+        t = self._prepare_tensor(img, mask=mask, need_batch_dim=False)
+        # If 4-D with a single frame, squeeze
+        if t.ndim == 4 and t.shape[0] == 1:
+            t = t.squeeze(0)
+        # CLIPScore needs uint8 [0, 255]
+        img_tensor = (t.clamp(0, 1) * 255).to(torch.uint8)
+        if img_tensor.ndim == 4:
+            # average over frames for a single CLIP score
+            img_tensor = img_tensor[0]
         
         score = self.clip_metric_calculator(img_tensor, txt)
         score = score.cpu().item()
         
         return score
-    
-    def calculate_psnr(self, img_pred, img_gt, mask_pred=None, mask_gt=None):
-        img_pred = self._to_numpy(img_pred).astype(np.float32)/255
-        img_gt = self._to_numpy(img_gt).astype(np.float32)/255
-        assert img_pred.shape == img_gt.shape, "Image shapes should be the same."
 
-        if mask_pred is not None:
-            mask_pred = self._to_numpy(mask_pred).astype(np.float32)
-            img_pred = img_pred * mask_pred
-        if mask_gt is not None:
-            mask_gt = self._to_numpy(mask_gt).astype(np.float32)
-            img_gt = img_gt * mask_gt
-            
-        img_pred_tensor=torch.tensor(img_pred).permute(2,0,1).unsqueeze(0).to(self.device)
-        img_gt_tensor=torch.tensor(img_gt).permute(2,0,1).unsqueeze(0).to(self.device)
-            
-        score = self.psnr_metric_calculator(img_pred_tensor, img_gt_tensor)
-        score = score.cpu().item()
-        
-        return score
+    def calculate_clip_score(self, images, captions, mask=None):
+        """Compute average CLIP score over (possibly batched) images and captions.
+
+        Args:
+            images: 4-D tensor [N, C, H, W] or 3-D [H, W, C] / PIL / ndarray.
+            captions: list[str] – one caption per frame, or a single-element list
+                      that is broadcast to every frame.
+        """
+        t = self._prepare_tensor(images, mask=mask, need_batch_dim=True)
+        # Broadcast a single caption to every frame
+        if len(captions) == 1 and t.shape[0] > 1:
+            captions = captions * t.shape[0]
+
+        scores = []
+        for i in range(t.shape[0]):
+            frame = (t[i].clamp(0, 1) * 255).to(torch.uint8)
+            s = self.clip_metric_calculator(frame, captions[i])
+            scores.append(s.cpu().item())
+        return float(np.mean(scores))
+
+    def calculate_psnr(self, img_pred, img_gt, mask_pred=None, mask_gt=None, mask=None):
+        t_pred = self._prepare_tensor(img_pred, mask=mask_pred or mask)
+        t_gt = self._prepare_tensor(img_gt, mask=mask_gt or mask)
+        assert t_pred.shape == t_gt.shape, "Image shapes should be the same."
+
+        # Average per-frame PSNR for batched (video) inputs
+        if t_pred.shape[0] > 1:
+            scores = []
+            for i in range(t_pred.shape[0]):
+                s = self.psnr_metric_calculator(t_pred[i:i+1], t_gt[i:i+1])
+                scores.append(s.cpu().item())
+            return float(np.mean(scores))
+
+        score = self.psnr_metric_calculator(t_pred, t_gt)
+        return score.cpu().item()
     
     def calculate_lpips(self, img_pred, img_gt, mask_pred=None, mask_gt=None):
-        img_pred = self._to_numpy(img_pred).astype(np.float32)/255
-        img_gt = self._to_numpy(img_gt).astype(np.float32)/255
-        assert img_pred.shape == img_gt.shape, "Image shapes should be the same."
+        t_pred = self._prepare_tensor(img_pred, mask=mask_pred)
+        t_gt = self._prepare_tensor(img_gt, mask=mask_gt)
+        assert t_pred.shape == t_gt.shape, "Image shapes should be the same."
 
-        if mask_pred is not None:
-            mask_pred = self._to_numpy(mask_pred).astype(np.float32)
-            img_pred = img_pred * mask_pred
-        if mask_gt is not None:
-            mask_gt = self._to_numpy(mask_gt).astype(np.float32)
-            img_gt = img_gt * mask_gt
-            
-        img_pred_tensor=torch.tensor(img_pred).permute(2,0,1).unsqueeze(0).to(self.device)
-        img_gt_tensor=torch.tensor(img_gt).permute(2,0,1).unsqueeze(0).to(self.device)
-            
-        score =  self.lpips_metric_calculator(img_pred_tensor*2-1, img_gt_tensor*2-1)
-        score = score.cpu().item()
-        
-        return score
+        # LPIPS expects input in [-1, 1]
+        if t_pred.shape[0] > 1:
+            scores = []
+            for i in range(t_pred.shape[0]):
+                s = self.lpips_metric_calculator(t_pred[i:i+1]*2-1, t_gt[i:i+1]*2-1)
+                scores.append(s.cpu().item())
+            return float(np.mean(scores))
+
+        score = self.lpips_metric_calculator(t_pred*2-1, t_gt*2-1)
+        return score.cpu().item()
     
     def calculate_mse(self, img_pred, img_gt, mask_pred=None, mask_gt=None):
-        img_pred = self._to_numpy(img_pred).astype(np.float32)/255
-        img_gt = self._to_numpy(img_gt).astype(np.float32)/255
-        assert img_pred.shape == img_gt.shape, "Image shapes should be the same."
+        t_pred = self._prepare_tensor(img_pred, mask=mask_pred)
+        t_gt = self._prepare_tensor(img_gt, mask=mask_gt)
+        assert t_pred.shape == t_gt.shape, "Image shapes should be the same."
 
-        if mask_pred is not None:
-            mask_pred = self._to_numpy(mask_pred).astype(np.float32)
-            img_pred = img_pred * mask_pred
-        if mask_gt is not None:
-            mask_gt = self._to_numpy(mask_gt).astype(np.float32)
-            img_gt = img_gt * mask_gt
-            
-        img_pred_tensor=torch.tensor(img_pred).permute(2,0,1).to(self.device)
-        img_gt_tensor=torch.tensor(img_gt).permute(2,0,1).to(self.device)
-            
-        score =  self.mse_metric_calculator(img_pred_tensor.contiguous(),img_gt_tensor.contiguous())
-        score = score.cpu().item()
-        
-        return score
+        score = self.mse_metric_calculator(t_pred.contiguous(), t_gt.contiguous())
+        return score.cpu().item()
     
     def calculate_mae(self, img_pred, img_gt, mask_pred=None, mask_gt=None):
-        img_pred = self._to_numpy(img_pred).astype(np.float32)/255
-        img_gt = self._to_numpy(img_gt).astype(np.float32)/255
-        assert img_pred.shape == img_gt.shape, "Image shapes should be the same."
+        t_pred = self._prepare_tensor(img_pred, mask=mask_pred)
+        t_gt = self._prepare_tensor(img_gt, mask=mask_gt)
+        assert t_pred.shape == t_gt.shape, "Image shapes should be the same."
 
-        if mask_pred is not None:
-            mask_pred = self._to_numpy(mask_pred).astype(np.float32)
-            img_pred = img_pred * mask_pred
-        if mask_gt is not None:
-            mask_gt = self._to_numpy(mask_gt).astype(np.float32)
-            img_gt = img_gt * mask_gt
-            
-        img_pred_tensor = torch.tensor(img_pred).permute(2,0,1).to(self.device)
-        img_gt_tensor = torch.tensor(img_gt).permute(2,0,1).to(self.device)
-            
-        score = self.l1_metric_calculator(img_pred_tensor.contiguous(), img_gt_tensor.contiguous())
-        score = score.cpu().item()
-        
-        return score
+        score = self.l1_metric_calculator(t_pred.contiguous(), t_gt.contiguous())
+        return score.cpu().item()
 
     def calculate_ssim(self, img_pred, img_gt, mask_pred=None, mask_gt=None):
-        img_pred = self._to_numpy(img_pred).astype(np.float32)/255
-        img_gt = self._to_numpy(img_gt).astype(np.float32)/255
-        assert img_pred.shape == img_gt.shape, "Image shapes should be the same."
+        t_pred = self._prepare_tensor(img_pred, mask=mask_pred)
+        t_gt = self._prepare_tensor(img_gt, mask=mask_gt)
+        assert t_pred.shape == t_gt.shape, "Image shapes should be the same."
 
-        if mask_pred is not None:
-            mask_pred = self._to_numpy(mask_pred).astype(np.float32)
-            img_pred = img_pred * mask_pred
-        if mask_gt is not None:
-            mask_gt = self._to_numpy(mask_gt).astype(np.float32)
-            img_gt = img_gt * mask_gt
-            
-        img_pred_tensor=torch.tensor(img_pred).permute(2,0,1).unsqueeze(0).to(self.device)
-        img_gt_tensor=torch.tensor(img_gt).permute(2,0,1).unsqueeze(0).to(self.device)
-            
-        score =  self.ssim_metric_calculator(img_pred_tensor,img_gt_tensor)
-        score = score.cpu().item()
-        
-        return score
+        # Average per-frame SSIM for batched (video) inputs
+        if t_pred.shape[0] > 1:
+            scores = []
+            for i in range(t_pred.shape[0]):
+                s = self.ssim_metric_calculator(t_pred[i:i+1], t_gt[i:i+1])
+                scores.append(s.cpu().item())
+            return float(np.mean(scores))
+
+        score = self.ssim_metric_calculator(t_pred, t_gt)
+        return score.cpu().item()
     
     def calculate_temporal_consistency(self, images, masks=None):
         """Calculate temporal consistency between video frames, supports masked region computation.
@@ -979,9 +1023,9 @@ class MetricsCalculator:
         images = resize(images)
         images = images.view(B, C, 224, 224)  # Restore batch dimension
             
-        # Extract and normalize features
+        # Extract and normalize features using HuggingFace CLIP
         with torch.no_grad():
-            image_features = self.clip_model.encode_image(images)
+            image_features = self.clip_model.get_image_features(pixel_values=images)
             normalized_features = image_features / torch.sqrt(torch.sum(image_features**2, dim=1, keepdim=True))
             
         # Calculate consistency between consecutive frames
@@ -994,5 +1038,88 @@ class MetricsCalculator:
         avg_consistency = torch.mean(torch.stack(frame_consistency_scores))
         
         return avg_consistency.cpu().item()
-    
+
+    def compute_all_metrics(
+        self,
+        original: torch.Tensor,
+        generated: torch.Tensor,
+        mask: torch.Tensor | None = None,
+        caption: str | None = None,
+    ) -> dict:
+        """Compute all evaluation metrics in a single optimised pass.
+
+        All heavy work runs on GPU.  Tensor prep is done once and reused
+        across every metric, and per-frame loops are replaced with batched
+        ops where the underlying torchmetrics API allows it.
+
+        Args:
+            original:  [T, C, H, W] float32 tensor in [0, 1] on *any* device.
+            generated: Same shape / dtype / range as *original*.
+            mask:      Optional [T, 1, H, W] float binary mask (1 = keep).
+            caption:   Optional text for CLIP score.
+
+        Returns:
+            dict with keys PSNR, SSIM, LPIPS, MSE, MAE,
+            Temporal_Consistency, and (optionally) CLIP_Score.
+        """
+        # --- normalise once ------------------------------------------------
+        t_orig = self._prepare_tensor(original)
+        t_gen  = self._prepare_tensor(generated)
+        assert t_orig.shape == t_gen.shape, "Tensor shapes must match."
+        N = t_orig.shape[0]
+
+        if mask is not None:
+            if isinstance(mask, torch.Tensor):
+                m = mask.detach().float().to(self.device)
+            else:
+                m = torch.tensor(np.array(mask).astype(np.float32)).to(self.device)
+            while m.ndim < t_orig.ndim:
+                m = m.unsqueeze(0)
+            t_orig = t_orig * m
+            t_gen  = t_gen  * m
+
+        results: dict[str, float] = {}
+
+        # --- PSNR (per-frame average) --------------------------------------
+        psnr_vals = []
+        for i in range(N):
+            psnr_vals.append(
+                self.psnr_metric_calculator(t_gen[i:i+1], t_orig[i:i+1]).cpu().item()
+            )
+        results['PSNR'] = float(np.mean(psnr_vals))
+
+        # --- SSIM (per-frame average) --------------------------------------
+        ssim_vals = []
+        for i in range(N):
+            ssim_vals.append(
+                self.ssim_metric_calculator(t_gen[i:i+1], t_orig[i:i+1]).cpu().item()
+            )
+        results['SSIM'] = float(np.mean(ssim_vals))
+
+        # --- LPIPS (per-frame, model expects single-image batch) -----------
+        lpips_vals = []
+        for i in range(N):
+            lpips_vals.append(
+                self.lpips_metric_calculator(
+                    t_gen[i:i+1] * 2 - 1, t_orig[i:i+1] * 2 - 1
+                ).cpu().item()
+            )
+        results['LPIPS'] = float(np.mean(lpips_vals))
+
+        # --- MSE & MAE (whole tensor – torchmetrics handles any shape) -----
+        results['MSE'] = self.mse_metric_calculator(
+            t_gen.contiguous(), t_orig.contiguous()
+        ).cpu().item()
+        results['MAE'] = self.l1_metric_calculator(
+            t_gen.contiguous(), t_orig.contiguous()
+        ).cpu().item()
+
+        # --- Temporal Consistency (CLIP cosine sim between consecutive) -----
+        results['Temporal_Consistency'] = self.calculate_temporal_consistency(t_gen)
+
+        # --- CLIP Score (optional) -----------------------------------------
+        if caption:
+            results['CLIP_Score'] = self.calculate_clip_score(t_gen, [caption])
+
+        return results
 

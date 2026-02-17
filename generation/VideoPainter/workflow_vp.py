@@ -583,35 +583,18 @@ def _evaluate_video(
 		
 		metrics_calculator = MetricsCalculator(device)
 		
-		# Full-frame metrics
+		# Full-frame metrics (single-pass, all on GPU)
 		logger.info("[EVAL][%s] Calculating full-frame metrics", video_id)
-		full_metrics = {}
-		full_metrics['PSNR'] = metrics_calculator.calculate_psnr(original_tensor, generated_tensor)
-		full_metrics['SSIM'] = metrics_calculator.calculate_ssim(original_tensor, generated_tensor)
-		full_metrics['LPIPS'] = metrics_calculator.calculate_lpips(original_tensor, generated_tensor)
-		full_metrics['MSE'] = metrics_calculator.calculate_mse(original_tensor, generated_tensor)
-		full_metrics['MAE'] = metrics_calculator.calculate_mae(original_tensor, generated_tensor)
-		full_metrics['Temporal_Consistency'] = metrics_calculator.calculate_temporal_consistency(generated_tensor)
+		full_metrics = metrics_calculator.compute_all_metrics(
+			original_tensor, generated_tensor, caption=caption or None,
+		)
 		
-		if caption:
-			full_metrics['CLIP_Score'] = metrics_calculator.calculate_clip_score(generated_tensor, [caption])
-		
-		# Masked region metrics
+		# Masked region metrics (single-pass, all on GPU)
 		logger.info("[EVAL][%s] Calculating masked-region metrics", video_id)
-		masked_metrics = {}
 		mask_binary = (mask_tensor > 0.5).float()
-		original_masked = original_tensor * mask_binary
-		generated_masked = generated_tensor * mask_binary
-		
-		masked_metrics['PSNR'] = metrics_calculator.calculate_psnr(original_masked, generated_masked, mask=mask_binary)
-		masked_metrics['SSIM'] = metrics_calculator.calculate_ssim(original_masked, generated_masked)
-		masked_metrics['LPIPS'] = metrics_calculator.calculate_lpips(original_masked, generated_masked)
-		masked_metrics['MSE'] = metrics_calculator.calculate_mse(original_masked, generated_masked)
-		masked_metrics['MAE'] = metrics_calculator.calculate_mae(original_masked, generated_masked)
-		masked_metrics['Temporal_Consistency'] = metrics_calculator.calculate_temporal_consistency(generated_masked)
-		
-		if caption:
-			masked_metrics['CLIP_Score'] = metrics_calculator.calculate_clip_score(generated_masked, [caption])
+		masked_metrics = metrics_calculator.compute_all_metrics(
+			original_tensor, generated_tensor, mask=mask_binary, caption=caption or None,
+		)
 		
 		# Save results
 		Path(output_dir).mkdir(parents=True, exist_ok=True)

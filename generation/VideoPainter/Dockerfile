@@ -75,6 +75,17 @@ COPY hlx_wf-2.4.2.dev9-py3-none-any.whl /workspace/VideoPainter//
 # Install the wheel
 RUN python3 -m pip install /workspace/VideoPainter/hlx_wf-2.4.2.dev9-py3-none-any.whl
 
+# Pre-download evaluation model weights so they're baked into the image
+# and don't need to be fetched at runtime (saves ~2 min per pod start).
+#   1. squeezenet1_1 (4.7 MB)  – LPIPS backbone
+#   2. CLIP ViT-B/32 (338 MB)  – temporal consistency
+RUN python3 -c "\
+import torch, os; \
+torch.hub.load_state_dict_from_url( \
+    'https://download.pytorch.org/models/squeezenet1_1-b8a52dc0.pth', \
+    map_location='cpu'); \
+print('squeezenet cached at', os.path.expanduser('~/.cache/torch/hub/checkpoints/squeezenet1_1-b8a52dc0.pth'))"
+
 # Copy project files (at the end)
 COPY . /workspace/VideoPainter
 
