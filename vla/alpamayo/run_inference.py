@@ -349,7 +349,7 @@ def run_inference_on_video(
             results["overlay_video_path"] = overlay_file
             logger.info(f"  Overlay video saved → {overlay_file}")
         except Exception as overlay_err:
-            logger.warning(f"  Failed to render overlay video: {overlay_err}")
+            logger.error(f"  Failed to render overlay video: {overlay_err}", exc_info=True)
 
         logger.info(f"  minADE = {min_ade:.4f} m | time = {inference_time:.1f}s | saved → {output_file}")
         return results

@@ -58,6 +58,7 @@ RUN pip install --no-cache-dir \
         "einops>=0.8.1" \
         "gcsfs>=2024.2.0" \
         "hydra-colorlog>=1.2.0" \
+        "opencv-python-headless>=4.8.0" \
         "hydra-core>=1.3.2" \
         "pandas>=2.3.3" \
         "physical_ai_av>=0.1.0" \

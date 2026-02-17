@@ -12,8 +12,9 @@
 # OUTPUT:
 #   VLA trajectory predictions + visualizations:
 #     gs://<bucket>/.../training/output/alpamayo/<run_id>/
-#       ├── <video_id>_result.json      (trajectory predictions)
+#       ├── <video_id>_inference.json   (trajectory predictions + reasoning)
 #       ├── <video_id>_vis_data.npz     (visualization tensors)
+#       ├── <video_id>_overlay.mp4      (video with trajectory overlay)
 #       └── <run_id>_report.txt         (summary report)
 # ==================================================================================
 
