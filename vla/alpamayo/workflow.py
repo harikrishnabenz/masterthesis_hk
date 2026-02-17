@@ -156,8 +156,12 @@ def _resolve_fuse_data_path(video_data_gcs_path: str) -> str:
     return os.path.join(VIDEO_DATA_FUSE_MOUNT_ROOT, relative) if relative else VIDEO_DATA_FUSE_MOUNT_ROOT
 
 
-def _stage_video_data(video_gcs_path: str) -> list[str]:
-    """Discover video files via the FuseBucket mount (no gsutil needed)."""
+def _stage_video_data(video_gcs_path: str, video_name: str = "auto") -> list[str]:
+    """Discover video files via the FuseBucket mount (no gsutil needed).
+
+    If *video_name* is not "auto", only videos whose stem matches the
+    given name (case-insensitive, without extension) are returned.
+    """
     fuse_path = _resolve_fuse_data_path(video_gcs_path)
 
     if not os.path.isdir(fuse_path):
@@ -174,7 +178,20 @@ def _stage_video_data(video_gcs_path: str) -> list[str]:
         video_files.extend(list(Path(fuse_path).rglob(f"*{ext}")))
 
     video_paths = sorted(str(p) for p in video_files)
-    logger.info(f"Found {len(video_paths)} video files")
+    logger.info(f"Found {len(video_paths)} video files (before filtering)")
+
+    # Optional: filter to a single video by stem name
+    if video_name and video_name.lower() != "auto":
+        video_paths = [
+            p for p in video_paths
+            if Path(p).stem.lower() == video_name.lower()
+            or Path(p).stem.lower().startswith(video_name.lower())
+        ]
+        logger.info(f"After video_name filter '{video_name}': {len(video_paths)} video(s)")
+        if not video_paths:
+            raise FileNotFoundError(
+                f"No video matching video_name='{video_name}' found in {fuse_path}"
+            )
 
     return video_paths
 
@@ -402,6 +419,7 @@ def run_alpamayo_inference_task(
     output_run_id: str,
     model_id: str = "nvidia/Alpamayo-R1-10B",
     num_traj_samples: int = 1,
+    video_name: str = "auto",
 ) -> dict:
     """
     Run Alpamayo VLA inference on video data.
@@ -411,6 +429,7 @@ def run_alpamayo_inference_task(
         output_run_id: Unique identifier for this run
         model_id: HuggingFace model ID or local path
         num_traj_samples: Number of trajectory samples per video
+        video_name: Filter to a specific video by stem name ("auto" = all videos)
     
     Returns:
         Dictionary with output GCS path and metrics
@@ -421,6 +440,7 @@ def run_alpamayo_inference_task(
     logger.info(f"Video Data Source: {video_data_gcs_path}")
     logger.info(f"Output Run ID: {output_run_id}")
     logger.info(f"Model ID: {model_id}")
+    logger.info(f"Video Name Filter: {video_name}")
     logger.info(f"Container Image: {CONTAINER_IMAGE}")
     
     # Setup checkpoint symlink
@@ -428,7 +448,7 @@ def run_alpamayo_inference_task(
     ensure_symlink(CKPT_FUSE_MOUNT_ROOT, CKPT_LOCAL_PATH)
     
     # Discover video files via FuseBucket mount
-    video_paths = _stage_video_data(video_data_gcs_path)
+    video_paths = _stage_video_data(video_data_gcs_path, video_name=video_name)
     
     if not video_paths:
         raise ValueError(f"No videos found in {video_data_gcs_path}")
@@ -492,6 +512,7 @@ def alpamayo_vla_inference_wf(
     output_run_id: str,
     model_id: str = "nvidia/Alpamayo-R1-10B",
     num_traj_samples: int = 1,
+    video_name: str = "auto",
 ) -> dict:
     """
     Alpamayo VLA inference workflow.
@@ -501,6 +522,7 @@ def alpamayo_vla_inference_wf(
         output_run_id: Unique identifier for this run
         model_id: Model identifier
         num_traj_samples: Number of trajectory samples
+        video_name: Filter to a specific video by stem name ("auto" = all videos)
     
     Returns:
         Dictionary with results
@@ -510,4 +532,5 @@ def alpamayo_vla_inference_wf(
         output_run_id=output_run_id,
         model_id=model_id,
         num_traj_samples=num_traj_samples,
+        video_name=video_name,
     )

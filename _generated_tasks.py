@@ -566,6 +566,7 @@ def task_alpamayo_inference(
     output_run_id: str,
     model_id: str = ALPAMAYO_DEFAULT_MODEL_ID,
     num_traj_samples: int = 1,
+    video_name: str = "auto",
 ) -> dict:
     """Execute Alpamayo VLA inference on video data.
 
@@ -581,6 +582,7 @@ def task_alpamayo_inference(
         output_run_id=output_run_id,
         model_id=model_id,
         num_traj_samples=num_traj_samples,
+        video_name=video_name,
     )
 
 
@@ -728,6 +730,7 @@ def eval_alpamayo_inference(
     output_run_id: str = "001",
     model_id: str = ALPAMAYO_DEFAULT_MODEL_ID,
     num_traj_samples: int = 1,
+    video_name: str = "auto",
 ) -> dict:
     """Run Alpamayo VLA inference with defaults."""
     return task_alpamayo_inference(
@@ -735,6 +738,7 @@ def eval_alpamayo_inference(
         output_run_id=output_run_id,
         model_id=model_id,
         num_traj_samples=num_traj_samples,
+        video_name=video_name,
     )
 
 
@@ -813,6 +817,7 @@ def eval_stage_alpamayo(
     output_run_id: str = "001",
     model_id: str = ALPAMAYO_DEFAULT_MODEL_ID,
     num_traj_samples: int = 1,
+    video_name: str = "auto",
 ) -> dict:
     """Run all Alpamayo tasks."""
     return eval_alpamayo_inference(
@@ -820,6 +825,7 @@ def eval_stage_alpamayo(
         output_run_id=output_run_id,
         model_id=model_id,
         num_traj_samples=num_traj_samples,
+        video_name=video_name,
     )
 
 

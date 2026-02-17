@@ -82,6 +82,7 @@ def _master_pipeline_dynamic(
     alpamayo_run_id: str = "",
     alpamayo_num_traj_samples: int = 1,
     alpamayo_model_id: str = ALPAMAYO_DEFAULT_MODEL_ID,
+    alpamayo_video_name: str = "auto",
 ) -> str:
     """Chain SAM2 → VideoPainter → Alpamayo sequentially.
 
@@ -151,6 +152,7 @@ def _master_pipeline_dynamic(
         output_run_id=alpamayo_run_id_after_vp,
         model_id=alpamayo_model_id,
         num_traj_samples=alpamayo_num_traj_samples,
+        video_name=alpamayo_video_name,
     )
 
     # ── Finalize: return a Promise so Flyte tracks the full child-task DAG ──
@@ -176,6 +178,7 @@ def master_pipeline_wf(
     alpamayo_run_id: str = "",
     alpamayo_num_traj_samples: int = 1,
     alpamayo_model_id: str = ALPAMAYO_DEFAULT_MODEL_ID,
+    alpamayo_video_name: str = "auto",
 ) -> str:
     """Master pipeline workflow: SAM2 → VideoPainter → Alpamayo."""
     return _master_pipeline_dynamic(
@@ -189,4 +192,5 @@ def master_pipeline_wf(
         alpamayo_run_id=alpamayo_run_id,
         alpamayo_num_traj_samples=alpamayo_num_traj_samples,
         alpamayo_model_id=alpamayo_model_id,
+        alpamayo_video_name=alpamayo_video_name,
     )

@@ -29,14 +29,28 @@ GCS_BUCKET="mbadas-sandbox-research-9bb9c7f"
 # ==============================================================================
 RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 RUN_ID="${RUN_ID:-001}"
+RUN_TAG="${RUN_ID}_${RUN_TIMESTAMP}"
 
 # ==============================================================================
 # INPUT PATHS
 # ==============================================================================
 # VideoPainter edited videos (output of Stage 2).
-# Override: VIDEO_DATA_GCS_PATH="gs://bucket/my/videos" bash scripts/build_and_run.sh
-VIDEO_DATA_GCS_PATH="${VIDEO_DATA_GCS_PATH:-gs://${GCS_BUCKET}/workspace/user/hbaskar/outputs/vp}"
-export VIDEO_DATA_GCS_PATH
+# Override: VP_OUTPUT_BASE="gs://bucket/my/videos" bash scripts/build_and_run.sh
+VP_OUTPUT_BASE="${VP_OUTPUT_BASE:-gs://${GCS_BUCKET}/workspace/user/hbaskar/outputs/vp}"
+export VP_OUTPUT_BASE
+
+# Auto-discover the VP output folder matching RUN_ID.
+# The folder name is <RUN_ID>_<timestamp>, e.g. 001_20260217_095447.
+VP_RUN_FOLDER=$(gcloud storage ls "${VP_OUTPUT_BASE}/" 2>/dev/null \
+  | grep "/${RUN_ID}_" \
+  | head -1 \
+  | sed 's|.*/\([^/]*\)/$|\1|')
+if [[ -z "${VP_RUN_FOLDER}" ]]; then
+  echo "ERROR: No VP output folder found matching '${RUN_ID}_*' under ${VP_OUTPUT_BASE}/"
+  exit 1
+fi
+VIDEO_DATA_GCS_PATH="${VP_OUTPUT_BASE}/${VP_RUN_FOLDER}"
+echo "Auto-detected VP data folder: ${VIDEO_DATA_GCS_PATH}"
 
 # ==============================================================================
 # OUTPUT PATHS
@@ -49,11 +63,14 @@ export ALPAMAYO_OUTPUT_BASE
 # ----------------------------------------------------------------------------------
 # RUN CONFIGURATION
 # ----------------------------------------------------------------------------------
-# Unique identifier for this run (RUN_ID + timestamp)
-ALPAMAYO_RUN_ID="${ALPAMAYO_RUN_ID:-${RUN_ID}_${RUN_TIMESTAMP}}"
 
 # Number of trajectory samples per video
 NUM_TRAJ_SAMPLES="${NUM_TRAJ_SAMPLES:-1}"
+
+# Optionally restrict to a single video by name (stem, without extension).
+# Set to "auto" to process all videos, or specify a video stem.
+# Example: VIDEO_NAME="abc123.camera_front_tele_30fov_vp_edit_sample0" bash scripts/build_and_run.sh
+VIDEO_NAME="${VIDEO_NAME:-01d3588e-bca7-4a18-8e74-c6cfe9e996db.camera_front_tele_30fov}"
 
 # HuggingFace token for streaming the NVIDIA PhysicalAI-AV dataset
 # Required for ego-motion + multi-camera data from HuggingFace
@@ -74,11 +91,11 @@ MODEL_ID="${MODEL_ID:-/workspace/alpamayo/checkpoints/alpamayo-r1-10b}"
 echo "================================================================================"
 echo "ALPAMAYO VLA INFERENCE - BUILD AND RUN"
 echo "================================================================================"
-echo "  RUN_ID:                ${RUN_ID}"
-echo "  ALPAMAYO_RUN_ID:       ${ALPAMAYO_RUN_ID}"
+echo "  RUN_TAG:               ${RUN_TAG}"
 echo "  INPUT  (VP videos):    ${VIDEO_DATA_GCS_PATH}"
-echo "  OUTPUT (predictions):  gs://${GCS_BUCKET}/${ALPAMAYO_OUTPUT_BASE}/${ALPAMAYO_RUN_ID}/"
+echo "  OUTPUT (predictions):  gs://${GCS_BUCKET}/${ALPAMAYO_OUTPUT_BASE}/${RUN_TAG}/"
 echo "  NUM_TRAJ_SAMPLES:      ${NUM_TRAJ_SAMPLES}"
+echo "  VIDEO_NAME:            ${VIDEO_NAME}"
 echo "  MODEL_ID:              ${MODEL_ID}"
 echo "  HF_TOKEN:              ${HF_TOKEN:+set (hidden)}"
 echo "================================================================================"
@@ -91,7 +108,6 @@ cd "$(dirname "$0")/.."
 docker compose build
 
 # Tag the image for Google Artifact Registry
-RUN_TAG="$(date -u +%Y%m%dT%H%M%SZ)"
 REMOTE_IMAGE="europe-west4-docker.pkg.dev/mb-adas-2015-p-a4db/research/alpamayo_vla"
 REMOTE_IMAGE_TAGGED="${REMOTE_IMAGE}:${RUN_TAG}"
 
@@ -117,18 +133,19 @@ echo "==========================================================================
 hlx wf run \
   --team-space research \
   --domain prod \
-  --execution-name "alpamayo-vla-${ALPAMAYO_RUN_ID//_/-}-$(date -u +%Y%m%d-%H%M%S)" \
+  --execution-name "alpamayo-vla-${RUN_TAG//_/-}" \
   workflow.alpamayo_vla_inference_wf \
   --video_data_gcs_path "${VIDEO_DATA_GCS_PATH}" \
-  --output_run_id "${ALPAMAYO_RUN_ID}" \
+  --output_run_id "${RUN_TAG}" \
   --model_id "${MODEL_ID}" \
-  --num_traj_samples "${NUM_TRAJ_SAMPLES}"
+  --num_traj_samples "${NUM_TRAJ_SAMPLES}" \
+  --video_name "${VIDEO_NAME}"
 
 echo ""
 echo "================================================================================"
 echo "WORKFLOW SUBMITTED"
 echo "================================================================================"
 echo "  Input (VP videos):  ${VIDEO_DATA_GCS_PATH}"
-echo "  Output:             gs://${GCS_BUCKET}/${ALPAMAYO_OUTPUT_BASE}/${ALPAMAYO_RUN_ID}/"
-echo "  Report:             gs://${GCS_BUCKET}/${ALPAMAYO_OUTPUT_BASE}/${ALPAMAYO_RUN_ID}/${ALPAMAYO_RUN_ID}_report.txt"
+echo "  Output:             gs://${GCS_BUCKET}/${ALPAMAYO_OUTPUT_BASE}/${RUN_TAG}/"
+echo "  Report:             gs://${GCS_BUCKET}/${ALPAMAYO_OUTPUT_BASE}/${RUN_TAG}/${RUN_TAG}_report.txt"
 echo "================================================================================"
