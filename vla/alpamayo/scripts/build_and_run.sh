@@ -70,7 +70,7 @@ NUM_TRAJ_SAMPLES="${NUM_TRAJ_SAMPLES:-1}"
 # Optionally restrict to a single video by name (stem, without extension).
 # Set to "auto" to process all videos, or specify a video stem.
 # Example: VIDEO_NAME="abc123.camera_front_tele_30fov_vp_edit_sample0" bash scripts/build_and_run.sh
-VIDEO_NAME="${VIDEO_NAME:-01d3588e-bca7-4a18-8e74-c6cfe9e996db.camera_front_tele_30fov}"
+VIDEO_NAME="${VIDEO_NAME:-auto}"
 
 # HuggingFace token for streaming the NVIDIA PhysicalAI-AV dataset
 # Required for ego-motion + multi-camera data from HuggingFace
