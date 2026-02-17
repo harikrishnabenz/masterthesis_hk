@@ -812,11 +812,18 @@ class MetricsCalculator:
 
         return video_caption, mask_description
 
+    @staticmethod
+    def _to_numpy(x):
+        """Convert a torch Tensor, PIL Image, or ndarray to a numpy array."""
+        if isinstance(x, torch.Tensor):
+            return x.detach().cpu().numpy()
+        return np.array(x)
+
     def calculate_clip_similarity(self, img, txt, mask=None):
-        img = np.array(img).astype(np.uint8)
+        img = self._to_numpy(img).astype(np.uint8)
         
         if mask is not None:
-            mask = np.array(mask)
+            mask = self._to_numpy(mask)
             img = np.uint8(img * mask)
             
         img_tensor=torch.tensor(img).permute(2,0,1).to(self.device)
@@ -827,15 +834,15 @@ class MetricsCalculator:
         return score
     
     def calculate_psnr(self, img_pred, img_gt, mask_pred=None, mask_gt=None):
-        img_pred = np.array(img_pred).astype(np.float32)/255
-        img_gt = np.array(img_gt).astype(np.float32)/255
+        img_pred = self._to_numpy(img_pred).astype(np.float32)/255
+        img_gt = self._to_numpy(img_gt).astype(np.float32)/255
         assert img_pred.shape == img_gt.shape, "Image shapes should be the same."
 
         if mask_pred is not None:
-            mask_pred = np.array(mask_pred).astype(np.float32)
+            mask_pred = self._to_numpy(mask_pred).astype(np.float32)
             img_pred = img_pred * mask_pred
         if mask_gt is not None:
-            mask_gt = np.array(mask_gt).astype(np.float32)
+            mask_gt = self._to_numpy(mask_gt).astype(np.float32)
             img_gt = img_gt * mask_gt
             
         img_pred_tensor=torch.tensor(img_pred).permute(2,0,1).unsqueeze(0).to(self.device)
@@ -847,15 +854,15 @@ class MetricsCalculator:
         return score
     
     def calculate_lpips(self, img_pred, img_gt, mask_pred=None, mask_gt=None):
-        img_pred = np.array(img_pred).astype(np.float32)/255
-        img_gt = np.array(img_gt).astype(np.float32)/255
+        img_pred = self._to_numpy(img_pred).astype(np.float32)/255
+        img_gt = self._to_numpy(img_gt).astype(np.float32)/255
         assert img_pred.shape == img_gt.shape, "Image shapes should be the same."
 
         if mask_pred is not None:
-            mask_pred = np.array(mask_pred).astype(np.float32)
+            mask_pred = self._to_numpy(mask_pred).astype(np.float32)
             img_pred = img_pred * mask_pred
         if mask_gt is not None:
-            mask_gt = np.array(mask_gt).astype(np.float32)
+            mask_gt = self._to_numpy(mask_gt).astype(np.float32)
             img_gt = img_gt * mask_gt
             
         img_pred_tensor=torch.tensor(img_pred).permute(2,0,1).unsqueeze(0).to(self.device)
@@ -867,15 +874,15 @@ class MetricsCalculator:
         return score
     
     def calculate_mse(self, img_pred, img_gt, mask_pred=None, mask_gt=None):
-        img_pred = np.array(img_pred).astype(np.float32)/255
-        img_gt = np.array(img_gt).astype(np.float32)/255
+        img_pred = self._to_numpy(img_pred).astype(np.float32)/255
+        img_gt = self._to_numpy(img_gt).astype(np.float32)/255
         assert img_pred.shape == img_gt.shape, "Image shapes should be the same."
 
         if mask_pred is not None:
-            mask_pred = np.array(mask_pred).astype(np.float32)
+            mask_pred = self._to_numpy(mask_pred).astype(np.float32)
             img_pred = img_pred * mask_pred
         if mask_gt is not None:
-            mask_gt = np.array(mask_gt).astype(np.float32)
+            mask_gt = self._to_numpy(mask_gt).astype(np.float32)
             img_gt = img_gt * mask_gt
             
         img_pred_tensor=torch.tensor(img_pred).permute(2,0,1).to(self.device)
@@ -887,15 +894,15 @@ class MetricsCalculator:
         return score
     
     def calculate_mae(self, img_pred, img_gt, mask_pred=None, mask_gt=None):
-        img_pred = np.array(img_pred).astype(np.float32)/255
-        img_gt = np.array(img_gt).astype(np.float32)/255
+        img_pred = self._to_numpy(img_pred).astype(np.float32)/255
+        img_gt = self._to_numpy(img_gt).astype(np.float32)/255
         assert img_pred.shape == img_gt.shape, "Image shapes should be the same."
 
         if mask_pred is not None:
-            mask_pred = np.array(mask_pred).astype(np.float32)
+            mask_pred = self._to_numpy(mask_pred).astype(np.float32)
             img_pred = img_pred * mask_pred
         if mask_gt is not None:
-            mask_gt = np.array(mask_gt).astype(np.float32)
+            mask_gt = self._to_numpy(mask_gt).astype(np.float32)
             img_gt = img_gt * mask_gt
             
         img_pred_tensor = torch.tensor(img_pred).permute(2,0,1).to(self.device)
@@ -907,15 +914,15 @@ class MetricsCalculator:
         return score
 
     def calculate_ssim(self, img_pred, img_gt, mask_pred=None, mask_gt=None):
-        img_pred = np.array(img_pred).astype(np.float32)/255
-        img_gt = np.array(img_gt).astype(np.float32)/255
+        img_pred = self._to_numpy(img_pred).astype(np.float32)/255
+        img_gt = self._to_numpy(img_gt).astype(np.float32)/255
         assert img_pred.shape == img_gt.shape, "Image shapes should be the same."
 
         if mask_pred is not None:
-            mask_pred = np.array(mask_pred).astype(np.float32)
+            mask_pred = self._to_numpy(mask_pred).astype(np.float32)
             img_pred = img_pred * mask_pred
         if mask_gt is not None:
-            mask_gt = np.array(mask_gt).astype(np.float32)
+            mask_gt = self._to_numpy(mask_gt).astype(np.float32)
             img_gt = img_gt * mask_gt
             
         img_pred_tensor=torch.tensor(img_pred).permute(2,0,1).unsqueeze(0).to(self.device)
