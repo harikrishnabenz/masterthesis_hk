@@ -1,196 +1,426 @@
-"""Master workflow that chains SAM2 → VideoPainter → Alpamayo sequentially.
+"""Master Pipeline Orchestrator: SAM2 → VideoPainter → Alpamayo.
 
-This workflow orchestrates the complete pipeline, ensuring each stage completes
-before the next begins, with data flowing from one stage to the next via GCS paths.
+Chains three GPU stages sequentially inside a single HLX workflow:
 
-All task definitions (container images, FuseBuckets, compute nodes) live in
-_generated_tasks.py.  This file only wires them together with barriers so
-Flytekit respects the SAM2 → VP → Alpamayo ordering.
+  Stage 1 — SAM2 Segmentation
+      Input : raw driving videos (GCS / chunks:// URI)
+      Output: binary masks + VideoPainter-preprocessed data
+              gs://<bucket>/.../outputs/preprocessed_data_vp/<run_id>/
+
+  Stage 2 — VideoPainter Editing
+      Input : SAM2 preprocessed data (masks + raw videos)
+      Output: edited / inpainted videos
+              gs://<bucket>/.../outputs/vp/<run_id>/
+
+  Stage 3 — Alpamayo VLA Inference
+      Input : VideoPainter edited videos
+      Output: trajectory predictions + reasoning traces
+              gs://<bucket>/.../outputs/alpamayo/<run_id>/
+
+All three stages share a single ``run_id`` for end-to-end traceability.
+Each stage runs in its **own** container image (heavy ML deps are isolated)
+while the workflow graph itself is serialised from this lightweight
+orchestrator container.
+
+Usage (via the master build_and_run.sh):
+    bash scripts/build_and_run.sh
 """
+
 import logging
-from typing import List, Optional
+import os
+from typing import Optional
 
-from hlx.wf import ContainerImage, SharedNode, dynamic, task, workflow
-
-# Import pre-built tasks from _generated_tasks – no stub injection needed
-from _generated_tasks import (
-    task_sam2_segmentation,
-    task_videopainter_edit_many,
-    task_alpamayo_inference,
-    OUTPUT_BASE,
-    ALPAMAYO_DEFAULT_MODEL_ID,
-    VP_DEFAULT_DATA_RUN_ID,
-)
+from hlx.wf import DedicatedNode, Node, task, workflow
+from hlx.wf.mounts import MOUNTPOINT, FuseBucket
 
 logger = logging.getLogger(__name__)
 
+# ==============================================================================
+# GCS BUCKET (shared across all stages)
+# ==============================================================================
+GCS_BUCKET = "mbadas-sandbox-research-9bb9c7f"
 
-# ---------------------------------------------------------------------------
-# GCS path constants
-# ---------------------------------------------------------------------------
-_OUTPUT_BASE = OUTPUT_BASE
-
-
-# ---------------------------------------------------------------------------
-# Barrier tasks – enforce sequential execution via data dependencies.
-# Flytekit schedules tasks in parallel unless there is a data dependency.
-# These tiny tasks create the chain: SAM2 → VP → Alpamayo.
-# ---------------------------------------------------------------------------
-@task(compute=SharedNode(), container_image=ContainerImage.PYTHON_3_10.value)
-def _barrier(prev_result: str, pass_through: str) -> str:
-    """Forces sequential execution: returns pass_through after prev_result completes."""
-    return pass_through
-
-
-@task(compute=SharedNode(), container_image=ContainerImage.PYTHON_3_10.value)
-def _build_gcs_path(prev_result: str, base: str, suffix: str) -> str:
-    """Build a GCS path after the previous stage completes (enforces ordering)."""
-    return f"{base}/{suffix}"
-
-
-@task(compute=SharedNode(), container_image=ContainerImage.PYTHON_3_10.value)
-def _finalize(result: dict) -> str:
-    """Convert final stage output to a string.
-
-    Returning this from the @dynamic ensures Flyte tracks the *entire*
-    child-task DAG (SAM2 → VP → Alpamayo) as a dependency of the
-    dynamic's output.  Without this, `return "Pipeline complete"` is a
-    literal that resolves immediately and the engine may never schedule
-    the child tasks.
-    """
-    return f"Pipeline complete: {result}"
-
-
-# ---------------------------------------------------------------------------
-# @dynamic – can use plain Python on its arguments
-# ---------------------------------------------------------------------------
-@dynamic(
-    compute=SharedNode(),
-    container_image=ContainerImage.PYTHON_3_10.value,
+# ==============================================================================
+# CONTAINER IMAGES  — set by scripts/build_and_run.sh before `hlx wf run`
+# ==============================================================================
+SAM2_CONTAINER_IMAGE = os.environ.get(
+    "SAM2_CONTAINER_IMAGE",
+    "europe-west4-docker.pkg.dev/mb-adas-2015-p-a4db/research/harimt_sam2:latest",
 )
-def _master_pipeline_dynamic(
-    # SAM2 parameters
-    sam2_run_id: str = "001",
-    sam2_max_frames: int = 150,
-    sam2_video_uris: str = "default",
-    # VideoPainter parameters
-    vp_data_run_id: str = "",
-    vp_output_run_id: str = "",
-    vp_instruction: str = "",
-    vp_num_samples: int = 1,
-    # Alpamayo parameters
-    alpamayo_run_id: str = "",
-    alpamayo_num_traj_samples: int = 1,
-    alpamayo_model_id: str = ALPAMAYO_DEFAULT_MODEL_ID,
-    alpamayo_video_name: str = "auto",
+VP_CONTAINER_IMAGE = os.environ.get(
+    "VP_CONTAINER_IMAGE",
+    "europe-west4-docker.pkg.dev/mb-adas-2015-p-a4db/research/harimt_vp:latest",
+)
+ALPAMAYO_CONTAINER_IMAGE = os.environ.get(
+    "ALPAMAYO_CONTAINER_IMAGE",
+    "europe-west4-docker.pkg.dev/mb-adas-2015-p-a4db/research/alpamayo_vla:latest",
+)
+
+# ==============================================================================
+# STAGE 1 — SAM2 GCS / mount configuration
+# ==============================================================================
+SAM2_CKPT_PREFIX = "workspace/user/hbaskar/Video_inpainting/sam2_checkpoint"
+SAM2_FUSE_NAME   = "sam2-checkpoints"
+
+SAM2_OUTPUT_BASE = os.environ.get(
+    "SAM2_OUTPUT_BASE",
+    f"gs://{GCS_BUCKET}/workspace/user/hbaskar/outputs/sam2",
+)
+SAM2_PREPROCESSED_OUTPUT_BASE = os.environ.get(
+    "SAM2_PREPROCESSED_OUTPUT_BASE",
+    f"gs://{GCS_BUCKET}/workspace/user/hbaskar/outputs/preprocessed_data_vp",
+)
+
+# ==============================================================================
+# STAGE 2 — VideoPainter GCS / mount configuration
+# ==============================================================================
+VP_BUCKET_PREFIX      = "workspace/user/hbaskar/Video_inpainting/videopainter"
+VP_DATA_PREFIX        = "workspace/user/hbaskar/outputs/preprocessed_data_vp"
+VP_FUSE_NAME          = "vp-bucket"
+VP_DATA_FUSE_NAME     = "data"
+VP_VLM_7B_FUSE_NAME   = "vp-vlm-7b"
+VLM_7B_GCS_PREFIX     = os.path.join(VP_BUCKET_PREFIX, "ckpt", "vlm", "Qwen2.5-VL-7B-Instruct")
+
+TRAINED_FLUXFILL_FUSE_NAME = "vp-trained-fluxfill"
+TRAINED_FLUXFILL_GCS_PREFIX = os.environ.get(
+    "TRAINED_FLUXFILL_GCS_PATH",
+    "workspace/user/hbaskar/Video_inpainting/videopainter/training/"
+    "trained_checkpoint/fluxfill_single_white_solid_clearroad_20260212_151908",
+)
+
+VP_OUTPUT_BASE = os.environ.get(
+    "VP_OUTPUT_BASE",
+    f"gs://{GCS_BUCKET}/workspace/user/hbaskar/outputs/vp",
+)
+
+# ==============================================================================
+# STAGE 3 — Alpamayo GCS / mount configuration
+# ==============================================================================
+VLA_BASE_PREFIX        = "workspace/user/hbaskar/Video_inpainting/vla"
+ALPAMAYO_CKPT_PREFIX   = os.path.join(VLA_BASE_PREFIX, "alpamayo", "checkpoints")
+ALPAMAYO_CKPT_FUSE     = "alpamayo-ckpt"
+ALPAMAYO_DATA_FUSE     = "alpamayo-video-data"
+ALPAMAYO_DATA_PREFIX   = "workspace/user/hbaskar/outputs/vp"
+
+ALPAMAYO_OUTPUT_BASE = os.environ.get(
+    "ALPAMAYO_OUTPUT_BASE",
+    "workspace/user/hbaskar/outputs/alpamayo",
+)
+
+HF_TOKEN = os.environ.get("HF_TOKEN", "")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  STAGE 1  —  SAM2 Segmentation
+# ══════════════════════════════════════════════════════════════════════════════
+@task(
+    compute=DedicatedNode(
+        node=Node.A100_80GB_1GPU,
+        ephemeral_storage="max",
+        max_duration="3d",
+    ),
+    container_image=SAM2_CONTAINER_IMAGE,
+    environment={
+        "PYTHONUNBUFFERED": "1",
+        "SAM2_OUTPUT_BASE": SAM2_OUTPUT_BASE,
+        "SAM2_PREPROCESSED_OUTPUT_BASE": SAM2_PREPROCESSED_OUTPUT_BASE,
+    },
+    mounts=[
+        FuseBucket(
+            bucket=GCS_BUCKET,
+            name=SAM2_FUSE_NAME,
+            prefix=SAM2_CKPT_PREFIX,
+        ),
+    ],
+)
+def sam2_stage(
+    run_id: str,
+    sam2_video_uris: str,
+    max_frames: int = 150,
 ) -> str:
-    """Chain SAM2 → VideoPainter → Alpamayo sequentially.
+    """Run SAM2 video segmentation (Stage 1 of 3).
 
-    All three stages run as separate HLX tasks in their own GPU containers.
-    Data flows between stages via GCS paths.
+    Produces binary masks and VideoPainter-preprocessed data under
+    ``gs://…/outputs/preprocessed_data_vp/<run_id>/``.
+
+    Returns
+    -------
+    str
+        The *run_id* — passed to Stage 2 as ``data_run_id``.
     """
-    # -- resolve defaults that depend on other args ---------------------------
-    effective_vp_data_run_id = vp_data_run_id if vp_data_run_id else sam2_run_id
-    effective_vp_output_run_id = vp_output_run_id if vp_output_run_id else sam2_run_id
-    effective_alpamayo_run_id = alpamayo_run_id if alpamayo_run_id else sam2_run_id
+    import sys
+    sys.path.insert(0, "/workspace/sam2")
+    os.chdir("/workspace/sam2")
 
-    # -- parse video URIs: chunks://, folder, comma-separated, or "default" --
-    video_uris: Optional[List[str]] = None
-    if sam2_video_uris and sam2_video_uris != "default":
-        if sam2_video_uris.startswith("chunks://"):
-            # Chunk spec — pass as single-element list; task resolves it
-            video_uris = [sam2_video_uris]
-        elif sam2_video_uris.rstrip("/").startswith("gs://") and "," not in sam2_video_uris:
-            # Single GCS folder or single file — pass as-is
-            video_uris = [sam2_video_uris]
-        else:
-            # Comma-separated individual URIs
-            video_uris = [u.strip() for u in sam2_video_uris.split(",") if u.strip()]
+    # Import the SAM2 task function from the container's baked-in workflow module.
+    # Calling a @task-decorated function directly (outside a @workflow context)
+    # executes the raw Python function — no Flyte magic.
+    from workflow import run_sam2_segmentation  # type: ignore[import-not-found]
 
     logger.info("=" * 80)
-    logger.info("MASTER PIPELINE – SEQUENTIAL EXECUTION")
-    logger.info("=" * 80)
-    logger.info("Stage 1: SAM2 Segmentation  (run_id=%s)", sam2_run_id)
-    logger.info("Stage 2: VideoPainter Editing (data_run_id=%s, output_run_id=%s)", effective_vp_data_run_id, effective_vp_output_run_id)
-    logger.info("Stage 3: Alpamayo VLA Inference (run_id=%s)", effective_alpamayo_run_id)
+    logger.info("MASTER PIPELINE — STAGE 1: SAM2 SEGMENTATION")
+    logger.info("  run_id            = %s", run_id)
+    logger.info("  sam2_video_uris   = %s", sam2_video_uris)
+    logger.info("  max_frames        = %d", max_frames)
     logger.info("=" * 80)
 
-    # ── STAGE 1 ── SAM2 Segmentation ────────────────────────────────────────
-    sam2_result = task_sam2_segmentation(
-        run_id=sam2_run_id,
-        video_uris=video_uris,
+    result = run_sam2_segmentation(
+        run_id=run_id,
+        sam2_video_uris=sam2_video_uris,
+        max_frames=max_frames,
+    )
+
+    logger.info("SAM2 stage completed.")
+    logger.info("  Summary (first 500 chars): %s", str(result)[:500])
+    return run_id
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  STAGE 2  —  VideoPainter Editing
+# ══════════════════════════════════════════════════════════════════════════════
+@task(
+    compute=DedicatedNode(
+        node=Node.A100_80GB_1GPU,
+        ephemeral_storage="max",
+        max_duration="3d",
+    ),
+    container_image=VP_CONTAINER_IMAGE,
+    environment={
+        "PYTHONUNBUFFERED": "1",
+        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+        "VP_COG_DEVICE": "cuda:0",
+        "VP_FLUX_DEVICE": "cuda:0",
+        "VP_QWEN_DEVICE": "auto",
+        "VP_UNLOAD_QWEN_AFTER_USE": "1",
+        "TRAINED_FLUXFILL_GCS_PATH": TRAINED_FLUXFILL_GCS_PREFIX,
+        "VP_OUTPUT_BASE": VP_OUTPUT_BASE,
+    },
+    mounts=[
+        FuseBucket(bucket=GCS_BUCKET, name=VP_FUSE_NAME,          prefix=VP_BUCKET_PREFIX),
+        FuseBucket(bucket=GCS_BUCKET, name=VP_DATA_FUSE_NAME,     prefix=VP_DATA_PREFIX),
+        FuseBucket(bucket=GCS_BUCKET, name=TRAINED_FLUXFILL_FUSE_NAME,
+                   prefix=TRAINED_FLUXFILL_GCS_PREFIX),
+        FuseBucket(bucket=GCS_BUCKET, name=VP_VLM_7B_FUSE_NAME,  prefix=VLM_7B_GCS_PREFIX),
+    ],
+)
+def vp_stage(
+    data_run_id: str,
+    output_run_id: str,
+    video_editing_instructions: str = "",
+    llm_model: str = "/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct",
+    num_inference_steps: int = 70,
+    guidance_scale: float = 6.0,
+    strength: float = 1.0,
+    caption_refine_iters: int = 10,
+    caption_refine_temperature: float = 0.1,
+    dilate_size: int = 24,
+    mask_feather: int = 8,
+    keep_masked_pixels: bool = True,
+    img_inpainting_lora_scale: float = 0.0,
+    seed: int = 42,
+) -> str:
+    """Run VideoPainter video editing / inpainting (Stage 2 of 3).
+
+    Reads SAM2-preprocessed data (``data_run_id``) and produces edited videos
+    under ``gs://…/outputs/vp/<output_run_id>/``.
+
+    Returns
+    -------
+    str
+        GCS path to the edited videos (input for Stage 3).
+    """
+    import sys
+    sys.path.insert(0, "/workspace/VideoPainter")
+    os.chdir("/workspace/VideoPainter")
+
+    from workflow import run_videopainter_edit_many  # type: ignore[import-not-found]
+
+    logger.info("=" * 80)
+    logger.info("MASTER PIPELINE — STAGE 2: VIDEOPAINTER EDITING")
+    logger.info("  data_run_id       = %s", data_run_id)
+    logger.info("  output_run_id     = %s", output_run_id)
+    logger.info("  instructions      = %s", video_editing_instructions[:200])
+    logger.info("=" * 80)
+
+    gcs_output_path = run_videopainter_edit_many(
+        data_run_id=data_run_id,
+        output_run_id=output_run_id,
+        data_video_ids="auto",
+        inpainting_sample_id=0,
+        model_path="/workspace/VideoPainter/ckpt/CogVideoX-5b-I2V",
+        inpainting_branch="/workspace/VideoPainter/ckpt/VideoPainter/checkpoints/branch",
+        img_inpainting_model="/workspace/VideoPainter/ckpt/flux_inp",
+        img_inpainting_lora_path="/workspace/VideoPainter/ckpt/trained_fluxfill_lora",
+        img_inpainting_lora_scale=img_inpainting_lora_scale,
+        output_name_suffix="vp_edit_sample0.mp4",
+        num_inference_steps=num_inference_steps,
+        guidance_scale=guidance_scale,
+        strength=strength,
+        down_sample_fps=8,
+        inpainting_frames=49,
+        video_editing_instructions=video_editing_instructions,
+        llm_model=llm_model,
+        caption_refine_iters=caption_refine_iters,
+        caption_refine_temperature=caption_refine_temperature,
+        dilate_size=dilate_size,
+        mask_feather=mask_feather,
+        keep_masked_pixels=keep_masked_pixels,
+        seed=seed,
+    )
+
+    logger.info("VideoPainter stage completed.  Output: %s", gcs_output_path)
+    return gcs_output_path
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  STAGE 3  —  Alpamayo VLA Inference
+# ══════════════════════════════════════════════════════════════════════════════
+@task(
+    compute=DedicatedNode(
+        node=Node.A100_80GB_1GPU,
+        ephemeral_storage="max",
+        max_duration="3d",
+    ),
+    container_image=ALPAMAYO_CONTAINER_IMAGE,
+    environment={
+        "PYTHONUNBUFFERED": "1",
+        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+        "HF_HOME": "/root/.cache/huggingface",
+        "HF_TOKEN": HF_TOKEN,
+    },
+    mounts=[
+        FuseBucket(bucket=GCS_BUCKET, name=ALPAMAYO_CKPT_FUSE,  prefix=ALPAMAYO_CKPT_PREFIX),
+        FuseBucket(bucket=GCS_BUCKET, name=ALPAMAYO_DATA_FUSE,  prefix=ALPAMAYO_DATA_PREFIX),
+    ],
+)
+def alpamayo_stage(
+    video_data_gcs_path: str,
+    output_run_id: str,
+    model_id: str = "/workspace/alpamayo/checkpoints/alpamayo-r1-10b",
+    num_traj_samples: int = 1,
+    video_name: str = "auto",
+) -> str:
+    """Run Alpamayo VLA inference (Stage 3 of 3).
+
+    Reads VideoPainter output videos and produces trajectory predictions
+    under ``gs://…/outputs/alpamayo/<output_run_id>/``.
+
+    Returns
+    -------
+    str
+        GCS path to the Alpamayo output directory.
+    """
+    import sys
+    sys.path.insert(0, "/workspace/alpamayo")
+    os.chdir("/workspace/alpamayo")
+
+    from workflow import run_alpamayo_inference_task  # type: ignore[import-not-found]
+
+    logger.info("=" * 80)
+    logger.info("MASTER PIPELINE — STAGE 3: ALPAMAYO VLA INFERENCE")
+    logger.info("  video_data_gcs_path = %s", video_data_gcs_path)
+    logger.info("  output_run_id       = %s", output_run_id)
+    logger.info("  model_id            = %s", model_id)
+    logger.info("  video_name          = %s", video_name)
+    logger.info("=" * 80)
+
+    result = run_alpamayo_inference_task(
+        video_data_gcs_path=video_data_gcs_path,
+        output_run_id=output_run_id,
+        model_id=model_id,
+        num_traj_samples=num_traj_samples,
+        video_name=video_name,
+    )
+
+    gcs_path = result.get("output_gcs_path", "")
+    logger.info("Alpamayo stage completed.  Output: %s", gcs_path)
+    return gcs_path
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  MASTER WORKFLOW
+# ══════════════════════════════════════════════════════════════════════════════
+@workflow
+def master_pipeline_wf(
+    run_id: str,
+    # ── Stage 1: SAM2 ────────────────────────────────────────────────────────
+    sam2_video_uris: str,
+    sam2_max_frames: int = 150,
+    # ── Stage 2: VideoPainter ─────────────────────────────────────────────────
+    vp_video_editing_instructions: str = (
+        "Single solid white continuous line, aligned exactly to the original "
+        "lane positions and perspective; keep road texture, lighting, and "
+        "shadows unchanged"
+    ),
+    vp_llm_model: str = "/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct",
+    vp_num_inference_steps: int = 70,
+    vp_guidance_scale: float = 6.0,
+    vp_strength: float = 1.0,
+    vp_caption_refine_iters: int = 10,
+    vp_caption_refine_temperature: float = 0.1,
+    vp_dilate_size: int = 24,
+    vp_mask_feather: int = 8,
+    vp_keep_masked_pixels: bool = True,
+    vp_img_inpainting_lora_scale: float = 0.0,
+    vp_seed: int = 42,
+    # ── Stage 3: Alpamayo ─────────────────────────────────────────────────────
+    alp_model_id: str = "/workspace/alpamayo/checkpoints/alpamayo-r1-10b",
+    alp_num_traj_samples: int = 1,
+    alp_video_name: str = "auto",
+) -> str:
+    """End-to-end pipeline: SAM2 → VideoPainter → Alpamayo.
+
+    A single ``run_id`` propagates through every stage so that GCS artefacts
+    are co-located and easy to trace:
+
+    =========  ====================================================
+    Stage      GCS output
+    =========  ====================================================
+    SAM2       ``gs://…/outputs/sam2/<run_id>/``
+    SAM2 (VP)  ``gs://…/outputs/preprocessed_data_vp/<run_id>/``
+    VP         ``gs://…/outputs/vp/<run_id>/``
+    Alpamayo   ``gs://…/outputs/alpamayo/<run_id>/``
+    =========  ====================================================
+
+    Data-dependency edges ensure strict sequential execution:
+
+      SAM2 ──(run_id)──▶ VP ──(gcs_path)──▶ Alpamayo
+    """
+    # Stage 1 — SAM2 Segmentation
+    # Returns the run_id; the promise creates the dependency for Stage 2.
+    sam2_run_id = sam2_stage(
+        run_id=run_id,
+        sam2_video_uris=sam2_video_uris,
         max_frames=sam2_max_frames,
     )
 
-    # ── barrier: VP waits for SAM2 ──────────────────────────────────────────
-    vp_data_run_id_after_sam2 = _barrier(
-        prev_result=sam2_result,
-        pass_through=effective_vp_data_run_id,
+    # Stage 2 — VideoPainter Editing
+    # data_run_id=sam2_run_id ensures VP waits for SAM2 to finish.
+    vp_output_path = vp_stage(
+        data_run_id=sam2_run_id,
+        output_run_id=run_id,
+        video_editing_instructions=vp_video_editing_instructions,
+        llm_model=vp_llm_model,
+        num_inference_steps=vp_num_inference_steps,
+        guidance_scale=vp_guidance_scale,
+        strength=vp_strength,
+        caption_refine_iters=vp_caption_refine_iters,
+        caption_refine_temperature=vp_caption_refine_temperature,
+        dilate_size=vp_dilate_size,
+        mask_feather=vp_mask_feather,
+        keep_masked_pixels=vp_keep_masked_pixels,
+        img_inpainting_lora_scale=vp_img_inpainting_lora_scale,
+        seed=vp_seed,
     )
 
-    # ── STAGE 2 ── VideoPainter Editing ─────────────────────────────────────
-    vp_result = task_videopainter_edit_many(
-        data_run_id=vp_data_run_id_after_sam2,
-        video_editing_instructions=vp_instruction,
-        num_videos_per_prompt=vp_num_samples,
+    # Stage 3 — Alpamayo VLA Inference
+    # video_data_gcs_path=vp_output_path ensures Alpamayo waits for VP.
+    alp_output_path = alpamayo_stage(
+        video_data_gcs_path=vp_output_path,
+        output_run_id=run_id,
+        model_id=alp_model_id,
+        num_traj_samples=alp_num_traj_samples,
+        video_name=alp_video_name,
     )
 
-    # ── barrier: Alpamayo waits for VP ──────────────────────────────────────
-    vp_output_gcs = _build_gcs_path(
-        prev_result=vp_result,
-        base=f"{_OUTPUT_BASE}/vp",
-        suffix=effective_vp_output_run_id,
-    )
-    alpamayo_run_id_after_vp = _barrier(
-        prev_result=vp_result,
-        pass_through=effective_alpamayo_run_id,
-    )
-
-    # ── STAGE 3 ── Alpamayo VLA Inference ───────────────────────────────────
-    alpamayo_result = task_alpamayo_inference(
-        video_data_gcs_path=vp_output_gcs,
-        output_run_id=alpamayo_run_id_after_vp,
-        model_id=alpamayo_model_id,
-        num_traj_samples=alpamayo_num_traj_samples,
-        video_name=alpamayo_video_name,
-    )
-
-    # ── Finalize: return a Promise so Flyte tracks the full child-task DAG ──
-    return _finalize(result=alpamayo_result)
-
-
-# ---------------------------------------------------------------------------
-# @workflow – the proper entry-point for `hlx wf run`
-# A @dynamic cannot be the top-level entry; it must be called from a @workflow.
-# ---------------------------------------------------------------------------
-@workflow
-def master_pipeline_wf(
-    # SAM2 parameters
-    sam2_run_id: str = "001",
-    sam2_max_frames: int = 150,
-    sam2_video_uris: str = "default",
-    # VideoPainter parameters
-    vp_data_run_id: str = "",
-    vp_output_run_id: str = "",
-    vp_instruction: str = "",
-    vp_num_samples: int = 1,
-    # Alpamayo parameters
-    alpamayo_run_id: str = "",
-    alpamayo_num_traj_samples: int = 1,
-    alpamayo_model_id: str = ALPAMAYO_DEFAULT_MODEL_ID,
-    alpamayo_video_name: str = "auto",
-) -> str:
-    """Master pipeline workflow: SAM2 → VideoPainter → Alpamayo."""
-    return _master_pipeline_dynamic(
-        sam2_run_id=sam2_run_id,
-        sam2_max_frames=sam2_max_frames,
-        sam2_video_uris=sam2_video_uris,
-        vp_data_run_id=vp_data_run_id,
-        vp_output_run_id=vp_output_run_id,
-        vp_instruction=vp_instruction,
-        vp_num_samples=vp_num_samples,
-        alpamayo_run_id=alpamayo_run_id,
-        alpamayo_num_traj_samples=alpamayo_num_traj_samples,
-        alpamayo_model_id=alpamayo_model_id,
-        alpamayo_video_name=alpamayo_video_name,
-    )
+    return alp_output_path
