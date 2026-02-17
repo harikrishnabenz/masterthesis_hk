@@ -93,7 +93,7 @@ export VP_RUN_SUFFIX="${X}"
 
 docker compose build
 
-REMOTE_IMAGE="europe-west4-docker.pkg.dev/mb-adas-2015-p-a4db/research/harimt_vp${X}"
+REMOTE_IMAGE="europe-west4-docker.pkg.dev/mb-adas-2015-p-a4db/research/harimt_vp${X}_${RUN_TAG}"
 REMOTE_IMAGE_TAGGED="${REMOTE_IMAGE}:${RUN_TAG}"
 docker tag videopainter:latest "${REMOTE_IMAGE_TAGGED}"
 docker tag videopainter:latest "${REMOTE_IMAGE}:latest"

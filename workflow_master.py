@@ -42,6 +42,7 @@ GCS_BUCKET = "mbadas-sandbox-research-9bb9c7f"
 
 # ==============================================================================
 # CONTAINER IMAGES  — set by scripts/build_and_run.sh before `hlx wf run`
+# Image names include the run ID: <base>_<run_id>:<run_id>
 # ==============================================================================
 SAM2_CONTAINER_IMAGE = os.environ.get(
     "SAM2_CONTAINER_IMAGE",
@@ -349,6 +350,18 @@ def master_pipeline_wf(
     # ── Stage 2: VideoPainter ─────────────────────────────────────────────────
     vp_video_editing_instructions: str = (
         "Single solid white continuous line, aligned exactly to the original "
+        "lane positions and perspective; keep road texture, lighting, and "
+        "shadows unchanged\n"
+        "Double solid white continuous line, aligned exactly to the original "
+        "lane positions and perspective; keep road texture, lighting, and "
+        "shadows unchanged\n"
+        "Single solid yellow continuous line, aligned exactly to the original "
+        "lane positions and perspective; keep road texture, lighting, and "
+        "shadows unchanged\n"
+        "Double solid yellow continuous line, aligned exactly to the original "
+        "lane positions and perspective; keep road texture, lighting, and "
+        "shadows unchanged\n"
+        "Single dashed white intermitted line, aligned exactly to the original "
         "lane positions and perspective; keep road texture, lighting, and "
         "shadows unchanged"
     ),

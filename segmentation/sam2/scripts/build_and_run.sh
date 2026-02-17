@@ -107,12 +107,12 @@ TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 # Build the Docker image
 docker compose build
 
-# Tag the image for Google Artifact Registry
-REMOTE_IMAGE="europe-west4-docker.pkg.dev/mb-adas-2015-p-a4db/research/harimt_sam2:${TIMESTAMP}"
+# Tag the image for Google Artifact Registry (include SAM2_RUN_ID in image name)
+REMOTE_IMAGE="europe-west4-docker.pkg.dev/mb-adas-2015-p-a4db/research/harimt_sam2_${SAM2_RUN_ID}:${SAM2_RUN_ID}"
 docker tag sam2/frontend "${REMOTE_IMAGE}"
 
 # Also update :latest for convenience
-REMOTE_IMAGE_LATEST="europe-west4-docker.pkg.dev/mb-adas-2015-p-a4db/research/harimt_sam2:latest"
+REMOTE_IMAGE_LATEST="europe-west4-docker.pkg.dev/mb-adas-2015-p-a4db/research/harimt_sam2_${SAM2_RUN_ID}:latest"
 docker tag sam2/frontend "${REMOTE_IMAGE_LATEST}"
 
 # Push the images to the registry

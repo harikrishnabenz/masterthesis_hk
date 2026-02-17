@@ -95,6 +95,8 @@ VP_FLUX_DEVICE_DEFAULT = "cuda:0"
 VP_RUN_SUFFIX = X
 
 # Allow the runner script to pin an exact image tag (avoids stale ':latest' pulls).
+# The build_and_run.sh script sets VP_CONTAINER_IMAGE with RUN_TAG in the image name
+# e.g. europe-west4-docker.pkg.dev/.../harimt_vp<suffix>_<run_tag>:<run_tag>
 REMOTE_IMAGE = (
 	f"europe-west4-docker.pkg.dev/mb-adas-2015-p-a4db/research/harimt_vp{VP_RUN_SUFFIX}"
 	if VP_RUN_SUFFIX

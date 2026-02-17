@@ -18,8 +18,10 @@ logger = logging.getLogger(__name__)
 
 
 # Allow the runner script to pin an exact image tag
+# The build_and_run.sh script sets SAM2_CONTAINER_IMAGE with RUN_ID in the image name
+# e.g. europe-west4-docker.pkg.dev/.../harimt_sam2_<run_id>:<run_id>
 CONTAINER_IMAGE_DEFAULT = "europe-west4-docker.pkg.dev/mb-adas-2015-p-a4db/research/harimt_sam2"
-CONTAINER_IMAGE = os.environ.get("SAM2_CONTAINER_IMAGE", CONTAINER_IMAGE_DEFAULT)
+CONTAINER_IMAGE = os.environ.get("SAM2_CONTAINER_IMAGE", f"{CONTAINER_IMAGE_DEFAULT}:latest")
 
 # ----------------------------------------------------------------------------------
 # PATHS (inside container)

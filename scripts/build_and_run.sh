@@ -83,11 +83,13 @@ VP_RUN_SUFFIX="${VP_RUN_SUFFIX:-withoutlora_5prompt_${CHECKPOINT_TIMESTAMP}}"
 VP_LLM_MODEL="${VP_LLM_MODEL:-/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct}"
 
 # Editing instructions (newline-separated; use || to delimit in env vars)
-VIDEO_EDITING_INSTRUCTIONS="${VIDEO_EDITING_INSTRUCTIONS:-Single solid white continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged
-Double solid white continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged
-Single solid yellow continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged
-Double solid yellow continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged
-Single dashed white intermitted line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged}"
+# Must match the 5 standard lane-line variations used by the standalone VP build script.
+VIDEO_EDITING_INSTRUCTIONS="${VIDEO_EDITING_INSTRUCTIONS:-$(printf '%s\n%s\n%s\n%s\n%s' \
+  'Single solid white continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged' \
+  'Double solid white continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged' \
+  'Single solid yellow continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged' \
+  'Double solid yellow continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged' \
+  'Single dashed white intermitted line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged')}"
 
 # VP inference parameters
 VP_NUM_INFERENCE_STEPS="${VP_NUM_INFERENCE_STEPS:-70}"
@@ -122,16 +124,16 @@ fi
 REGISTRY="europe-west4-docker.pkg.dev/mb-adas-2015-p-a4db/research"
 
 SAM2_LOCAL_IMAGE="sam2/frontend"
-SAM2_REMOTE_IMAGE="${REGISTRY}/harimt_sam2"
+SAM2_REMOTE_IMAGE="${REGISTRY}/harimt_sam2_${MASTER_RUN_ID}"
 
 VP_LOCAL_IMAGE="videopainter:latest"
-VP_REMOTE_IMAGE="${REGISTRY}/harimt_vp${VP_RUN_SUFFIX}"
+VP_REMOTE_IMAGE="${REGISTRY}/harimt_vp${VP_RUN_SUFFIX}_${MASTER_RUN_ID}"
 
 ALP_LOCAL_IMAGE="alpamayo:latest"
 ALP_REMOTE_IMAGE="${REGISTRY}/alpamayo_vla_${MASTER_RUN_ID}"
 
 MASTER_LOCAL_IMAGE="master-pipeline:latest"
-MASTER_REMOTE_IMAGE="${REGISTRY}/master_pipeline"
+MASTER_REMOTE_IMAGE="${REGISTRY}/master_pipeline_${MASTER_RUN_ID}"
 
 # Tagged with the shared run id
 SAM2_TAGGED="${SAM2_REMOTE_IMAGE}:${MASTER_RUN_ID}"
