@@ -153,7 +153,7 @@ TECHNICAL DETAILS:
   * Evaluates inpainting against instruction semantics
   * Validates lane marking attributes (single/double, color, pattern)
   * Generates revised captions with visual texture details
-  * Maximum 5 refinement iterations with exponential backoff
+  * Configurable maximum refinement iterations (default: 10 in deployment)
 
 - Function: _dilate_and_feather_mask_images()
   * Expands inpaint regions using morphological dilation
@@ -165,7 +165,8 @@ TECHNICAL DETAILS:
   * Explicit model unloading between stages (_unload_qwen_model)
   * GPU memory tracking and optimization
 
-IMPACT: 40-60% improvement in first-frame semantic correctness and visual quality
+IMPACT: Improved first-frame semantic correctness and visual quality
+        (quantitative results pending systematic evaluation)
 
 
 🌟 MAJOR CONTRIBUTION #2: SAM2 ROAD SEGMENTATION PIPELINE
@@ -391,7 +392,7 @@ driving trajectory prediction.
 FILES:
 - vla/alpamayo/run_inference.py (469 lines — core inference logic)
 - vla/alpamayo/workflow_alpamayo.py (550 lines — HLX workflow)
-- vla/alpamayo/visualize_video.py (517 lines — trajectory overlay rendering)
+- vla/alpamayo/visualize_video.py (530 lines — trajectory overlay rendering)
 - vla/alpamayo/download_checkpoints.py (checkpoint download utility)
 - vla/alpamayo/scripts/build_and_run.sh (standalone build/run script)
 - vla/alpamayo/Dockerfile (Python 3.12, CUDA 12.1, flash-attn)
@@ -415,13 +416,24 @@ KEY FEATURES:
 
 3. Quantitative evaluation:
    - minADE (minimum Average Displacement Error) vs ground truth
-   - Per-video metrics: inference time, GPU memory, RAM usage
+     Formula: min_s (1/T) Σ_t ||pred_xy^(s)_t − gt_xy_t||_2 over XY only
+   - Per-video metrics: inference time, GPU memory (current+peak), RAM usage
    - Aggregate reports with avg/best/worst minADE across all videos
 
 4. Visualization outputs:
-   - Trajectory overlay videos (predicted vs ground truth on camera view)
-   - Bird's-eye-view (BEV) inset with ego history + future trajectories
-   - Progressive reveal mode for temporal trajectory unfolding
+   - Trajectory overlay videos (H.264/MP4, CRF=18, yuv420p)
+   - Pinhole camera projection: ego→camera transform
+     (x_cam = −y_ego, y_cam = −z_ego, z_cam = x_ego)
+   - Focal length: f_x = (W/2) / tan(FOV/2)
+   - Ground-truth trajectory drawn in red, predictions in cyan/green/etc.
+   - Bird's-eye-view (BEV) inset (250×250 px) at bottom-left corner
+     with ego history (gray), GT (red), and predictions (cyan)
+   - Progressive reveal mode: linearly maps frame index → waypoint count
+   - Points behind camera (z_cam ≤ 0.5) are filtered out
+   - FOV auto-detected from camera name (120°, 70°, or 30°)
+   - 5 cycling colors for multiple trajectory samples
+   - Semi-transparent legend box in top-right corner
+   - HUD text overlay with minADE and clip/camera info from JSON
    - NPZ visualization data for offline plotting
 
 5. Auto-discovery of VP output videos:
@@ -431,17 +443,44 @@ KEY FEATURES:
 
 OUTPUT FORMAT:
   alpamayo_output/<run_id>/
-    ├── <video_id>/
-    │   ├── <video_id>_inference.json   (predictions + reasoning + minADE)
-    │   ├── <video_id>_vis_data.npz     (visualization tensors)
-    │   └── <video_id>_overlay.mp4      (trajectory overlay video)
-    └── <run_id>_report.txt             (aggregate metrics report)
+    ├── <video_stem>/
+    │   ├── <video_stem>_inference.json   (predictions + reasoning + minADE)
+    │   ├── <video_stem>_vis_data.npz     (visualization tensors)
+    │   └── <video_stem>_overlay.mp4      (trajectory overlay video)
+    └── <run_id>_report.txt               (aggregate metrics report)
+
+INFERENCE JSON FORMAT:
+  {
+    "video_id", "video_path", "clip_id", "camera_name",
+    "num_trajectories", "min_ade_meters",
+    "reasoning_traces": ["<chain-of-thought text>"],
+    "temporal_config": {
+      "vp_video_fps", "time_step_seconds",
+      "num_frames_per_camera", "frame_window_seconds"
+    },
+    "metrics": {
+      "inference_time_seconds", "gpu_memory_used_gb",
+      "gpu_memory_peak_gb", "ram_used_mb", "ram_peak_mb"
+    },
+    "success": true
+  }
+
+VISUALIZATION NPZ FORMAT:
+  pred_xyz:        (S, 64, 3)     — predicted trajectories
+  pred_rot:        (S, 64, 3, 3)  — predicted rotations
+  gt_future_xyz:   (64, 3)        — GT future trajectory
+  gt_future_rot:   (64, 3, 3)     — GT future rotations
+  ego_history_xyz: (16, 3)        — ego history positions
+  ego_history_rot: (16, 3, 3)     — ego history rotations
+  image_frames:    (N_cam×T, H, W, 3) — all camera frames uint8
+  camera_indices:  (N_cam,)       — camera index array
 
 COMPUTE:
-  - Model: Alpamayo-R1-10B (~22GB, bfloat16)
+  - Model: Alpamayo-R1-10B (bfloat16)
   - GPU: A100 80GB (1 GPU)
-  - Inference: ~15-30s per video
+  - Inference time recorded per-video in output JSON
   - Python 3.12 + CUDA 12.1 + flash-attention
+  - Inference params: top_p=0.98, temperature=0.6, max_generation_length=256
 
 INNOVATION: First integration of VLA trajectory prediction as an evaluation
             metric for video inpainting quality in autonomous driving
@@ -632,7 +671,7 @@ COMPONENT A: VIDEO PREPROCESSING (SAM2)
 ────────────────────────────────────────
 
 Purpose: Extract road regions from autonomous vehicle videos
-Input:   Physical AI dataset videos (MP4 format, 30 FPS typical)
+Input:   Physical AI dataset videos (MP4 format, FPS auto-detected per video)
 Output:  Segmented videos + masks + VideoPainter-compatible structure
 
 Process Flow:
@@ -781,10 +820,10 @@ Checkpointing:
 
 Typical Training Run:
   Dataset: 10,000 samples (single white solid)
-  Steps: 1000
-  Time: ~3-4 hours on A100 80GB
-  Checkpoints: 4 (every 250 steps)
-  Final size: ~200 MB (LoRA weights only)
+  Steps: depends on dataset size and num_train_epochs
+  Time: recorded in training_summary.txt output
+  Checkpoints: saved every checkpointing_steps intervals
+  Final size: LoRA adapter weights only (much smaller than base model)
 
 
 COMPONENT E: VIDEO EDITING INFERENCE (VIDEOPAINTER + FLUXFILL)
@@ -843,17 +882,22 @@ Multi-Instruction Support (NEW):
     and perspective; keep road texture, lighting, and shadows unchanged"
 
 Numerical Evaluation (NEW):
-  - Per-video evaluation automatically after generation
+  - Per-video evaluation automatically after generation via _evaluate_video()
+  - Uses MetricsCalculator (from evaluate/metrics.py) on GPU tensors [T,C,H,W]
   - Full-frame metrics: PSNR, SSIM, LPIPS, MSE, MAE, Temporal Consistency
-  - Masked-region metrics: Same metrics computed only in inpainted area
+  - Masked-region metrics: Same metrics computed only where mask > 0.5
   - CLIP Score: Text-video alignment using instruction as caption
+  - Quality assessment: EXCELLENT (≥2 thresholds) / GOOD (1) / MODERATE (0)
+    Thresholds: PSNR>40dB, SSIM>0.95, LPIPS<0.1
   - Results saved as eval_{video_id}.txt alongside generated video
+  - Output includes: video metadata, resolution, FPS, mask coverage %,
+    full-frame metrics block, masked-region metrics block, quality label
   - Quality classification: EXCELLENT / GOOD / MODERATE
 
 Performance:
-  - First frame: 10-30 seconds (depends on VLM iterations)
-  - Video generation: 2-5 minutes per video (49 frames)
-  - Total throughput: ~10-15 videos per hour per GPU
+  - Timing depends on VLM refinement iterations and video length
+  - Per-video generation time is tracked in VPVideoMetrics.generation_s
+  - First-frame inpainting time depends on number of VLM refinement iterations
 
 
 COMPONENT F: VLA TRAJECTORY EVALUATION (NEW — ALPAMAYO)
@@ -890,14 +934,26 @@ STAGE 2: VLA Inference
 STAGE 3: Evaluation & Visualization
   1. Compute minADE: min over S samples of mean L2 displacement
      between predicted and ground-truth future XY trajectory
-  2. Save inference JSON with predictions, reasoning, temporal config
-  3. Save visualization NPZ with all tensors for offline plotting
-  4. Render overlay video:
-     - Projected predicted trajectories (blue) on camera view
-     - Projected ground-truth trajectory (red)
-     - Bird's-eye-view inset with ego history + future paths
-     - Progressive reveal mode for temporal unfolding
-     - FOV-specific projection (30°, 70°, 120° depending on camera)
+     Formula: minADE = min_s (1/T) Σ_t ||pred_xy^(s)_t − gt_xy_t||_2
+  2. Save inference JSON with predictions, reasoning, temporal config,
+     and per-video compute metrics (time, GPU mem, RAM)
+  3. Save visualization NPZ with all trajectory tensors + camera frames
+     for offline plotting (pred_xyz, gt_future_xyz, ego_history_xyz,
+     pred_rot, gt_future_rot, ego_history_rot, image_frames)
+  4. Render overlay video (H.264/MP4, CRF=18, yuv420p):
+     - Pinhole projection: ego→camera (x_cam=−y_ego, y_cam=−z_ego,
+       z_cam=x_ego), focal length f_x = (W/2)/tan(FOV/2)
+     - Ground-truth trajectory in red (thickness=3, radius=5)
+     - Predicted trajectories in 5 cycling colors (cyan, green,
+       orange, yellow, magenta) with thickness=2, radius=4
+     - Ego history path in gray (thickness=1, radius=3)
+     - Bird's-eye-view (BEV) inset (250×250 px) at bottom-left:
+       display frame dx=−y, dy=x (forward=up), auto-scaled
+     - Progressive reveal: frame index linearly mapped to waypoint count
+     - FOV auto-detected from camera name (120°, 70°, 30°)
+     - Semi-transparent legend box (top-right) with color key
+     - HUD text: minADE value, clip_id, camera_name from JSON
+     - Points behind camera (z_cam ≤ 0.5) filtered out
 
 Camera Index Map:
   camera_cross_left_120fov:  0
@@ -911,16 +967,31 @@ Camera Index Map:
 Output Structure:
   alpamayo_output/<run_id>/
     ├── <video_stem>/
-    │   ├── <video_stem>_inference.json   (predictions + reasoning + minADE)
-    │   ├── <video_stem>_vis_data.npz     (tensors for offline visualization)
-    │   └── <video_stem>_overlay.mp4      (trajectory overlay on video)
-    └── <run_id>_report.txt               (aggregate metrics report)
+    │   ├── <video_stem>_inference.json   (predictions + reasoning + minADE
+    │   │                                  + temporal_config + compute metrics)
+    │   ├── <video_stem>_vis_data.npz     (tensors: pred_xyz (S,64,3),
+    │   │                                  gt_future_xyz (64,3),
+    │   │                                  ego_history_xyz (16,3),
+    │   │                                  pred_rot, gt_future_rot,
+    │   │                                  ego_history_rot, image_frames,
+    │   │                                  camera_indices)
+    │   └── <video_stem>_overlay.mp4      (H.264/CRF=18 trajectory overlay
+    │                                      with BEV inset + progressive reveal)
+    ├── inference_summary.json            (all results array, CLI mode)
+    └── <run_id>_report.txt               (aggregate metrics report, workflow)
+
+Aggregate Report Metrics:
+  - Average / Total inference time
+  - Average / Maximum GPU memory peak (GB)
+  - Average / Maximum RAM peak (MB)
+  - Average / Best / Worst minADE (metres)
+  - Per-video breakdown: status, times, GPU/RAM, minADE, clip_id, camera
 
 Performance:
-  - Model loading: ~30-60s (one-time, reused across videos)
-  - Per-video inference: ~15-30s
-  - Per-video visualization: ~5-10s
-  - Total throughput: ~60-100 videos/hour (single A100 80GB)
+  - Timing is recorded per-video in the inference JSON output
+    (inference_time_seconds, total_time_seconds) and in the
+    aggregate report (<run_id>_report.txt)
+  - Model is loaded once and reused across all videos in a batch
 
 
 COMPONENT G: UTILITIES & HELPERS
@@ -1005,7 +1076,6 @@ DEEP LEARNING MODELS
    - Input: Multi-camera images (7 views × 4 frames) + ego-motion history
    - Output: Future trajectory predictions (S × 64 × 3) + chain-of-thought
    - Inference: bfloat16 with flash-attention
-   - VRAM: ~22GB
    - Dataset: NVIDIA PhysicalAI-Autonomous-Vehicles (HuggingFace streaming)
 
 HARDWARE REQUIREMENTS
@@ -1022,15 +1092,18 @@ Cloud Deployment (HLX):
 
 GPU Memory Allocation:
   Single GPU Setup:
-    - Qwen 7B: ~16GB (with CPU offload)
-    - FluxFill: ~12GB
-    - CogVideoX-5B: ~24GB
-    - Peak usage: ~35GB (sequential execution)
+    - Models are loaded sequentially to manage VRAM
+    - Explicit model unloading between stages (_unload_qwen_model)
+    - VP_UNLOAD_QWEN_AFTER_USE=1 for single-GPU memory management
   
   Dual GPU Setup:
-    - GPU 0: FluxFill (12GB) + CogVideoX (24GB)
-    - GPU 1: Qwen VLM (20-30GB)
+    - GPU 0: FluxFill + CogVideoX (sequential)
+    - GPU 1: Qwen VLM
     - Parallel execution enabled
+  
+  Note: Actual VRAM usage depends on model configuration and batch size.
+        The code tracks GPU memory via torch.cuda.memory_allocated() in
+        Alpamayo and VPVideoMetrics.
 
 CLOUD INFRASTRUCTURE
 ────────────────────
@@ -1428,81 +1501,62 @@ Example (Master):
 
 PHYSICAL AI DATASET
 ───────────────────
-Source: Google Cloud Storage (public dataset)
+Source: Google Cloud Storage / NVIDIA PhysicalAI-Autonomous-Vehicles
 Path: gs://[GCS_BUCKET]/datasets/public/physical_ai_av/camera/camera_front_tele_30fov/
-Format: MP4 videos from autonomous vehicle front camera
-Resolution: 1920x1080 typical
-FPS: 30
-Duration: 10-30 seconds per video
-Total: 20,000+ videos organized in 200 chunks (chunk_0000 to chunk_0199)
+Format: MP4 videos from autonomous vehicle cameras
+Organization: 200 chunks (chunk_0000 to chunk_0199)
 
 Video Naming: {uuid}.camera_front_tele_30fov.mp4
 Example: 25534c8d-4d02-463a-84c9-dad015f320ac.camera_front_tele_30fov.mp4
 
+Note: Video resolution, FPS, duration, and total count are properties of
+the NVIDIA PhysicalAI-AV dataset. The pipeline auto-detects FPS per video.
+
 DATASET GENERATION STATISTICS
 ──────────────────────────────
-Run: trainingdata_chunk199
-Source: chunk_0000 to chunk_0199 (200 chunks)
-Videos Processed: 10,000
+Source: chunk_0000 to chunk_0199 (200 chunks available)
 Frames per Video: 6 (frame numbers: 1, 100, 200, 300, 400, 500)
-Total Samples: 60,000
 Filtering: Applied REQUIRE_CLEAR_ROAD=1
-Final Dataset: ~10,000 clear samples
+
+Note: Actual video counts, total samples, and final filtered dataset size
+depend on the number of chunks processed in each run. The generation script
+logs per-chunk statistics during execution.
 
 Dataset Size:
-  - Images: 60,000 x ~500KB = ~30GB
-  - Masks: 60,000 x ~50KB = ~3GB
-  - train.csv: ~5MB
-  - Total: ~33GB
+  Depends on number of chunks processed and frames per video.
+  Generated data is stored on GCS; actual size varies by run.
 
-LANE ATTRIBUTE DISTRIBUTION (SAMPLE ANALYSIS)
-──────────────────────────────────────────────
-From 10,000 sample analysis:
-
-Count Distribution:
-  - Single: 65%
-  - Double: 25%
-  - Unknown: 10%
-
-Color Distribution:
-  - White: 70%
-  - Yellow: 20%
-  - Mixed: 5%
-  - Unknown: 5%
-
-Pattern Distribution:
-  - Solid: 55%
-  - Dashed: 35%
-  - Mixed: 5%
-  - Unknown: 5%
-
-Most Common Combinations:
-  1. Single white solid: ~35%
-  2. Single white dashed: ~18%
-  3. Double yellow solid: ~12%
-  4. Single yellow dashed: ~8%
+LANE ATTRIBUTE DISTRIBUTION
+──────────────────────────────
+Note: Distribution statistics can be computed by parsing the train.csv
+prompts using the regex in filter_fluxfill_dataset.py. No pre-computed
+distribution analysis exists in the codebase. The filter script can be
+used to count samples matching each attribute combination.
 
 FILTERED DATASETS CREATED
 ──────────────────────────
-1. single_white_solid_clearroad_10000
+The filter_fluxfill_dataset.py script supports creating datasets filtered
+by any combination of count/color/pattern attributes. Example configurations:
+
+1. single_white_solid_clearroad
    - Count: single
    - Color: white
    - Pattern: solid
    - Clear road: Yes
-   - Samples: 10,000
    - Use: Primary training dataset
 
 2. single_white_dashed_clearroad
    - Count: single
    - Color: white
    - Pattern: dashed
-   - Samples: ~5,000
 
 3. double_yellow_solid_clearroad
    - Count: double
    - Color: yellow
    - Pattern: solid
-   - Samples: ~3,000
+
+Note: Actual sample counts depend on the source dataset and attribute
+      distribution. Use the filter script to determine counts.
 
 DATA QUALITY CHECKS
 ───────────────────
@@ -1556,8 +1610,8 @@ Checkpointing:
 
 Hardware:
   GPU: A100 80GB
-  VRAM Usage: ~25GB
-  Training Time: ~5-8 hours (5 epochs, 10,000 samples)
+  VRAM Usage: depends on model configuration
+  Training Time: recorded in training_summary.txt output
 
 Output:
   GCS Path: gs://[GCS_BUCKET]/training/trained_checkpoint/fluxfill_single_white_solid_clearroad_YYYYMMDD_HHMMSS/
@@ -1573,37 +1627,25 @@ Output:
   
   Note: Checkpoint naming automatically includes timestamp for traceability
 
-TRAINING LOGS (EXPECTED FORMAT)
-────────────────────────────────
-Note: The following is an example of expected training progress based on 
-      configuration parameters. Actual results will vary based on dataset 
-      and training dynamics.
+TRAINING LOGS
+──────────────
+Training logs are saved by Accelerate to the output directory.
+The training script records:
+  - Per-step loss to loss_history.json
+  - Training summary (duration, final loss, dataset size) to training_summary.txt
+  - Checkpoints saved every checkpointing_steps intervals
 
-Epoch 1/5:
-Step 0    | Loss: [initial] | LR: 0.000002 | Time: ~3s
-Step 50   | Loss: [warmup]  | LR: 0.000010 | Time: ~3s [WARMUP COMPLETE]
-Step 100  | Loss: [epoch1]  | LR: 0.000010 | Time: ~3s [CHECKPOINT]
+Use tensorboard or wandb for detailed monitoring.
 
-Epoch 2-5:
-Checkpoints saved every 100 steps...
+LORA WEIGHTS
+─────────────
+Base Model: FLUX.1 Fill (black-forest-labs/FLUX.1-Fill-dev)
+LoRA targets: ["to_k", "to_q", "to_v", "to_out.0"] transformer blocks
+Rank: 128, Alpha: 128
 
-Training Complete!
-Total Time: ~5-8 hours (depends on dataset size and GPU)
-Final Loss: Typically converges to <0.05
-Checkpoints saved: ~9-10 (for 10K samples, 5 epochs, checkpoint every 100 steps)
-
-Note: Actual training logs are saved by Accelerate to the output directory.
-      Use tensorboard or wandb for detailed monitoring.
-
-LORA WEIGHTS ANALYSIS
-─────────────────────
-Final checkpoint size: 197 MB (adapter weights only)
-Full model size: 12 GB (base FluxFill)
-Compression ratio: 60x
-
-Trainable parameters: ~16M (LoRA adapters)
-Total model parameters: ~2.8B (FluxFill base)
-Percentage trainable: ~0.57%
+The LoRA adapter weights are significantly smaller than the base model,
+enabling efficient storage and deployment. Exact sizes depend on the
+final checkpoint.
 
 INTEGRATION WITH VIDEOPAINTER
 ──────────────────────────────
@@ -1630,9 +1672,8 @@ Loading LoRA-trained FluxFill:
   )
 
 Performance Impact:
-  - Inference time: ~8-10 seconds per image (1024x1024)
-  - Memory: ~12GB VRAM
-  - Quality: Significant improvement in lane marking realism
+  - Quality: Improved lane marking realism with trained LoRA vs. base model
+  - Exact inference time and VRAM usage depend on resolution and model config
   
 Note: The build_and_run.sh script automatically extracts the checkpoint 
       timestamp from the TRAINED_FLUXFILL_GCS_PATH for proper tracking
@@ -1663,192 +1704,190 @@ EVALUATION METHODOLOGY
    - Processing time per video
 
 4. Automated Numerical Video Quality Metrics (NEW)
-   - PSNR (Peak Signal-to-Noise Ratio): pixel fidelity, full-frame + masked
-   - SSIM (Structural Similarity): perceptual structure preservation
-   - LPIPS (Learned Perceptual Image Patch Similarity): deep perceptual loss
-   - MSE / MAE: mean squared / absolute error
-   - Temporal Consistency: cosine similarity between consecutive frames
-   - CLIP Score: semantic alignment between instruction text and output frame
-   All metrics computed per-video via _evaluate_video() in workflow_vp.py
-   and uploaded as sidecar JSON artifacts alongside generated videos.
+   Computed per-video via _evaluate_video() in workflow_vp.py using
+   MetricsCalculator from evaluate/metrics.py. Two passes per video:
+   a) Full-frame metrics — compare entire original vs. generated frame
+   b) Masked-region metrics — compare only within inpainted mask area
+
+   Metrics (both full-frame and masked-region):
+   - PSNR (Peak Signal-to-Noise Ratio): 10·log10(1/MSE) dB, higher=better
+   - SSIM (Structural Similarity Index): luminance+contrast+structure [0,1]
+   - LPIPS (Learned Perceptual Image Patch Similarity): deep perceptual
+     distance, lower=better
+   - MSE (Mean Squared Error): (1/N)Σ(x_i − y_i)², lower=better
+   - MAE (Mean Absolute Error): (1/N)Σ|x_i − y_i|, lower=better
+   - Temporal Consistency: frame-to-frame coherence, higher=better
+   - CLIP Score: text-video alignment (only when caption provided)
+
+   Quality Assessment (from full-frame metrics):
+   - PSNR > 40 dB → +1 point
+   - SSIM > 0.95  → +1 point
+   - LPIPS < 0.1  → +1 point
+   - Score ≥ 2: EXCELLENT | Score = 1: GOOD | Score = 0: MODERATE
+
+   Output: eval_{video_id}.txt saved alongside generated video in GCS
+   Contains: video metadata, resolution, FPS, mask coverage %,
+   full-frame metrics block, masked-region metrics block, quality label.
 
 5. VLA Trajectory Impact Assessment (NEW — Alpamayo)
    - minADE (minimum Average Displacement Error): distance between
      predicted and ground-truth ego-vehicle trajectories (metres)
+     Formula: min_s (1/T) Σ_t ||pred_xy^(s)_t − gt_xy_t||_2
    - Computed per-video and aggregated across the run
+     (average, best, worst minADE in report)
    - Ground truth from PhysicalAI-AV HuggingFace dataset
+   - Per-video compute metrics: inference time, GPU memory, RAM usage
    - Measures whether edited lane markings shift VLA driving behaviour
+   - Trajectory overlay visualization with BEV inset for qualitative eval
 
 RESULTS: FLUXFILL FIRST-FRAME GENERATION
 ─────────────────────────────────────────
-Test Set: 50 videos from Physical AI dataset
-Instructions: "lane single white solid"
+Note: Systematic quantitative evaluation is pending. The VLM refinement
+loop records per-video results (qwen_eval.json, caption_refine/ artifacts)
+that can be post-processed to compute pass rates and iteration statistics.
 
-Baseline (without LoRA):
-  - Pass rate (1st attempt): 32%
-  - Average refinement iterations: 3.8
-  - Total success rate: 68%
+The per-video sidecar JSON files contain:
+  - Caption_refine_iterations_used
+  - Caption_refine_iters_requested
+  - VLM verdict (PASS/FAIL) per iteration
+  - Revised captions and reasoning
 
-With LoRA (single_white_solid_10000):
-  - Pass rate (1st attempt): 78%
-  - Average refinement iterations: 1.4
-  - Total success rate: 96%
-
-Improvement:
-  - First-attempt success: +46 percentage points
-  - Refinement reduction: 2.4 iterations saved
-  - Overall success: +28 percentage points
-
-VLM EVALUATION FEEDBACK ANALYSIS
-─────────────────────────────────
-Common FAIL reasons (baseline):
-  - "Caption describes double lines, instruction requires single"
-  - "Dashed pattern visible, instruction requires solid"
-  - "Lane marking placement off-center"
-  - "Paint texture too uniform, lacks realism"
-
-Common PASS feedback (with LoRA):
-  - "Single white solid line correctly placed at road center"
-  - "Paint shows appropriate wear and texture variation"
-  - "Perspective alignment follows road geometry"
-  - "Lighting and shadows consistent with scene"
-
-VISUAL QUALITY ASSESSMENT
-──────────────────────────
-Manual rating (1-5 scale, 5=best):
-
-Metric                    | Baseline | With LoRA
---------------------------|----------|----------
-Semantic Accuracy         | 3.2      | 4.6
-Visual Realism            | 3.5      | 4.4
-Perspective Alignment     | 3.8      | 4.5
-Texture Quality           | 3.1      | 4.3
-Background Preservation   | 4.2      | 4.5
-Temporal Consistency      | 3.6      | 4.2
-Overall Quality           | 3.4      | 4.4
-
-TEMPORAL CONSISTENCY (VIDEO PROPAGATION)
-─────────────────────────────────────────
-VideoPainter CogVideoX propagation quality:
-  - Frame-to-frame jitter: Minimal (qualitative assessment)
-  - Lane marking continuity: Good across 49-frame sequences
-  - Artifacts: Occasional at chunk boundaries (~5% of videos)
-  - Overall temporal quality: 4.1/5.0
+Qualitative observations:
+  - LoRA-trained FluxFill produces lane markings that more closely match
+    the requested attributes (count, color, pattern) vs. base FluxFill
+  - Fewer VLM refinement iterations needed with LoRA
+  - Improved paint texture realism and perspective alignment
 
 PROCESSING PERFORMANCE
 ──────────────────────
 Hardware: A100 80GB, single GPU
 
-Stage                      | Time/Video | Notes
----------------------------|------------|---------------------------
-SAM2 Segmentation          | 45-60s     | 150 frames @ 8fps
-First Frame FluxFill       | 8-12s      | Per refinement attempt
-VLM Evaluation             | 6-8s       | Per attempt (Qwen 7B)
-CogVideoX Propagation      | 180-240s   | 49 frames output
-Total (single video)       | 4-6 min    | Includes refinement loop
+Note: Per-stage timing instrumentation exists in SAM2 (VideoTiming
+dataclass in process_videos_sam2.py) and Alpamayo (inference_time_seconds
+in run_inference.py). VideoPainter (edit_bench.py) tracks generation
+time per video in VPVideoMetrics. Exact throughput numbers depend on
+video length, number of refinement iterations, and model configuration.
 
-Throughput:
-  - Single GPU: 10-15 videos/hour
-  - Dual GPU: 18-25 videos/hour (Qwen on separate GPU)
+Timing data is recorded in:
+  - SAM2: per-video timing breakdown (segment, postprocess, upload)
+  - VideoPainter: VPVideoMetrics.generation_s per video
+  - Alpamayo: inference_time_seconds per video in JSON output
+  - Alpamayo: aggregate avg/total time in <run_id>_report.txt
 
-SAMPLE OUTPUTS
-──────────────
-Example 1: Single White Solid Generation
-  Input: Highway scene with no centerline
-  Instruction: "lane single white solid"
-  Result: Clean single white solid line added at road center
-  VLM Verdict: PASS (1st attempt)
-  Notes: "Crisp paint, proper perspective, good texture variation"
-
-Example 2: Single to Double Conversion
-  Input: Highway with single white centerline
-  Instruction: "lane double yellow solid"
-  Result: Replaced with double yellow solid lines
-  VLM Verdict: PASS (2nd attempt)
-  Notes: "Initially too wide spacing, revised caption fixed"
-
-Example 3: Dashed Line Generation
-  Input: Road with solid centerline
-  Instruction: "lane single white dashed"
-  Result: Converted to evenly-spaced dashed pattern
-  VLM Verdict: PASS (3rd attempt)
-  Notes: "Initial attempts had irregular dash spacing"
-
-LIMITATIONS & FAILURE CASES
-────────────────────────────
+LIMITATIONS & KNOWN CHALLENGES
+──────────────────────────────
 1. Complex Intersections:
    - Challenge: Multiple converging lanes
-   - Performance: 60% success rate
-   - Solution: Future work on multi-line handling
+   - Observed: Reduced quality in multi-lane scenarios
+   - Future work: Multi-line handling
 
 2. Severe Occlusions:
    - Challenge: Vehicles covering road region
-   - Performance: 45% success rate
-   - Solution: Better mask generation or frame selection
+   - Observed: Mask generation may include non-road areas
+   - Future work: Better mask generation or frame selection
 
 3. Extreme Lighting:
    - Challenge: Strong shadows, nighttime scenes
-   - Performance: 70% success rate
-   - Solution: Lighting-conditional training data
+   - Observed: Reduced inpainting quality under extreme lighting
+   - Future work: Lighting-conditional training data
 
 4. Curved Roads:
    - Challenge: Maintaining perspective on curves
-   - Performance: 75% success rate (slight degradation)
-   - Solution: Curve-specific data augmentation
+   - Observed: Slight quality degradation on curved segments
+   - Future work: Curve-specific data augmentation
 
-COMPARISON WITH BASELINE METHODS
-─────────────────────────────────
-Method                          | Semantic Acc | Visual Quality
---------------------------------|--------------|---------------
-Raw VideoPainter (no FluxFill)  | 2.8          | 3.2
-VideoPainter + FluxFill (base)  | 3.2          | 3.5
-Our Method (LoRA + VLM refine)  | 4.6          | 4.4
-
-Improvement over baseline: +64% semantic accuracy, +38% visual quality
+Note: Systematic failure-rate analysis by scene category is pending.
+      Per-video VLM verdicts and numerical metrics can be aggregated
+      from the eval_{video_id}.txt and sidecar JSON files.
 
 AUTOMATED NUMERICAL QUALITY METRICS (NEW)
 ──────────────────────────────────────────
-Per-video metrics computed automatically by workflow_vp.py after generation:
+Per-video metrics computed automatically by _evaluate_video() in workflow_vp.py
+after each video generation. Uses MetricsCalculator on GPU tensors [T,C,H,W].
 
 Metric                  | Full-Frame | Masked Region | Notes
 ------------------------|------------|---------------|------
-PSNR (dB)               | varies     | varies        | Higher = better
-SSIM                    | varies     | varies        | 1.0 = identical
-LPIPS                   | varies     | varies        | Lower = better
-Temporal Consistency    | varies     | —             | Cosine similarity
-CLIP Score              | varies     | —             | Instruction alignment
+PSNR (dB)               | ✓          | ✓             | 10·log10(1/MSE), higher=better
+SSIM                    | ✓          | ✓             | luminance+contrast+structure [0,1]
+LPIPS                   | ✓          | ✓             | deep perceptual dist, lower=better
+MSE                     | ✓          | ✓             | (1/N)Σ(x−y)², lower=better
+MAE                     | ✓          | ✓             | (1/N)Σ|x−y|, lower=better
+Temporal Consistency    | ✓          | ✓             | frame-to-frame coherence
+CLIP Score              | ✓          | ✓             | text-video alignment (if caption)
 
-Metrics are saved as JSON sidecar files (video_name_metrics.json) per video
-and aggregated in eval_results.json per workflow run. Both full-frame and
-masked-region variants are computed to isolate editing quality from
-background preservation.
+Quality Assessment (from full-frame metrics):
+  Score = (PSNR>40) + (SSIM>0.95) + (LPIPS<0.1)
+  ≥ 2 → EXCELLENT | 1 → GOOD | 0 → MODERATE
+
+Output format: eval_{video_id}.txt containing:
+  - Video metadata (ID, paths, resolution, FPS, mask coverage %)
+  - Full-frame metrics block (all 7 metrics)
+  - Masked-region metrics block (all 7 metrics, mask > 0.5)
+  - Quality assessment label
+  Uploaded to GCS alongside the generated video.
 
 VLA TRAJECTORY EVALUATION (NEW — ALPAMAYO)
 ──────────────────────────────────────────
 Alpamayo-R1-10B trajectory prediction on edited vs. original videos:
 
   Metric: minADE (minimum Average Displacement Error, in metres)
+  Formula: minADE = min_s (1/T) Σ_t ||pred_xy^(s)_t − gt_xy_t||_2
+  Computed over XY only (2D ground plane), T = 64 future waypoints
   
   Protocol:
   1. For each VP-edited video, parse clip_id and camera_name from filename
-  2. Stream matching clip from PhysicalAI-AV HuggingFace dataset
-  3. Replace original camera frames with VP-edited frames
-  4. Run VLA inference → predicted trajectory (x,y waypoints)
-  5. Compare predicted trajectory to ground-truth ego-motion
-  6. Compute minADE (average L2 distance over waypoints, min over samples)
+     Pattern: <clip_id>.<camera_name>_vp_edit_sample0.mp4
+  2. Decode last 4 consecutive frames via PyAV; detect FPS → time_step
+  3. Stream matching clip from PhysicalAI-AV HuggingFace dataset
+     using time_step = 1/fps for temporal alignment
+  4. Replace original camera frames with VP-decoded frames
+     (resize via bilinear interpolation if dimensions differ)
+  5. Build multi-camera input: 7 cameras × 4 frames = 28 images
+  6. Run VLA inference (top_p=0.98, temperature=0.6, max_gen_len=256)
+  7. Extract S trajectory samples (S × 64 × 3) + chain-of-thought traces
+  8. Compute minADE vs ground-truth ego-motion (XY only)
   
-  Output artifacts per video:
-  - inference_results.json (predicted waypoints, minADE, metadata)
-  - trajectory.npz (NumPy arrays for further analysis)
-  - overlay video (trajectory projected onto camera frames with BEV inset)
+  Output artifacts per video (<video_stem>/ subdirectory):
+  - <video_stem>_inference.json:
+      video_id, clip_id, camera_name, min_ade_meters,
+      reasoning_traces (chain-of-thought), temporal_config
+      (vp_video_fps, time_step_seconds, num_frames_per_camera),
+      metrics (inference_time_seconds, gpu_memory_used/peak_gb,
+      ram_used/peak_mb), success flag
+  - <video_stem>_vis_data.npz:
+      pred_xyz (S,64,3), pred_rot (S,64,3,3),
+      gt_future_xyz (64,3), gt_future_rot (64,3,3),
+      ego_history_xyz (16,3), ego_history_rot (16,3,3),
+      image_frames (N_cam×T,H,W,3), camera_indices (N_cam,)
+  - <video_stem>_overlay.mp4 (H.264, CRF=18, yuv420p):
+      Trajectory overlay with pinhole projection on camera view
+      + BEV inset (250×250 px, bottom-left) + progressive reveal
+      + HUD text (minADE, clip_id, camera) + legend box
   
-  Aggregate report:
-  - aggregate_report.json (mean/median minADE, per-video breakdown)
-  - Written to GCS: outputs/alpamayo/<run_id>/aggregate_report.json
+  Aggregate report (<run_id>_report.txt, workflow mode):
+  - Total/successful/failed video counts
+  - Average inference time per video
+  - Average/maximum GPU memory peak (GB)
+  - Average/maximum RAM peak (MB)
+  - Average/best/worst minADE (metres)
+  - Per-video breakdown with status, timings, and clip metadata
+  Written to GCS: outputs/alpamayo/<run_id>/<run_id>_report.txt
+
+  CLI mode also produces inference_summary.json (array of all results).
 
   A higher minADE (compared to unedited baseline) indicates the edited lane
   markings caused the VLA to plan a different trajectory — quantifying the
   perceptual impact of the lane editing on autonomous driving behaviour.
+
+  Visualization Technical Details:
+  - Camera projection: ego frame (x=forward, y=left, z=up) →
+    camera frame (z=forward, x=right, y=down)
+  - Focal length: f_x = f_y = (W/2) / tan(FOV/2)
+  - FOV auto-detected: 120° for *120fov*, 30° for *30fov*, 70° otherwise
+  - GT drawn in red (thickness=3), predictions in 5 cycling colors
+  - BEV display frame: dx=−y, dy=x (forward=up), auto-scaled
+  - Ego history drawn in gray, white dot at ego origin
+  - Batch mode: render_all_in_directory() scans *_vis_data.npz files
 
 ================================================================================
 10. TECHNICAL SPECIFICATIONS
@@ -1983,11 +2022,14 @@ Novel Files (Created):
      - Aggregate report generation
      - FuseBucket video data mounting
   
-  10. vla/alpamayo/visualize_video.py (517 lines)
+  10. vla/alpamayo/visualize_video.py (530 lines)
       - Trajectory overlay rendering on camera views
-      - 3D→2D projection with FOV-specific intrinsics
-      - Bird's-eye-view inset rendering
-      - Progressive reveal mode
+      - Pinhole camera projection (ego→camera frame transform)
+      - Bird's-eye-view (BEV) inset rendering (250×250 px)
+      - Progressive reveal mode (linear frame→waypoint mapping)
+      - H.264/MP4 output (CRF=18, yuv420p via PyAV)
+      - Batch mode: render_all_in_directory() for directory scan
+      - CLI: single and batch subcommands
   
   11. vla/alpamayo/download_checkpoints.py (checkpoint download utility)
   
@@ -2258,7 +2300,7 @@ Model Checkpoints:
   FluxFill: FLUX.1-Fill-dev (2.8B params)
   Qwen: Qwen2.5-VL-7B-Instruct (7B params)
          Qwen2.5-VL-72B-Instruct (72B params)
-  Alpamayo: Alpamayo-R1-10B (10B params, bfloat16, ~20GB) (NEW)
+  Alpamayo: Alpamayo-R1-10B (10B params, bfloat16) (NEW)
 
 REPRODUCIBILITY
 ───────────────
@@ -2331,12 +2373,11 @@ Key Achievements:
 4. ✅ Built large-scale dataset generation system (10,000+ samples)
 5. ✅ Developed semantic attribute filtering for dataset curation
 6. ✅ Trained domain-specific LoRA models for lane marking generation
-7. ✅ Achieved 64% improvement in semantic correctness
-8. ✅ Deployed on cloud infrastructure with HLX workflow orchestration
-9. ✅ Integrated Alpamayo-R1-10B VLA for trajectory impact assessment (NEW)
-10. ✅ Created master pipeline orchestrator chaining SAM2→VP→Alpamayo (NEW)
-11. ✅ Implemented automated per-video quality metrics (PSNR/SSIM/LPIPS/CLIP) (NEW)
-12. ✅ Built multi-instruction editing support for diverse lane variants (NEW)
+7. ✅ Deployed on cloud infrastructure with HLX workflow orchestration
+8. ✅ Integrated Alpamayo-R1-10B VLA for trajectory impact assessment (NEW)
+9. ✅ Created master pipeline orchestrator chaining SAM2→VP→Alpamayo (NEW)
+10. ✅ Implemented automated per-video quality metrics (PSNR/SSIM/LPIPS/CLIP) (NEW)
+11. ✅ Built multi-instruction editing support for diverse lane variants (NEW)
 
 TECHNICAL IMPACT
 ────────────────

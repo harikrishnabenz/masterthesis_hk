@@ -1165,6 +1165,10 @@ def run_videopainter_edit_many(
 
 	logger.info("Running %d instruction(s)", len(instruction_list))
 
+	# Collect evaluation jobs to run *after* all generation is complete,
+	# so that generation models can be unloaded and GPU memory freed first.
+	deferred_evals: list[dict] = []
+
 	# Run each instruction into its own subfolder.
 	used_instr_dirs: set[str] = set()
 	for instr_idx, instruction in enumerate(instruction_list, start=1):
@@ -1228,62 +1232,17 @@ def run_videopainter_edit_many(
 			uploaded = _upload_outputs(output_path=output_path, remote_output_path=remote_output)
 			upload_s = time.perf_counter() - upload_start
 			logger.info("[%s][%s] Uploaded: %s", instr_dir, vid, ", ".join(uploaded))
-			
-			# Run evaluation on the generated video
-			logger.info("[%s][%s] Running evaluation", instr_dir, vid)
-			eval_start = time.perf_counter()
-			try:
-				# Find original video and mask
-				meta_path, raw_root = _resolve_preprocessed_video_paths(
-					data_run_id=data_run_id,
-					data_video_id=vid,
-				)
-				video_base_name = _video_base_name_from_meta(
-					meta_csv_path=inpainting_mask_meta,
-					inpainting_sample_id=inpainting_sample_id,
-				)
-				
-				# Find original video file
-				expected_filename = f"{video_base_name}.0.mp4"
-				original_video_path = _select_video_file_under_root(
-					raw_root=raw_root,
-					video_base_name=video_base_name,
-					data_video_id=vid,
-					expected_filename=expected_filename,
-				)
-				
-				# Find mask file
-				mounted_video_dir = os.path.join(VP_DATA_FUSE_MOUNT_ROOT, data_run_id, vid)
-				mounted_masks_preferred = os.path.join(mounted_video_dir, "masks", vid, "all_masks.npz")
-				mounted_masks_legacy = os.path.join(mounted_video_dir, "mask_root", vid, "all_masks.npz")
-				
-				mask_path = mounted_masks_preferred if os.path.exists(mounted_masks_preferred) else mounted_masks_legacy
-				
-				# Run evaluation - save in same directory as video
-				eval_output_dir = os.path.join(staged_output_dir, instr_dir, vid)
-				eval_result = _evaluate_video(
-					original_path=original_video_path,
-					generated_path=output_path,
-					mask_path=mask_path,
-					caption=instruction,
-					output_dir=eval_output_dir,
-					video_id=vid,
-				)
-				
-				if 'error' not in eval_result:
-					# Upload evaluation results to GCS in same directory as video
-					eval_remote_path = os.path.join(gcs_save_path, instr_dir, vid, f"eval_{vid}.txt")
-					upload_file_to_gcs(eval_result['output_path'], eval_remote_path)
-					logger.info("[%s][%s] Evaluation uploaded: %s", instr_dir, vid, eval_remote_path)
-				else:
-					logger.warning("[%s][%s] Evaluation failed: %s", instr_dir, vid, eval_result['error'])
-				
-			except Exception as e:
-				logger.warning("[%s][%s] Evaluation failed: %s", instr_dir, vid, e)
-			
-			eval_s = time.perf_counter() - eval_start
-			logger.info("[%s][%s] Evaluation time: %.2fs", instr_dir, vid, eval_s)
-			logger.info("[%s][%s] Done", instr_dir, vid)
+
+			# Collect info for deferred evaluation (run after all generation completes
+			# to avoid CUDA OOM from loading CLIP alongside generation models).
+			deferred_evals.append({
+				"instr_dir": instr_dir,
+				"vid": vid,
+				"output_path": output_path,
+				"inpainting_mask_meta": inpainting_mask_meta,
+				"instruction": instruction,
+			})
+			logger.info("[%s][%s] Generation done (evaluation deferred)", instr_dir, vid)
 
 			per_video_metrics.append(
 				VPVideoMetrics(
@@ -1314,6 +1273,74 @@ def run_videopainter_edit_many(
 			logger.info("Uploaded VideoPainter run report: %s", report_remote)
 		except Exception as e:
 			logger.info("Failed to write/upload VideoPainter run report (non-fatal): %s", e)
+
+	# ---------------------------------------------------------------------------
+	# DEFERRED EVALUATION PASS
+	# ---------------------------------------------------------------------------
+	# Generation models (CogVideoX, FluxFill, Qwen) consume ~55 GB VRAM.
+	# The evaluation metrics (CLIP, LPIPS) need additional GPU memory.
+	# By deferring evaluation until after *all* generation is complete we can
+	# free the generation models first and avoid CUDA OOM.
+	# ---------------------------------------------------------------------------
+	if deferred_evals:
+		logger.info("Freeing GPU memory before evaluation pass (%d videos)...", len(deferred_evals))
+		import gc
+		if torch.cuda.is_available():
+			torch.cuda.empty_cache()
+		gc.collect()
+		if torch.cuda.is_available():
+			torch.cuda.empty_cache()
+
+		for eval_info in deferred_evals:
+			e_instr_dir = eval_info["instr_dir"]
+			e_vid = eval_info["vid"]
+			logger.info("[EVAL][%s][%s] Running deferred evaluation", e_instr_dir, e_vid)
+			eval_start = time.perf_counter()
+			try:
+				_, raw_root = _resolve_preprocessed_video_paths(
+					data_run_id=data_run_id,
+					data_video_id=e_vid,
+				)
+				video_base_name = _video_base_name_from_meta(
+					meta_csv_path=eval_info["inpainting_mask_meta"],
+					inpainting_sample_id=inpainting_sample_id,
+				)
+
+				expected_filename = f"{video_base_name}.0.mp4"
+				original_video_path = _select_video_file_under_root(
+					raw_root=raw_root,
+					video_base_name=video_base_name,
+					data_video_id=e_vid,
+					expected_filename=expected_filename,
+				)
+
+				mounted_video_dir = os.path.join(VP_DATA_FUSE_MOUNT_ROOT, data_run_id, e_vid)
+				mounted_masks_preferred = os.path.join(mounted_video_dir, "masks", e_vid, "all_masks.npz")
+				mounted_masks_legacy = os.path.join(mounted_video_dir, "mask_root", e_vid, "all_masks.npz")
+				mask_path = mounted_masks_preferred if os.path.exists(mounted_masks_preferred) else mounted_masks_legacy
+
+				eval_output_dir = os.path.join(staged_output_dir, e_instr_dir, e_vid)
+				eval_result = _evaluate_video(
+					original_path=original_video_path,
+					generated_path=eval_info["output_path"],
+					mask_path=mask_path,
+					caption=eval_info["instruction"],
+					output_dir=eval_output_dir,
+					video_id=e_vid,
+				)
+
+				if "error" not in eval_result:
+					eval_remote_path = os.path.join(gcs_save_path, e_instr_dir, e_vid, f"eval_{e_vid}.txt")
+					upload_file_to_gcs(eval_result["output_path"], eval_remote_path)
+					logger.info("[EVAL][%s][%s] Uploaded: %s", e_instr_dir, e_vid, eval_remote_path)
+				else:
+					logger.warning("[EVAL][%s][%s] Failed: %s", e_instr_dir, e_vid, eval_result["error"])
+
+			except Exception as e:
+				logger.warning("[EVAL][%s][%s] Failed: %s", e_instr_dir, e_vid, e)
+
+			eval_s = time.perf_counter() - eval_start
+			logger.info("[EVAL][%s][%s] Evaluation time: %.2fs", e_instr_dir, e_vid, eval_s)
 
 	logger.info("All videos completed. Outputs saved under: %s", gcs_save_path)
 
