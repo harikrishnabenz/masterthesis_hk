@@ -64,6 +64,18 @@ LLM_MODEL_PATH="/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct"
 TRAINED_FLUXFILL_GCS_PATH="${TRAINED_FLUXFILL_GCS_PATH:-workspace/user/hbaskar/Video_inpainting/videopainter/training/trained_checkpoint/fluxfill_single_white_solid_clearroad_20260212_151908}"
 export TRAINED_FLUXFILL_GCS_PATH
 
+# VP_DATA_RUN_ID: auto-discover the SAM2 output folder matching RUN_ID.
+# The folder name is <RUN_ID>_<timestamp>, e.g. 001_20260217_092127.
+VP_DATA_RUN_ID=$(gcloud storage ls "${VP_INPUT_BASE}/" 2>/dev/null \
+  | grep "/${RUN_ID}_" \
+  | head -1 \
+  | sed 's|.*/\([^/]*\)/$|\1|')
+if [[ -z "${VP_DATA_RUN_ID}" ]]; then
+  echo "ERROR: No SAM2 output folder found matching '${RUN_ID}_*' under ${VP_INPUT_BASE}/"
+  exit 1
+fi
+echo "Auto-detected SAM2 data folder: ${VP_DATA_RUN_ID}"
+
 echo "================================================================================"
 echo "VIDEOPAINTER EDITING - BUILD AND RUN"
 echo "================================================================================"
@@ -96,10 +108,6 @@ CAPTION_REFINE_ITERS="${CAPTION_REFINE_ITERS:-10}"
 CAPTION_REFINE_TEMPERATURE="${CAPTION_REFINE_TEMPERATURE:-0.1}"
 VP_STRENGTH="${VP_STRENGTH:-1.0}"
 
-
-# VP_DATA_RUN_ID must match the SAM2 run_id that produced the preprocessed data.
-# Override: VP_DATA_RUN_ID="002_20260217_091428" bash scripts/build_and_run.sh
-VP_DATA_RUN_ID="${VP_DATA_RUN_ID:-001_20260217_092127}"
 
 hlx wf run \
   --team-space research \
