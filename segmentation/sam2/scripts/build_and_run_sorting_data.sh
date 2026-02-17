@@ -55,6 +55,7 @@ echo "  COUNT=${COUNT} COLOR=${COLOR} PATTERN=${PATTERN} SORT=${SORT} LIMIT=${LI
 hlx wf run \
 	--team-space "${TEAM_SPACE}" \
 	--domain "${DOMAIN}" \
+	--execution-name "filter-fluxfill-${TIMESTAMP}" \
 	filter_fluxfill_dataset.filter_fluxfill_dataset_wf \
 	--input_dir "${INPUT_DIR}" \
 	--suffix "${SUFFIX}" \

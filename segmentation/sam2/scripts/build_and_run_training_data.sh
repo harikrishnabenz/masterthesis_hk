@@ -63,6 +63,7 @@ echo "  NUM_WORKERS=${NUM_WORKERS}"
 hlx wf run \
 	--team-space "${TEAM_SPACE}" \
 	--domain "${DOMAIN}" \
+	--execution-name "datagen-${OUTPUT_RUN_ID//_/-}-${TIMESTAMP}" \
 	data_generation.fluxfill_data_generation_wf \
 	--source_gcs_prefix "${SOURCE_GCS_PREFIX}" \
 	--num_videos "${NUM_VIDEOS}" \

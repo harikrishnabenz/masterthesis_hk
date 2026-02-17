@@ -67,42 +67,9 @@ def _lane_spec_to_instruction(c: str, col: str, pat: str) -> str:
 
 
 # ----------------------------------------------------------------------------------
-# RUN SUFFIX (read from scripts/build_and_run.sh)
+# RUN SUFFIX (set via VP_RUN_SUFFIX env var from scripts/build_and_run.sh)
 # ----------------------------------------------------------------------------------
-def _read_x_from_build_script() -> str:
-	"""Extract X value from scripts/build_and_run.sh."""
-	build_script = os.path.join(os.path.dirname(__file__), "scripts", "build_and_run.sh")
-	if os.path.exists(build_script):
-		try:
-			with open(build_script) as f:
-				for line in f:
-					match = re.search(r'X=["\']([^"\']+)["\']', line)
-					if match:
-						return match.group(1)
-		except Exception:
-			pass
-	return ""
-
-
-def _read_llm_model_size_from_build_script() -> str:
-	"""Extract LLM_MODEL_SIZE from scripts/build_and_run.sh (e.g. '72B' or '7B')."""
-	build_script = os.path.join(os.path.dirname(__file__), "scripts", "build_and_run.sh")
-	if not os.path.exists(build_script):
-		return ""
-	try:
-		with open(build_script) as f:
-			for line in f:
-				# Skip comments quickly.
-				if line.lstrip().startswith("#"):
-					continue
-				match = re.search(r'LLM_MODEL_SIZE=["\']([^"\']+)["\']', line)
-				if match:
-					return (match.group(1) or "").strip().upper()
-	except Exception:
-		return ""
-	return ""
-
-X = _read_x_from_build_script()
+X = (os.environ.get("VP_RUN_SUFFIX") or "").strip()
 
 
 # ----------------------------------------------------------------------------------
@@ -125,9 +92,7 @@ COMPUTE_NODE = Node.A100_80GB_1GPU
 VP_FLUX_DEVICE_DEFAULT = "cuda:0"
 
 
-# Optional suffix shared with scripts/build_and_run.sh
-# Uses X from build_and_run.sh, falls back to environment variable
-VP_RUN_SUFFIX = X or (os.environ.get("VP_RUN_SUFFIX") or "").strip()
+VP_RUN_SUFFIX = X
 
 # Allow the runner script to pin an exact image tag (avoids stale ':latest' pulls).
 REMOTE_IMAGE = (
