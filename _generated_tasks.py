@@ -197,7 +197,7 @@ ALPAMAYO_DEFAULT_MODEL_ID = os.environ.get(
     ),
     container_image=SAM2_CONTAINER_IMAGE,
     environment={"PYTHONUNBUFFERED": "1"},
-    mounts=[BUCKETS["sam2_checkpoints"], BUCKETS["sam2_input_videos"]],
+    mounts=[BUCKETS["sam2_checkpoints"]],
 )
 def task_sam2_segmentation(
     run_id: str,
@@ -222,46 +222,49 @@ def task_sam2_segmentation(
 
     # ── Resolve video URIs from various input formats ───────────────────────
     def _resolve_video_uris(uris):
-        """Resolve chunk specs, GCS folders, or pass-through file lists."""
-        import subprocess as _sp
+        """Resolve chunk specs, GCS folders, or pass-through file lists.
+
+        Uses the ``gcsfs`` Python library (already installed in the SAM2
+        container) instead of the ``gsutil`` CLI, which is **not** available
+        in the runtime image.
+        """
         from urllib.parse import urlparse, parse_qs
+        import gcsfs
+
+        fs = gcsfs.GCSFileSystem()
 
         if len(uris) == 1 and uris[0].startswith("chunks://"):
             # Format: chunks://<bucket>/<path>?start=N&end=M&per_chunk=K
             raw = uris[0]
             parsed = urlparse(raw)
-            base_path = f"gs://{parsed.netloc}{parsed.path}".rstrip("/")
+            base_path = f"{parsed.netloc}{parsed.path}".rstrip("/")
             params = parse_qs(parsed.query)
             chunk_start = int(params.get("start", ["0"])[0])
             chunk_end = int(params.get("end", ["19"])[0])
             per_chunk = int(params.get("per_chunk", ["1"])[0])
 
             logger.info(
-                "Resolving chunks %d-%d (%d files/chunk) from %s",
+                "Resolving chunks %d-%d (%d files/chunk) from gs://%s",
                 chunk_start, chunk_end, per_chunk, base_path,
             )
             resolved = []
             for ci in range(chunk_start, chunk_end + 1):
-                chunk_folder = f"{base_path}/chunk_{ci:04d}/"
-                ls = _sp.run(
-                    ["gsutil", "ls", chunk_folder],
-                    capture_output=True, text=True,
-                )
-                if ls.returncode != 0:
-                    logger.warning("gsutil ls failed for %s: %s", chunk_folder, ls.stderr.strip())
+                chunk_folder = f"{base_path}/chunk_{ci:04d}"
+                try:
+                    entries = fs.ls(chunk_folder, detail=False)
+                except FileNotFoundError:
+                    logger.warning("Chunk folder not found: gs://%s", chunk_folder)
                     continue
                 mp4s = sorted(
-                    line.strip()
-                    for line in ls.stdout.splitlines()
-                    if line.strip().endswith(".mp4")
+                    f"gs://{e}" for e in entries if e.endswith(".mp4")
                 )
                 if not mp4s:
-                    logger.warning("No .mp4 files in %s", chunk_folder)
+                    logger.warning("No .mp4 files in gs://%s", chunk_folder)
                     continue
                 resolved.extend(mp4s[:per_chunk])
             if not resolved:
                 raise ValueError(
-                    f"No .mp4 files found in chunks {chunk_start}-{chunk_end} of {base_path}"
+                    f"No .mp4 files found in chunks {chunk_start}-{chunk_end} of gs://{base_path}"
                 )
             logger.info("Resolved %d videos from %d chunks", len(resolved), chunk_end - chunk_start + 1)
             return resolved
@@ -270,13 +273,13 @@ def task_sam2_segmentation(
             # Single GCS folder
             folder = uris[0]
             logger.info("Resolving video folder: %s", folder)
-            ls = _sp.run(["gsutil", "ls", folder], capture_output=True, text=True)
-            if ls.returncode != 0:
-                raise RuntimeError(f"gsutil ls failed for {folder}: {ls.stderr}")
+            gcs_path = folder.replace("gs://", "", 1).rstrip("/")
+            try:
+                entries = fs.ls(gcs_path, detail=False)
+            except FileNotFoundError:
+                raise RuntimeError(f"GCS folder not found: {folder}")
             mp4s = sorted(
-                line.strip()
-                for line in ls.stdout.splitlines()
-                if line.strip().endswith(".mp4")
+                f"gs://{e}" for e in entries if e.endswith(".mp4")
             )
             if not mp4s:
                 raise ValueError(f"No .mp4 files found in {folder}")
@@ -300,7 +303,6 @@ def task_sam2_segmentation(
 
     # Prefetch mounted checkpoints
     SAM2_FUSE_MOUNT_ROOT = os.path.join(MOUNTPOINT, "sam2-checkpoints")
-    INPUT_VIDEOS_MOUNT_ROOT = os.path.join(MOUNTPOINT, "input-videos")
 
     if checkpoint_path == SAM2_DEFAULT_CHECKPOINT:
         try:
@@ -317,36 +319,39 @@ def task_sam2_segmentation(
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"SAM2 checkpoint not found: {checkpoint_path}")
 
-    # Setup input video symlinks
-    # The FuseBucket now mounts data_physical_ai, so camera subfolder is inside the mount
-    CAMERA_SUBFOLDER = os.environ.get("SAM2_CAMERA_SUBFOLDER", "camera_front_tele_30fov")
-    try:
-        fuse_prefetch_metadata(INPUT_VIDEOS_MOUNT_ROOT)
-    except Exception as e:
-        logger.warning(f"Video mount prefetch failed (non-fatal): {e}")
+    # Download input videos from GCS to a local temp folder
+    import gcsfs
 
     video_cache_dir = Path("/tmp/sam2_video_cache")
     video_cache_dir.mkdir(parents=True, exist_ok=True)
 
+    fs = gcsfs.GCSFileSystem()
     local_video_paths = []
     for uri in video_uris:
         video_filename = uri.split("/")[-1]
-        # Try with camera subfolder first (new layout)
-        mounted_video_path = os.path.join(INPUT_VIDEOS_MOUNT_ROOT, CAMERA_SUBFOLDER, video_filename)
-        # Fallback: direct under mount root (old layout)
-        mounted_video_path_flat = os.path.join(INPUT_VIDEOS_MOUNT_ROOT, video_filename)
         local_video_path = video_cache_dir / video_filename
-        if os.path.exists(mounted_video_path):
-            if not local_video_path.exists():
-                os.symlink(mounted_video_path, local_video_path)
-            local_video_paths.append(str(local_video_path))
-        elif os.path.exists(mounted_video_path_flat):
-            if not local_video_path.exists():
-                os.symlink(mounted_video_path_flat, local_video_path)
-            local_video_paths.append(str(local_video_path))
-        else:
-            local_video_paths.append(uri)
 
+        if local_video_path.exists():
+            logger.info("Already downloaded: %s", local_video_path)
+            local_video_paths.append(str(local_video_path))
+            continue
+
+        # Normalise URI to a bare GCS path for gcsfs
+        gcs_path = uri
+        if gcs_path.startswith("gs://"):
+            gcs_path = gcs_path[len("gs://"):]
+        elif gcs_path.startswith("https://storage.googleapis.com/"):
+            gcs_path = gcs_path[len("https://storage.googleapis.com/"):]
+
+        logger.info("Downloading gs://%s -> %s", gcs_path, local_video_path)
+        try:
+            fs.get(gcs_path, str(local_video_path))
+            local_video_paths.append(str(local_video_path))
+        except Exception as e:
+            logger.error("Failed to download gs://%s: %s", gcs_path, e)
+            raise
+
+    logger.info("Downloaded %d videos to %s", len(local_video_paths), video_cache_dir)
     video_uris = local_video_paths
 
     # Run processing script
@@ -396,7 +401,7 @@ def task_sam2_segmentation(
     ),
     container_image=SAM2_CONTAINER_IMAGE,
     environment={"PYTHONUNBUFFERED": "1"},
-    mounts=[BUCKETS["sam2_checkpoints"], BUCKETS["sam2_input_videos"]],
+    mounts=[BUCKETS["sam2_checkpoints"]],
 )
 def task_sam2_single_video(
     run_id: str,

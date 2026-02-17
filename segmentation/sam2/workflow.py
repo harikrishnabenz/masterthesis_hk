@@ -48,7 +48,7 @@ INPUT_VIDEOS_PREFIX = os.environ.get(
     "SAM2_INPUT_PREFIX",
     "workspace/user/hbaskar/Input/data_physical_ai",
 )
-# Camera subfolder within the input parent
+# Camera subfolder within the input parent (used for resolving chunk URIs)
 INPUT_CAMERA_SUBFOLDER = os.environ.get("SAM2_CAMERA_SUBFOLDER", "camera_front_tele_30fov")
 
 # IMPORTANT: FuseBucket mounts at /mnt/{name}, not /mnt/{bucket}.
@@ -56,23 +56,6 @@ INPUT_CAMERA_SUBFOLDER = os.environ.get("SAM2_CAMERA_SUBFOLDER", "camera_front_t
 SAM2_FUSE_MOUNT_NAME = "sam2-checkpoints"
 SAM2_FUSE_MOUNT_ROOT = os.path.join(MOUNTPOINT, SAM2_FUSE_MOUNT_NAME)
 MOUNTED_CHECKPOINT_PATH = os.path.join(SAM2_FUSE_MOUNT_ROOT, "checkpoints", "sam2.1_hiera_large.pt")
-
-INPUT_VIDEOS_MOUNT_NAME = "input-videos"
-INPUT_VIDEOS_MOUNT_ROOT = os.path.join(MOUNTPOINT, INPUT_VIDEOS_MOUNT_NAME)
-
-# Default video URIs (can be overridden)
-DEFAULT_VIDEO_URIS = [
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Input/data_physical_ai/camera_front_tele_30fov/25534c8d-4d02-463a-84c9-dad015f320ac.camera_front_tele_30fov.mp4",
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Input/data_physical_ai/camera_front_tele_30fov/13e7d364-6476-4f2f-b94e-060440bf1a36.camera_front_tele_30fov.mp4",
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Input/data_physical_ai/camera_front_tele_30fov/025887fd-9f6a-4ba4-aa30-60d7ab1e137f.camera_front_tele_30fov.mp4",
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Input/data_physical_ai/camera_front_tele_30fov/ee680a47-b981-468f-b817-8712af5953d5.camera_front_tele_30fov.mp4",
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Input/data_physical_ai/camera_front_tele_30fov/d3317bae-0c7e-4e34-8975-50b6bd715dc3.camera_front_tele_30fov.mp4",
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Input/data_physical_ai/camera_front_tele_30fov/4809025e-0cef-414c-bf59-8c86a5177ef7.camera_front_tele_30fov.mp4",
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Input/data_physical_ai/camera_front_tele_30fov/83563feb-695f-4152-a0bf-346d56f89373.camera_front_tele_30fov.mp4",
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Input/data_physical_ai/camera_front_tele_30fov/99b474d6-9ea5-4e17-87a2-84267728763d.camera_front_tele_30fov.mp4",
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Input/data_physical_ai/camera_front_tele_30fov/d2cadb4e-585e-4b7f-890f-2fa198713203.camera_front_tele_30fov.mp4",
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/Input/data_physical_ai/camera_front_tele_30fov/6e08b4de-9282-409f-be26-2d24e066baac.camera_front_tele_30fov.mp4",
-]
 
 
 def ensure_symlink(src: str, dest: str) -> None:
@@ -114,16 +97,11 @@ def ensure_symlink(src: str, dest: str) -> None:
             name=SAM2_FUSE_MOUNT_NAME,
             prefix=SAM2_CHECKPOINT_PREFIX,
         ),
-        FuseBucket(
-            bucket=SAM2_BUCKET,
-            name=INPUT_VIDEOS_MOUNT_NAME,
-            prefix=INPUT_VIDEOS_PREFIX,
-        ),
     ],
 )
 def run_sam2_segmentation(
     run_id: str,
-    video_uris: Optional[List[str]] = None,
+    sam2_video_uris: str = "default",
     checkpoint_path: str = DEFAULT_CHECKPOINT,
     model_config: str = DEFAULT_CONFIG,
     upload_to_gcp: bool = True,
@@ -134,7 +112,12 @@ def run_sam2_segmentation(
     
     Args:
         run_id: Unique identifier for this run (used in output paths)
-        video_uris: List of video URIs to process (HTTP/HTTPS or gs:// URIs)
+        sam2_video_uris: Video input specification. Accepts:
+            - "default"           → 10 built-in sample videos
+            - "chunks://..."      → chunk-based URI (resolved inside container)
+            - "gs://bucket/folder/" → single GCS folder
+            - "gs://bucket/v.mp4" → single GCS file
+            - "gs://b/v1.mp4,gs://b/v2.mp4" → comma-separated URIs
         checkpoint_path: Path to SAM2 model checkpoint
         model_config: Model configuration file path
         upload_to_gcp: Whether to upload results to GCS
@@ -144,8 +127,24 @@ def run_sam2_segmentation(
     Returns:
         Summary message with GCS paths
     """
+    # -- parse video URIs: chunks://, folder, comma-separated, or "default" --
+    video_uris: Optional[List[str]] = None
+    if sam2_video_uris and sam2_video_uris != "default":
+        if sam2_video_uris.startswith("chunks://"):
+            # Chunk spec — pass as single-element list; task resolves it
+            video_uris = [sam2_video_uris]
+        elif sam2_video_uris.rstrip("/").startswith("gs://") and "," not in sam2_video_uris:
+            # Single GCS folder or single file — pass as-is
+            video_uris = [sam2_video_uris]
+        else:
+            # Comma-separated individual URIs
+            video_uris = [u.strip() for u in sam2_video_uris.split(",") if u.strip()]
+
     if video_uris is None:
-        video_uris = DEFAULT_VIDEO_URIS
+        raise ValueError(
+            "No video URIs provided. Pass --sam2_video_uris with a chunks:// URI, "
+            "gs:// path, or comma-separated list of URIs."
+        )
     
     # Construct output paths with run_id
     output_bucket = f"{SAM2_OUTPUT_BUCKET_BASE}/{run_id}"
@@ -200,52 +199,50 @@ def run_sam2_segmentation(
             f"Please ensure the checkpoint is available in the container."
         )
     
-    # Setup input videos - create symlinks from mounted videos
-    # The FuseBucket mounts data_physical_ai, so camera subfolder is inside the mount
-    logger.info("Setting up input videos from mounted GCS path...")
-    logger.info(f"INPUT_VIDEOS_MOUNT_ROOT={INPUT_VIDEOS_MOUNT_ROOT}")
-    logger.info(f"INPUT_CAMERA_SUBFOLDER={INPUT_CAMERA_SUBFOLDER}")
-    
-    # Create a local cache directory for symlinks
-    video_cache_dir = Path("/tmp/sam2_video_cache")
-    video_cache_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Prefetch video metadata for faster access
-    try:
-        fuse_prefetch_metadata(INPUT_VIDEOS_MOUNT_ROOT)
-    except Exception as e:
-        logger.warning(f"Video mount prefetch failed (non-fatal): {e}")
-    
-    # For each video URI, extract the filename and create a symlink from mounted path
-    # Videos are under <mount_root>/<camera_subfolder>/<filename> or <mount_root>/<camera_subfolder>/chunk_XXXX/<filename>
-    local_video_paths = []
-    for uri in video_uris:
-        # Extract filename from URI (last part after /)
-        video_filename = uri.split("/")[-1]
-        # Try direct path under camera subfolder first
-        mounted_video_path = os.path.join(INPUT_VIDEOS_MOUNT_ROOT, INPUT_CAMERA_SUBFOLDER, video_filename)
-        # Also try without camera subfolder (for backward compat)
-        mounted_video_path_flat = os.path.join(INPUT_VIDEOS_MOUNT_ROOT, video_filename)
-        local_video_path = video_cache_dir / video_filename
+    # Download input videos from GCS to a local temp folder (skip for chunks:// URIs
+    # which are resolved by the processing script itself via gcsfs at runtime).
+    import gcsfs
+
+    has_chunk_uris = any(u.startswith("chunks://") for u in video_uris)
+
+    if has_chunk_uris:
+        # chunks:// URIs are resolved by process_vide_sam2_hlxwf.py — pass through as-is
+        logger.info("Detected chunks:// URI — skipping download; processing script will resolve.")
+    else:
+        video_cache_dir = Path("/tmp/sam2_video_cache")
+        video_cache_dir.mkdir(parents=True, exist_ok=True)
+
+        fs = gcsfs.GCSFileSystem()
+        local_video_paths = []
+        for uri in video_uris:
+            video_filename = uri.split("/")[-1]
+            local_video_path = video_cache_dir / video_filename
+
+            if local_video_path.exists():
+                logger.info(f"Already downloaded: {local_video_path}")
+                local_video_paths.append(str(local_video_path))
+                continue
+
+            # Normalise URI to a bare GCS path for gcsfs
+            gcs_path = uri
+            if gcs_path.startswith("gs://"):
+                gcs_path = gcs_path[len("gs://"):]
+            elif gcs_path.startswith("https://storage.googleapis.com/"):
+                gcs_path = gcs_path[len("https://storage.googleapis.com/"):]
+
+            logger.info(f"Downloading gs://{gcs_path} -> {local_video_path}")
+            try:
+                fs.get(gcs_path, str(local_video_path))
+                local_video_paths.append(str(local_video_path))
+            except Exception as e:
+                logger.error(f"Failed to download gs://{gcs_path}: {e}")
+                raise
+
+        logger.info(f"Downloaded {len(local_video_paths)} videos to {video_cache_dir}")
         
-        if os.path.exists(mounted_video_path):
-            if not local_video_path.exists():
-                os.symlink(mounted_video_path, local_video_path)
-                logger.info(f"Linked video: {mounted_video_path} -> {local_video_path}")
-            local_video_paths.append(str(local_video_path))
-        elif os.path.exists(mounted_video_path_flat):
-            if not local_video_path.exists():
-                os.symlink(mounted_video_path_flat, local_video_path)
-                logger.info(f"Linked video (flat): {mounted_video_path_flat} -> {local_video_path}")
-            local_video_paths.append(str(local_video_path))
-        else:
-            logger.warning(f"Video not found in mounted path: {mounted_video_path}")
-            # Fallback to original URI (will be downloaded)
-            local_video_paths.append(uri)
-    
-    # Update video_uris to use local paths
-    video_uris = local_video_paths
-    logger.info(f"Prepared {len(local_video_paths)} video paths")
+        # Update video_uris to use local paths
+        video_uris = local_video_paths
+        logger.info(f"Prepared {len(local_video_paths)} video paths")
     
     # Build command to run the processing script
     script_path = os.path.join(BASE_WORKDIR, "process_vide_sam2_hlxwf.py")
@@ -330,11 +327,6 @@ Each video has:
             name=SAM2_FUSE_MOUNT_NAME,
             prefix=SAM2_CHECKPOINT_PREFIX,
         ),
-        FuseBucket(
-            bucket=SAM2_BUCKET,
-            name=INPUT_VIDEOS_MOUNT_NAME,
-            prefix=INPUT_VIDEOS_PREFIX,
-        ),
     ],
 )
 def run_sam2_single_video(
@@ -362,7 +354,7 @@ def run_sam2_single_video(
     """
     return run_sam2_segmentation(
         run_id=run_id,
-        video_uris=[video_uri],
+        sam2_video_uris=video_uri,
         checkpoint_path=checkpoint_path,
         model_config=model_config,
         upload_to_gcp=upload_to_gcp,
@@ -374,7 +366,7 @@ def run_sam2_single_video(
 @workflow
 def sam2_segmentation_wf(
     run_id: str,
-    video_uris: Optional[List[str]] = None,
+    sam2_video_uris: str = "default",
     checkpoint_path: str = DEFAULT_CHECKPOINT,
     model_config: str = DEFAULT_CONFIG,
     upload_to_gcp: bool = True,
@@ -395,11 +387,15 @@ def sam2_segmentation_wf(
     7. Cleans up local files after upload
     
     Args:
-        video_uris: List of video URIs (defaults to 10 sample videos)
+        run_id: Unique identifier for this run (used in output paths)
+        sam2_video_uris: Video input specification. Accepts:
+            - "default"           → 10 built-in sample videos
+            - "chunks://..."      → chunk-based URI (resolved inside container)
+            - "gs://bucket/folder/" → single GCS folder
+            - "gs://bucket/v.mp4" → single GCS file
+            - "gs://b/v1.mp4,gs://b/v2.mp4" → comma-separated URIs
         checkpoint_path: Path to SAM2.1 Large checkpoint
         model_config: SAM2 model config (sam2.1_hiera_l.yaml)
-        output_bucket: GCS bucket for raw segmentation outputs
-        preprocessed_bucket: GCS bucket for VideoPainter-formatted data
         upload_to_gcp: Upload results to GCS (default: True)
         upload_to_local: Keep local copies (default: False)
         max_frames: Max frames per video (default: 150)
@@ -409,7 +405,7 @@ def sam2_segmentation_wf(
     """
     return run_sam2_segmentation(
         run_id=run_id,
-        video_uris=video_uris,
+        sam2_video_uris=sam2_video_uris,
         checkpoint_path=checkpoint_path,
         model_config=model_config,
         upload_to_gcp=upload_to_gcp,
@@ -492,7 +488,7 @@ if __name__ == "__main__":
         )
     else:
         result = sam2_segmentation_wf(
-            video_uris=args.video_uris,
+            sam2_video_uris=",".join(args.video_uris) if args.video_uris else "default",
             upload_to_gcp=not args.no_upload,
             upload_to_local=args.no_upload,
             max_frames=args.max_frames,

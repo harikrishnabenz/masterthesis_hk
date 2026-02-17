@@ -211,9 +211,8 @@ def _run_alpamayo_inference(
     video_id = Path(video_path).stem
     logger.info(f"Running inference on video: {video_id}")
 
-    # Create output directory for this video
-    video_output_dir = os.path.join(output_dir, video_id)
-    Path(video_output_dir).mkdir(parents=True, exist_ok=True)
+    # output_dir is already video-specific (caller creates it)
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
 
     try:
         result = run_inference_on_video(
@@ -221,7 +220,7 @@ def _run_alpamayo_inference(
             model=model,
             processor=processor,
             helper_mod=helper_mod,
-            output_dir=video_output_dir,
+            output_dir=output_dir,
             num_traj_samples=num_traj_samples,
             device=device,
         )
@@ -448,6 +447,7 @@ def run_alpamayo_inference_task(
     for i, video_path in enumerate(video_paths, 1):
         logger.info(f"Processing video {i}/{len(video_paths)}: {video_path}")
         
+        # Each video gets its own subdirectory: <run_id>/<video_stem>/
         video_output_dir = os.path.join(local_output_dir, Path(video_path).stem)
         metrics = _run_alpamayo_inference(
             video_path=video_path,

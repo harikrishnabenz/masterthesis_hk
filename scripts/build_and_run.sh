@@ -40,7 +40,7 @@ RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 # ----------------------------------------------------------------------------------
 # RUN ID  (set this to identify your run; combined with timestamp for output folders)
 # ----------------------------------------------------------------------------------
-RUN_ID="${RUN_ID:-001}"
+RUN_ID="${RUN_ID:-002}"
 
 # ----------------------------------------------------------------------------------
 # OUTPUT PATHS
@@ -86,7 +86,7 @@ SAM2_CHUNK_END="${SAM2_CHUNK_END:-19}"          # last chunk index (inclusive)
 SAM2_FILES_PER_CHUNK="${SAM2_FILES_PER_CHUNK:-1}" # number of .mp4 files per chunk
 
 # Encode chunk config into a URI string that the SAM2 task will parse inside
-# the GPU container (where gsutil is available to enumerate files).
+# the GPU container (resolved via gcsfs Python library at runtime).
 # Format: chunks://<base_path>?start=N&end=M&per_chunk=K
 SAM2_VIDEO_URIS="${SAM2_VIDEO_URIS:-chunks://${SAM2_INPUT_BASE#gs://}?start=${SAM2_CHUNK_START}&end=${SAM2_CHUNK_END}&per_chunk=${SAM2_FILES_PER_CHUNK}}"
 

@@ -331,6 +331,26 @@ def run_inference_on_video(
         except Exception as vis_err:
             logger.warning(f"  Failed to save visualization data: {vis_err}")
 
+        # 10. Render overlay video (trajectories on original video)
+        overlay_file = os.path.join(output_dir, f"{video_id}_overlay.mp4")
+        try:
+            from visualize_video import render_trajectory_video
+
+            fov = 120.0 if "120fov" in camera_name else (30.0 if "30fov" in camera_name else 70.0)
+            render_trajectory_video(
+                video_path=video_path,
+                npz_path=vis_file,
+                output_path=overlay_file,
+                json_path=output_file,
+                fov_deg=fov,
+                progressive_reveal=True,
+                bev_inset=True,
+            )
+            results["overlay_video_path"] = overlay_file
+            logger.info(f"  Overlay video saved → {overlay_file}")
+        except Exception as overlay_err:
+            logger.warning(f"  Failed to render overlay video: {overlay_err}")
+
         logger.info(f"  minADE = {min_ade:.4f} m | time = {inference_time:.1f}s | saved → {output_file}")
         return results
 
@@ -411,15 +431,20 @@ def main():
     logger.info(f"Found {len(video_files)} video(s) to process")
 
     # ── Run inference ─────────────────────────────────────────────────
+    # Each video gets its own subdirectory so the visualise_results.ipynb
+    # notebook can discover them via:
+    #   RESULTS_DIR/<video_stem>/<video_stem>_inference.json
+    #   RESULTS_DIR/<video_stem>/<video_stem>_vis_data.npz
     all_results = []
     for i, vf in enumerate(video_files, 1):
         logger.info(f"\n[{i}/{len(video_files)}] {vf}")
+        video_output_dir = os.path.join(args.output_dir, Path(vf).stem)
         result = run_inference_on_video(
             video_path=vf,
             model=model,
             processor=processor,
             helper_mod=helper,
-            output_dir=args.output_dir,
+            output_dir=video_output_dir,
             num_traj_samples=args.num_traj_samples,
             device=device,
         )

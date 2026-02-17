@@ -48,6 +48,19 @@ def _build_gcs_path(prev_result: str, base: str, suffix: str) -> str:
     return f"{base}/{suffix}"
 
 
+@task(compute=SharedNode(), container_image=ContainerImage.PYTHON_3_10.value)
+def _finalize(result: dict) -> str:
+    """Convert final stage output to a string.
+
+    Returning this from the @dynamic ensures Flyte tracks the *entire*
+    child-task DAG (SAM2 → VP → Alpamayo) as a dependency of the
+    dynamic's output.  Without this, `return "Pipeline complete"` is a
+    literal that resolves immediately and the engine may never schedule
+    the child tasks.
+    """
+    return f"Pipeline complete: {result}"
+
+
 # ---------------------------------------------------------------------------
 # @dynamic – can use plain Python on its arguments
 # ---------------------------------------------------------------------------
@@ -140,11 +153,8 @@ def _master_pipeline_dynamic(
         num_traj_samples=alpamayo_num_traj_samples,
     )
 
-    logger.info("=" * 80)
-    logger.info("MASTER PIPELINE COMPLETE")
-    logger.info("=" * 80)
-
-    return "Pipeline complete"
+    # ── Finalize: return a Promise so Flyte tracks the full child-task DAG ──
+    return _finalize(result=alpamayo_result)
 
 
 # ---------------------------------------------------------------------------
