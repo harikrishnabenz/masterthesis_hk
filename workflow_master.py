@@ -492,13 +492,11 @@ def vp_alpamayo_wf(
         Run ID for this execution (used for VP + Alpamayo output paths).
     sam2_data_run_id
         The run_id of the *previous* SAM2 execution whose preprocessed
-        data should be consumed.  If empty, defaults to ``run_id``.
+        data should be consumed.  Must be provided (non-empty).
     """
-    data_run_id = sam2_data_run_id if sam2_data_run_id else run_id
-
     # Stage 2 — VideoPainter Editing
     vp_output_path = vp_stage(
-        data_run_id=data_run_id,
+        data_run_id=sam2_data_run_id,
         output_run_id=run_id,
         video_editing_instructions=vp_video_editing_instructions,
         llm_model=vp_llm_model,
