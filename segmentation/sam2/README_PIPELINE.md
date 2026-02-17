@@ -141,18 +141,18 @@ DEFAULT_VIDEO_URIS = [
 
 Or pass via workflow parameter:
 ```bash
-hlx wf run workflow.sam2_segmentation_wf \
+hlx wf run workflow_sam2.sam2_segmentation_wf \
     --run_id my_custom_run \
     --video_uris "['gs://bucket/video1.mp4', 'gs://bucket/video2.mp4']"
 ```
 
 ## Configuration Details
 
-### SAM2 Workflow ([workflow.py](workflow.py))
+### SAM2 Workflow ([workflow_sam2.py](workflow_sam2.py))
 - **run_id**: Required parameter (passed via command line)
 - Output paths constructed dynamically: `{base_path}/{run_id}/`
 
-### VideoPainter Workflow ([../../generation/VideoPainter/workflow.py](../../generation/VideoPainter/workflow.py))
+### VideoPainter Workflow ([../../generation/VideoPainter/workflow_vp.py](../../generation/VideoPainter/workflow_vp.py))
 - **DATA_RUN_ID**: Environment variable (set in build_and_run.sh)
 - Used to construct the GCS mount prefix at workflow deployment time
 - Default: "latest" (if not specified)

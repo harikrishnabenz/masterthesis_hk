@@ -43,7 +43,7 @@ RUN echo '#!/bin/bash\n\
 set -euo pipefail\n\
 echo "Master Pipeline Orchestrator"\n\
 echo "Available commands:"\n\
-echo "  - Run master workflow: hlx wf run --team-space research --domain prod workflow.master_pipeline_wf [args]"\n\
+echo "  - Run master workflow: hlx wf run --team-space research --domain prod workflow_master.master_pipeline_wf [args]"\n\
 echo "  - Run individual workflows: cd segmentation/sam2 && hlx wf run ..."\n\
 echo ""\n\
 exec "$@"\n\

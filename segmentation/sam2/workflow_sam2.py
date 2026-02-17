@@ -209,7 +209,7 @@ def run_sam2_segmentation(
     logger.info(f"Preprocessed bucket: {preprocessed_bucket}")
     logger.info("")
     logger.info("NOTE: To use this SAM2 output in VideoPainter, run:")
-    logger.info(f"  hlx wf run workflow.videopainter_wf --data_run_id {run_id}")
+    logger.info(f"  hlx wf run workflow_vp.videopainter_wf --data_run_id {run_id}")
     logger.info("="*60)
     
     # Prefetch mounted checkpoints if using default path

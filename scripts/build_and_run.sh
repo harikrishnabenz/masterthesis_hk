@@ -128,7 +128,7 @@ VP_LOCAL_IMAGE="videopainter:latest"
 VP_REMOTE_IMAGE="${REGISTRY}/harimt_vp${VP_RUN_SUFFIX}"
 
 ALP_LOCAL_IMAGE="alpamayo:latest"
-ALP_REMOTE_IMAGE="${REGISTRY}/alpamayo_vla"
+ALP_REMOTE_IMAGE="${REGISTRY}/alpamayo_vla_${MASTER_RUN_ID}"
 
 MASTER_LOCAL_IMAGE="master-pipeline:latest"
 MASTER_REMOTE_IMAGE="${REGISTRY}/master_pipeline"
@@ -259,7 +259,7 @@ hlx wf run \
   --team-space research \
   --domain prod \
   --execution-name "master-${MASTER_RUN_ID//_/-}" \
-  workflow.master_pipeline_wf \
+  workflow_master.master_pipeline_wf \
   --run_id "${MASTER_RUN_ID}" \
   --sam2_video_uris "${SAM2_VIDEO_URIS}" \
   --sam2_max_frames "${SAM2_MAX_FRAMES}" \

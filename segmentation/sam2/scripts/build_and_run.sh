@@ -133,7 +133,7 @@ echo "  OUTPUT (preprocessed): ${SAM2_PREPROCESSED_OUTPUT_BASE}/${SAM2_RUN_ID}/"
 echo "  Docker image:          ${REMOTE_IMAGE}"
 echo "================================================================================"
 
-# Ensure workflow.py uses this exact image when hlx packages the workflow
+# Ensure workflow_sam2.py uses this exact image when hlx packages the workflow
 export SAM2_CONTAINER_IMAGE="${REMOTE_IMAGE}"
 
 # Run the HLX workflow for SAM2 segmentation
@@ -145,7 +145,7 @@ hlx wf run \
   --team-space research \
   --domain prod \
   --execution-name "sam2-${SAM2_RUN_ID//_/-}-$(date -u +%Y%m%d-%H%M%S)" \
-  workflow.sam2_segmentation_wf \
+  workflow_sam2.sam2_segmentation_wf \
   --run_id "${SAM2_RUN_ID}" \
   --sam2_video_uris "${SAM2_VIDEO_URIS}" \
   --max_frames "${SAM2_MAX_FRAMES}"

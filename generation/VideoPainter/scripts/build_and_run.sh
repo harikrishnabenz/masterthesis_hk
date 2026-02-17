@@ -54,7 +54,7 @@ export VP_OUTPUT_BASE
 # LLM MODEL SELECTION
 # ----------------------------------------------------------------------------------
 # This repo is configured to use ONLY the Qwen2.5-VL-7B-Instruct checkpoint
-# mounted by workflow.py and exposed under the local path below.
+# mounted by workflow_vp.py and exposed under the local path below.
 LLM_MODEL_PATH="/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct"
 
 # ----------------------------------------------------------------------------------
@@ -85,7 +85,7 @@ echo "  OUTPUT (edited videos):    ${VP_OUTPUT_BASE}/${RUN_TAG}/"
 echo "  TRAINED_FLUXFILL_GCS_PATH: ${TRAINED_FLUXFILL_GCS_PATH}"
 echo "================================================================================"
 
-# Declare a run suffix used by both this script and workflow.py
+# Declare a run suffix used by both this script and workflow_vp.py
 # Extract timestamp from the trained checkpoint folder name
 CHECKPOINT_TIMESTAMP=$(basename "$TRAINED_FLUXFILL_GCS_PATH" | grep -oE '[0-9]{8}_[0-9]{6}' | head -1)
 X="withoutlora_5prompt_${CHECKPOINT_TIMESTAMP}"
@@ -113,7 +113,7 @@ hlx wf run \
   --team-space research \
   --domain prod \
   --execution-name "vp-${X//_/-}-${RUN_TAG//_/-}" \
-  workflow.videopainter_many_wf \
+  workflow_vp.videopainter_many_wf \
   --data_run_id "${VP_DATA_RUN_ID}" \
   --output_run_id "${RUN_TAG}" \
   --data_video_ids "auto" \

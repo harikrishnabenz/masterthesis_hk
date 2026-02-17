@@ -155,7 +155,7 @@ def sam2_stage(
     # Import the SAM2 task function from the container's baked-in workflow module.
     # Calling a @task-decorated function directly (outside a @workflow context)
     # executes the raw Python function — no Flyte magic.
-    from workflow import run_sam2_segmentation  # type: ignore[import-not-found]
+    from workflow_sam2 import run_sam2_segmentation  # type: ignore[import-not-found]
 
     logger.info("=" * 80)
     logger.info("MASTER PIPELINE — STAGE 1: SAM2 SEGMENTATION")
@@ -233,7 +233,7 @@ def vp_stage(
     sys.path.insert(0, "/workspace/VideoPainter")
     os.chdir("/workspace/VideoPainter")
 
-    from workflow import run_videopainter_edit_many  # type: ignore[import-not-found]
+    from workflow_vp import run_videopainter_edit_many  # type: ignore[import-not-found]
 
     logger.info("=" * 80)
     logger.info("MASTER PIPELINE — STAGE 2: VIDEOPAINTER EDITING")
@@ -314,7 +314,7 @@ def alpamayo_stage(
     sys.path.insert(0, "/workspace/alpamayo")
     os.chdir("/workspace/alpamayo")
 
-    from workflow import run_alpamayo_inference_task  # type: ignore[import-not-found]
+    from workflow_alpamayo import run_alpamayo_inference_task  # type: ignore[import-not-found]
 
     logger.info("=" * 80)
     logger.info("MASTER PIPELINE — STAGE 3: ALPAMAYO VLA INFERENCE")

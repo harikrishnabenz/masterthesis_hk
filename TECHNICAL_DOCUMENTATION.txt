@@ -2,7 +2,7 @@
                     TECHNICAL DOCUMENTATION
               Master Thesis: Video Inpainting for Lane Marking Generation
                      Author: Hariharan Baskar
-                     Last Updated: February 12, 2026
+                     Last Updated: February 17, 2026
 ================================================================================
 
 TABLE OF CONTENTS
@@ -24,28 +24,39 @@ TABLE OF CONTENTS
 
 This master thesis project implements an end-to-end pipeline for generating and
 editing lane markings in autonomous vehicle camera footage using state-of-the-art
-video inpainting models. The system combines SAM2 (Segment Anything Model 2) for
-road segmentation with VideoPainter (SIGGRAPH 2025) for video inpainting, with
-extensive custom modifications for autonomous driving applications.
+video inpainting models, and evaluating the impact of edited lane markings on
+autonomous driving trajectory prediction using Vision-Language-Action (VLA) models.
+
+The system combines SAM2 (Segment Anything Model 2) for road segmentation,
+VideoPainter (SIGGRAPH 2025) for video inpainting, and Alpamayo-R1-10B for
+VLA-based trajectory prediction — all orchestrated through a unified three-stage
+master pipeline with extensive custom modifications for autonomous driving
+applications.
 
 PRIMARY OBJECTIVES:
 - Generate synthetic lane marking datasets from Physical AI autonomous vehicle data
 - Enable precise control over lane marking attributes (count, color, pattern)
 - Train specialized FluxFill LoRA models for lane marking generation
-- Evaluate inpainting quality using VLM-based assessment
+- Evaluate inpainting quality using VLM-based assessment and numerical metrics
+- Assess impact of lane marking modifications on autonomous driving trajectory
+  prediction using Alpamayo-R1-10B VLA model
+- Provide end-to-end pipeline orchestration (SAM2 → VideoPainter → Alpamayo)
 
 KEY TECHNOLOGIES:
 - SAM2.1 (Hiera-Large) for video segmentation
 - VideoPainter with CogVideoX-5B backbone
 - FluxFill image inpainting model
 - Qwen2.5-VL Vision Language Model (7B/72B variants)
+- Alpamayo-R1-10B Vision-Language-Action model for trajectory prediction
 - Google Cloud Platform (GCS) with HLX workflow orchestration
+- Master pipeline orchestrator for three-stage sequential execution
 
 ================================================================================
 2. SYSTEM ARCHITECTURE
 ================================================================================
 
-The system consists of three major components:
+The system consists of four major components, orchestrated through a master
+pipeline that chains three GPU stages sequentially:
 
 ┌──────────────────────────────────────────────────────────────────────┐
 │                     COMPONENT 1: DATA GENERATION                     │
@@ -78,6 +89,36 @@ The system consists of three major components:
 │  │Input Videos  │  │ Edit Pipeline    │  │ Videos               │  │
 │  └──────────────┘  └──────────────────┘  └──────────────────────┘  │
 └──────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────┐
+│           COMPONENT 4: VLA TRAJECTORY EVALUATION (NEW)               │
+│  ┌──────────────┐  ┌──────────────────┐  ┌──────────────────────┐  │
+│  │ Edited       │->│ Alpamayo-R1-10B  │->│ Trajectory Preds +   │  │
+│  │ Videos       │  │ VLA Inference    │  │ Reasoning Traces +   │  │
+│  │              │  │ + PhysicalAI AV  │  │ minADE Metrics +     │  │
+│  │              │  │   ego-motion     │  │ Overlay Videos       │  │
+│  └──────────────┘  └──────────────────┘  └──────────────────────┘  │
+└──────────────────────────────────────────────────────────────────────┘
+
+MASTER PIPELINE ORCHESTRATION (workflow_master.py)
+──────────────────────────────────────────────────
+All three inference stages are chained in a single HLX workflow with
+a shared run_id for end-to-end traceability:
+
+  SAM2 ──(run_id)──▶ VideoPainter ──(gcs_path)──▶ Alpamayo
+
+  =========  ====================================================
+  Stage      GCS output
+  =========  ====================================================
+  SAM2       gs://…/outputs/sam2/<run_id>/
+  SAM2 (VP)  gs://…/outputs/preprocessed_data_vp/<run_id>/
+  VP         gs://…/outputs/vp/<run_id>/
+  Alpamayo   gs://…/outputs/alpamayo/<run_id>/
+  =========  ====================================================
+
+Each stage runs in its own container image (heavy ML deps are isolated)
+while the workflow graph is serialised from a lightweight orchestrator
+container. Data-dependency edges enforce strict sequential execution.
 
 ================================================================================
 3. NOVEL CONTRIBUTIONS & MODIFICATIONS
@@ -341,58 +382,247 @@ INNOVATION: First LoRA training pipeline specifically for FluxFill inpainting
             on structured lane marking datasets
 
 
-🌟 CONTRIBUTION #6: END-TO-END WORKFLOW ORCHESTRATION
+🌟 CONTRIBUTION #6: ALPAMAYO VLA TRAJECTORY EVALUATION PIPELINE
 ────────────────────────────────────────────────────────────────────────
-Created complete HLX workflow system for scalable cloud processing
+Integrated Alpamayo-R1-10B Vision-Language-Action model as the third stage
+of the pipeline to evaluate how edited lane markings affect autonomous
+driving trajectory prediction.
 
-WORKFLOW FILES:
-1. segmentation/sam2/workflow.py
-   - SAM2 video segmentation workflow
-   - Parallel video processing
-   - GCS input/output management
+FILES:
+- vla/alpamayo/run_inference.py (469 lines — core inference logic)
+- vla/alpamayo/workflow_alpamayo.py (550 lines — HLX workflow)
+- vla/alpamayo/visualize_video.py (517 lines — trajectory overlay rendering)
+- vla/alpamayo/download_checkpoints.py (checkpoint download utility)
+- vla/alpamayo/scripts/build_and_run.sh (standalone build/run script)
+- vla/alpamayo/Dockerfile (Python 3.12, CUDA 12.1, flash-attn)
+- vla/alpamayo/src/alpamayo_r1/ (model source: models, geometry, diffusion)
+
+KEY FEATURES:
+1. VideoPainter-to-Alpamayo data bridge:
+   - Parses clip_id and camera_name from VP output filenames
+     (pattern: <clip_id>.<camera_name>_vp_edit_sample0.mp4)
+   - Loads original driving clip from NVIDIA PhysicalAI-AV dataset
+     via HuggingFace streaming (requires HF_TOKEN)
+   - Replaces the inpainted camera's frames with VP-decoded frames
+   - Maintains temporal alignment: VP fps → dataset time_step matching
+
+2. Multi-camera trajectory inference:
+   - 7 camera views supported (front_tele, front_wide, cross_left/right,
+     rear_left/right, rear_tele)
+   - Uses last 4 consecutive frames per camera at VP video fps
+   - Ego-motion history (16 timesteps) from PhysicalAI-AV dataset
+   - Chain-of-thought reasoning traces from VLA model
+
+3. Quantitative evaluation:
+   - minADE (minimum Average Displacement Error) vs ground truth
+   - Per-video metrics: inference time, GPU memory, RAM usage
+   - Aggregate reports with avg/best/worst minADE across all videos
+
+4. Visualization outputs:
+   - Trajectory overlay videos (predicted vs ground truth on camera view)
+   - Bird's-eye-view (BEV) inset with ego history + future trajectories
+   - Progressive reveal mode for temporal trajectory unfolding
+   - NPZ visualization data for offline plotting
+
+5. Auto-discovery of VP output videos:
+   - Scans FuseBucket-mounted VP output directory
+   - Filters out _generated.mp4 sidecar files
+   - Optional video_name filter for single-video processing
+
+OUTPUT FORMAT:
+  alpamayo_output/<run_id>/
+    ├── <video_id>/
+    │   ├── <video_id>_inference.json   (predictions + reasoning + minADE)
+    │   ├── <video_id>_vis_data.npz     (visualization tensors)
+    │   └── <video_id>_overlay.mp4      (trajectory overlay video)
+    └── <run_id>_report.txt             (aggregate metrics report)
+
+COMPUTE:
+  - Model: Alpamayo-R1-10B (~22GB, bfloat16)
+  - GPU: A100 80GB (1 GPU)
+  - Inference: ~15-30s per video
+  - Python 3.12 + CUDA 12.1 + flash-attention
+
+INNOVATION: First integration of VLA trajectory prediction as an evaluation
+            metric for video inpainting quality in autonomous driving
+
+
+🌟 CONTRIBUTION #7: MASTER PIPELINE ORCHESTRATOR
+────────────────────────────────────────────────────────────────────────
+Created a unified three-stage master workflow that chains SAM2 → VideoPainter
+→ Alpamayo in a single HLX invocation with a shared run_id.
+
+FILES:
+- workflow_master.py (427 lines — master workflow definition)
+- scripts/build_and_run.sh (300 lines — master build/run script)
+- Dockerfile (54 lines — lightweight orchestrator container)
+- docker-compose.yaml (100 lines — master + optional local services)
+
+KEY FEATURES:
+1. Three-stage sequential execution:
+   - Stage 1 (sam2_stage): SAM2 segmentation in SAM2 container
+   - Stage 2 (vp_stage): VideoPainter editing in VP container
+   - Stage 3 (alpamayo_stage): VLA inference in Alpamayo container
+   - Data-dependency edges: SAM2→VP via run_id, VP→Alpamayo via gcs_path
+
+2. Container isolation:
+   - Each stage runs in its own specialized container image
+   - Master orchestrator is a lightweight Python 3.10-slim container
+   - No heavy ML dependencies in orchestrator (only gcsfs, hlx-wf)
+   - Each stage imports its own workflow module at runtime
+
+3. Unified build_and_run.sh:
+   - Builds all 4 Docker images (SAM2, VP, Alpamayo, Master)
+   - Tags with shared MASTER_RUN_ID (RUN_ID + timestamp)
+   - Pushes all images to Artifact Registry
+   - Submits master workflow with all parameters
+   - SKIP_BUILD=1 mode to reuse previously pushed images
+
+4. Multi-instruction VideoPainter support:
+   - 5 default lane instructions (single/double × white/yellow × solid/dashed)
+   - Each instruction generates its own output subfolder
+   - All instructions processed per video before moving to next video
+
+5. chunks:// URI scheme for SAM2 input:
+   - Format: chunks://<bucket>/<prefix>?start=N&end=M&per_chunk=K
+   - Resolves chunk_NNNN/ folders dynamically via gcsfs
+   - Configurable chunk range and files per chunk
+
+6. Comprehensive parameter forwarding:
+   - SAM2: video URIs, max frames
+   - VP: inference steps, guidance scale, strength, refine iters, temperature,
+     dilate size, mask feather, LoRA scale, seed, instructions
+   - Alpamayo: model ID, trajectory samples, video name filter
+   - All configurable via environment variables
+
+MASTER WORKFLOW PARAMETERS (workflow_master.master_pipeline_wf):
+  run_id                          Shared ID across all stages
+  sam2_video_uris                 chunks:// or gs:// input
+  sam2_max_frames                 Max frames per video (default: 150)
+  vp_video_editing_instructions   Instructions (|| separated or newlines)
+  vp_llm_model                    Qwen VLM path
+  vp_num_inference_steps          CogVideoX steps (default: 70)
+  vp_guidance_scale               Classifier-free guidance (default: 6.0)
+  vp_strength                     Inpainting strength (default: 1.0)
+  vp_caption_refine_iters         VLM refinement iterations (default: 10)
+  vp_caption_refine_temperature   VLM temperature (default: 0.1)
+  vp_dilate_size                  Mask dilation (default: 24)
+  vp_mask_feather                 Mask feathering (default: 8)
+  vp_keep_masked_pixels           Preserve original masked pixels
+  vp_img_inpainting_lora_scale    LoRA scale (default: 0.0)
+  vp_seed                         Random seed (default: 42)
+  alp_model_id                    Alpamayo model path
+  alp_num_traj_samples            Trajectory samples (default: 1)
+  alp_video_name                  Video filter ("auto" = all)
+
+INNOVATION: First end-to-end orchestration combining video segmentation,
+            inpainting, and VLA trajectory evaluation in a single workflow
+
+
+🌟 CONTRIBUTION #8: VIDEO QUALITY EVALUATION METRICS
+────────────────────────────────────────────────────────────────────────
+Integrated comprehensive numerical video quality metrics into the
+VideoPainter workflow for automated evaluation of inpainting results.
+
+LOCATION: generation/VideoPainter/workflow_vp.py (_evaluate_video function)
+
+METRICS COMPUTED:
+1. Full-frame metrics:
+   - PSNR (Peak Signal-to-Noise Ratio)
+   - SSIM (Structural Similarity Index)
+   - LPIPS (Learned Perceptual Image Patch Similarity)
+   - MSE (Mean Squared Error)
+   - MAE (Mean Absolute Error)
+   - Temporal Consistency (frame-to-frame stability)
+   - CLIP Score (text-video alignment, when caption available)
+
+2. Masked-region metrics (same metrics computed only in inpainted area):
+   - All of the above, computed only where mask > 0.5
+   - Enables measuring inpainting quality independent of background
+
+3. Quality assessment classification:
+   - EXCELLENT: PSNR > 40 + SSIM > 0.95 + LPIPS < 0.1
+   - GOOD: One of the above thresholds met
+   - MODERATE: Below thresholds
+
+4. Automatic upload: eval_{video_id}.txt saved alongside generated video in GCS
+
+INNOVATION: First automated per-video quality evaluation integrated directly
+            into the video inpainting workflow pipeline
+
+
+🌟 CONTRIBUTION #9: END-TO-END WORKFLOW ORCHESTRATION (UPDATED)
+────────────────────────────────────────────────────────────────────────
+Expanded the HLX workflow system from 5 to 8 workflows with the addition of
+the master orchestrator, Alpamayo VLA, and renamed/restructured workflow files.
+
+WORKFLOW FILES (UPDATED):
+1. workflow_master.py (NEW — master orchestrator)
+   - master_pipeline_wf: SAM2 → VP → Alpamayo
+   - sam2_stage, vp_stage, alpamayo_stage tasks
+   - Shared run_id across all stages
    
-2. segmentation/sam2/data_generation.py (workflow)
+2. segmentation/sam2/workflow_sam2.py (RENAMED from workflow.py)
+   - sam2_segmentation_wf: SAM2 video segmentation workflow
+   - run_sam2_segmentation: core task
+   - chunks:// URI resolution via _resolve_chunk_uri()
+   - GCS video download with caching
+   
+3. segmentation/sam2/data_generation.py (workflow)
    - FluxFill dataset generation workflow
    - VLM integration for captioning
    - Chunk-based video discovery
    
-3. segmentation/sam2/filter_fluxfill_dataset.py (workflow)
+4. segmentation/sam2/filter_fluxfill_dataset.py (workflow)
    - Dataset filtering workflow
    - Attribute-based selection
    - Quality control
    
-4. generation/VideoPainter/training_workflow.py
+5. generation/VideoPainter/training_workflow.py
    - FluxFill LoRA training workflow
    - Checkpoint management
    - Multi-stage training support
    
-5. generation/VideoPainter/workflow.py
-   - VideoPainter editing workflow
-   - Multi-instruction support
-   - VLM-guided refinement
+6. generation/VideoPainter/workflow_vp.py (RENAMED from workflow.py)
+   - videopainter_many_wf: multi-video, multi-instruction editing
+   - run_videopainter_edit_many: core task (1401 lines)
+   - Multi-instruction support (|| delimited or newline-separated)
+   - Per-video numerical evaluation (PSNR/SSIM/LPIPS/CLIP)
+   - VPVideoMetrics dataclass for per-video performance tracking
+   - Automatic sidecar artifact upload (JSON, debug images, refine logs)
+   
+7. vla/alpamayo/workflow_alpamayo.py (NEW)
+   - alpamayo_vla_inference_wf: VLA trajectory inference
+   - run_alpamayo_inference_task: core task
+   - VLAVideoMetrics dataclass with minADE tracking
+   - Comprehensive report generation with aggregate statistics
+   - FuseBucket-based video data and checkpoint mounting
 
-COMMON FEATURES:
-- FuseBucket mounts for efficient GCS access
-- Automatic retry logic
-- Resource management (ephemeral storage, GPU allocation)
-- Logging and monitoring
-- Parameterized execution
-
-BUILD SCRIPTS:
-  All workflows have corresponding build_and_run_*.sh scripts:
-  - Docker image building
-  - GCR pushing
-  - Environment configuration
-  - HLX workflow invocation
+BUILD SCRIPTS (UPDATED):
+  scripts/build_and_run.sh                  NEW — Master pipeline (builds all 4 images)
+  segmentation/sam2/scripts/build_and_run.sh
+  segmentation/sam2/scripts/build_and_run_training_data.sh
+  segmentation/sam2/scripts/build_and_run_sorting_data.sh
+  generation/VideoPainter/scripts/build_and_run.sh
+  generation/VideoPainter/scripts/build_and_run_training.sh
+  generation/VideoPainter/scripts/download_physicalai_data.sh  NEW
+  vla/alpamayo/scripts/build_and_run.sh     NEW — Standalone Alpamayo
 
 COMPUTE RESOURCES:
-  - A100 80GB GPUs (1-2 per task)
-  - 3-day maximum duration
+  - A100 80GB GPUs (1 per task, configurable)
+  - 3-day maximum duration per task
   - Maximum ephemeral storage
-  - Dedicated nodes
+  - Dedicated nodes for each stage
+
+DOCKER CONTAINERS (UPDATED):
+  1. Master Orchestrator: python:3.10-slim (lightweight, no GPU)
+  2. SAM2: pytorch/pytorch:2.1.0-cuda11.8-cudnn8-devel
+  3. VideoPainter: pytorch/pytorch:2.1.0-cuda11.8-cudnn8-devel
+  4. Alpamayo: nvidia/cuda:12.1.1-cudnn8-devel-ubuntu22.04 (Python 3.12)
 
 INNOVATION: Complete cloud-native workflow orchestration for multi-stage
-            video inpainting pipeline with automatic resource management
+            video inpainting and trajectory evaluation pipeline with
+            automatic resource management and end-to-end traceability
 
 ================================================================================
 4. PIPELINE COMPONENTS DETAIL
@@ -594,10 +824,31 @@ STAGE 2: Video Propagation (CogVideoX)
   6. Export final edited video
 
 Multi-GPU Strategy:
-  - Qwen VLM: cuda:1 (if 2 GPUs available)
+  - Qwen VLM: cuda:1 (if 2 GPUs available), or auto with unload
   - FluxFill: cuda:0
   - CogVideoX: cuda:0
   - Sequential execution with explicit model unloading
+  - VP_UNLOAD_QWEN_AFTER_USE=1 for single-GPU memory management
+
+Multi-Instruction Support (NEW):
+  - Multiple editing instructions per video (|| delimited or newline-separated)
+  - Each instruction gets its own output subfolder
+  - Default 5 instructions:
+    1. Single solid white continuous line
+    2. Double solid white continuous line
+    3. Single solid yellow continuous line
+    4. Double solid yellow continuous line
+    5. Single dashed white intermitted line
+  - All instructions include: "aligned exactly to the original lane positions
+    and perspective; keep road texture, lighting, and shadows unchanged"
+
+Numerical Evaluation (NEW):
+  - Per-video evaluation automatically after generation
+  - Full-frame metrics: PSNR, SSIM, LPIPS, MSE, MAE, Temporal Consistency
+  - Masked-region metrics: Same metrics computed only in inpainted area
+  - CLIP Score: Text-video alignment using instruction as caption
+  - Results saved as eval_{video_id}.txt alongside generated video
+  - Quality classification: EXCELLENT / GOOD / MODERATE
 
 Performance:
   - First frame: 10-30 seconds (depends on VLM iterations)
@@ -605,7 +856,74 @@ Performance:
   - Total throughput: ~10-15 videos per hour per GPU
 
 
-COMPONENT F: UTILITIES & HELPERS
+COMPONENT F: VLA TRAJECTORY EVALUATION (NEW — ALPAMAYO)
+────────────────────────────────────────────────────────
+
+Purpose: Evaluate impact of edited lane markings on autonomous driving
+         trajectory prediction using Vision-Language-Action models
+Input:   VideoPainter-edited videos + PhysicalAI-AV driving data
+Output:  Trajectory predictions, minADE metrics, reasoning traces,
+         overlay visualization videos
+
+Pipeline Stages:
+
+STAGE 1: Video-to-Dataset Bridge
+  1. Parse clip_id and camera_name from VP output filename
+     Pattern: <clip_id>.<camera_name>_vp_edit_sample0.mp4
+  2. Decode last 4 consecutive frames from VP video using PyAV
+  3. Detect VP video fps and compute matching time_step
+     (e.g., 8 fps → 0.125s time_step)
+  4. Load original clip from NVIDIA PhysicalAI-AV HuggingFace dataset
+     using matched time_step for temporal alignment
+  5. Replace inpainted camera's frames with VP-decoded frames
+     (resize if dimensions differ via bilinear interpolation)
+
+STAGE 2: VLA Inference
+  1. Build multi-camera input: 7 cameras × 4 frames = 28 images
+  2. Create chat-template messages via Alpamayo helper
+  3. Provide ego_history_xyz and ego_history_rot (16 timesteps)
+  4. Run model.sample_trajectories_from_data_with_vlm_rollout()
+     with top_p=0.98, temperature=0.6
+  5. Extract predicted trajectories (S × 64 × 3) and rotations
+  6. Extract chain-of-thought reasoning traces
+
+STAGE 3: Evaluation & Visualization
+  1. Compute minADE: min over S samples of mean L2 displacement
+     between predicted and ground-truth future XY trajectory
+  2. Save inference JSON with predictions, reasoning, temporal config
+  3. Save visualization NPZ with all tensors for offline plotting
+  4. Render overlay video:
+     - Projected predicted trajectories (blue) on camera view
+     - Projected ground-truth trajectory (red)
+     - Bird's-eye-view inset with ego history + future paths
+     - Progressive reveal mode for temporal unfolding
+     - FOV-specific projection (30°, 70°, 120° depending on camera)
+
+Camera Index Map:
+  camera_cross_left_120fov:  0
+  camera_front_wide_120fov:  1
+  camera_cross_right_120fov: 2
+  camera_rear_left_70fov:    3
+  camera_rear_tele_30fov:    4
+  camera_rear_right_70fov:   5
+  camera_front_tele_30fov:   6
+
+Output Structure:
+  alpamayo_output/<run_id>/
+    ├── <video_stem>/
+    │   ├── <video_stem>_inference.json   (predictions + reasoning + minADE)
+    │   ├── <video_stem>_vis_data.npz     (tensors for offline visualization)
+    │   └── <video_stem>_overlay.mp4      (trajectory overlay on video)
+    └── <run_id>_report.txt               (aggregate metrics report)
+
+Performance:
+  - Model loading: ~30-60s (one-time, reused across videos)
+  - Per-video inference: ~15-30s
+  - Per-video visualization: ~5-10s
+  - Total throughput: ~60-100 videos/hour (single A100 80GB)
+
+
+COMPONENT G: UTILITIES & HELPERS
 ─────────────────────────────────
 
 build_fluxfill_inpaint_csv.py:
@@ -679,6 +997,17 @@ DEEP LEARNING MODELS
    - Input: RGB image + text prompt
    - Output: Structured text responses
 
+6. Alpamayo-R1-10B (Vision-Language-Action Model) [NEW]
+   - Architecture: Multimodal transformer with trajectory diffusion head
+   - Parameters: 10B
+   - Provider: NVIDIA
+   - Task: Autonomous driving trajectory prediction with reasoning
+   - Input: Multi-camera images (7 views × 4 frames) + ego-motion history
+   - Output: Future trajectory predictions (S × 64 × 3) + chain-of-thought
+   - Inference: bfloat16 with flash-attention
+   - VRAM: ~22GB
+   - Dataset: NVIDIA PhysicalAI-Autonomous-Vehicles (HuggingFace streaming)
+
 HARDWARE REQUIREMENTS
 ─────────────────────
 Development:
@@ -712,25 +1041,59 @@ Container Registry: Artifact Registry ([REDACTED])
 GCS Bucket Structure:
   [GCS_BUCKET]/
     └── workspace/user/[USERNAME]/
+        ├── Input/
+        │   └── data_physical_ai/          (source driving videos)
+        │       └── camera_front_tele_30fov/
+        │           ├── chunk_0000/
+        │           ├── chunk_0001/
+        │           └── ... chunk_0199/
         ├── outputs/
-        │   ├── sam2_final_output/        (SAM2 results)
-        │   └── preprocessed_data_vp/     (VideoPainter input)
+        │   ├── sam2/<run_id>/             (SAM2 raw outputs)
+        │   ├── preprocessed_data_vp/<run_id>/ (VideoPainter input)
+        │   ├── vp/<run_id>/              (VideoPainter edited videos)
+        │   │   └── <instruction_folder>/
+        │   │       └── <video_id>/
+        │   │           ├── <video_id>_vp_edit_sample0.mp4
+        │   │           ├── <video_id>_vp_edit_sample0.json
+        │   │           ├── eval_<video_id>.txt
+        │   │           └── <video_id>_caption_refine/
+        │   └── alpamayo/<run_id>/         (Alpamayo predictions)
+        │       ├── <video_stem>/
+        │       │   ├── <video_stem>_inference.json
+        │       │   ├── <video_stem>_vis_data.npz
+        │       │   └── <video_stem>_overlay.mp4
+        │       └── <run_id>_report.txt
         └── Video_inpainting/
-            └── videopainter/
-                ├── ckpt/                  (Model checkpoints)
-                │   ├── CogVideoX-5b-I2V/
-                │   ├── flux_inp/
-                │   ├── VideoPainter/
-                │   └── vlm/
-                │       ├── Qwen2.5-VL-7B-Instruct/
-                │       └── Qwen2.5-VL-72B-Instruct/
-                └── training/
-                    ├── data/              (FluxFill datasets)
-                    └── trained_checkpoint/ (LoRA outputs)
+            ├── sam2_checkpoint/
+            │   └── checkpoints/
+            │       └── sam2.1_hiera_large.pt
+            ├── videopainter/
+            │   ├── ckpt/                  (Model checkpoints)
+            │   │   ├── CogVideoX-5b-I2V/
+            │   │   ├── flux_inp/
+            │   │   ├── VideoPainter/
+            │   │   └── vlm/
+            │   │       ├── Qwen2.5-VL-7B-Instruct/
+            │   │       └── Qwen2.5-VL-72B-Instruct/
+            │   └── training/
+            │       ├── data/              (FluxFill datasets)
+            │       └── trained_checkpoint/ (LoRA outputs)
+            └── vla/
+                └── alpamayo/
+                    └── checkpoints/
+                        └── alpamayo-r1-10b/  (Alpamayo model)
 
 DOCKER CONTAINERS
 ─────────────────
-1. SAM2 Container
+1. Master Orchestrator Container (NEW)
+   Base: python:3.10-slim
+   Purpose: Lightweight workflow graph serialisation (no GPU)
+   Additional:
+     - google-cloud-storage
+     - gcsfs
+     - hlx-wf
+   
+2. SAM2 Container
    Base: pytorch/pytorch:2.1.0-cuda11.8-cudnn8-devel
    Additional:
      - SAM2 installation (pip install -e .)
@@ -739,7 +1102,7 @@ DOCKER CONTAINERS
      - transformers (for Qwen)
      - qwen-vl-utils
    
-2. VideoPainter Container
+3. VideoPainter Container
    Base: pytorch/pytorch:2.1.0-cuda11.8-cudnn8-devel
    Additional:
      - Custom diffusers fork (VideoPainter branch)
@@ -749,18 +1112,44 @@ DOCKER CONTAINERS
      - accelerate
      - peft
 
+4. Alpamayo VLA Container (NEW)
+   Base: nvidia/cuda:12.1.1-cudnn8-devel-ubuntu22.04
+   Python: 3.12 (via deadsnakes PPA)
+   Additional:
+     - torch 2.8.0
+     - transformers 4.57.1
+     - flash-attn >= 2.8.3
+     - physical_ai_av >= 0.1.0
+     - accelerate, einops, av, hydra-core
+     - alpamayo_r1 (editable install from src/)
+     - hlx-wf
+   Note: Patches physical_ai_av egomotion.py for writable numpy arrays
+
 IMAGE TAGGING STRATEGY
 ──────────────────────
-Convention: {base_name}{run_suffix}:{timestamp}
+Convention: {base_name}{run_suffix}:{MASTER_RUN_ID}
+  where MASTER_RUN_ID = {RUN_ID}_{TIMESTAMP}
+
 Examples:
-  - sam2_container:latest
-  - videopainter_container:20260212T144052Z
-  - harimt_vptrained_ckpt_20260212_144012:20260212T150230Z
-  
+  - harimt_sam2:002_20260217_095447
+  - harimt_vpwithoutlora_5prompt_20260212_151908:002_20260217_095447
+  - alpamayo_vla_002_20260217_095447:002_20260217_095447
+  - master_pipeline:002_20260217_095447
+
+Registry: europe-west4-docker.pkg.dev/mb-adas-2015-p-a4db/research/
+
+Docker Image Names:
+  Master:   master_pipeline
+  SAM2:     harimt_sam2
+  VP:       harimt_vp{VP_RUN_SUFFIX}
+  Alpamayo: alpamayo_vla_{MASTER_RUN_ID}
+
 Purpose: 
-  - Avoid stale ':latest' pulls with unique timestamps
-  - Enable reproducibility and checkpoint traceability
-  - Automatic extraction of checkpoint timestamps for run suffixes
+  - Shared MASTER_RUN_ID tag across all images for a given pipeline run
+  - VP_RUN_SUFFIX encodes trained checkpoint timestamp for traceability
+  - Alpamayo image name includes MASTER_RUN_ID for unique identification
+  - SKIP_BUILD=1 mode allows reusing previously pushed images
+  - Each image also tagged with :latest for convenience
 
 ================================================================================
 6. WORKFLOW ORCHESTRATION (HLX)
@@ -780,8 +1169,35 @@ Key Features:
 WORKFLOW DEFINITIONS
 ────────────────────
 
+0. Master Pipeline Workflow (NEW)
+   File: workflow_master.py
+   Entry: master_pipeline_wf
+   
+   Chains three stages sequentially with shared run_id:
+   
+   @task sam2_stage:
+     compute: DedicatedNode(A100_80GB_1GPU)
+     container_image: SAM2_CONTAINER_IMAGE
+     mounts: FuseBucket (SAM2 checkpoints)
+     Calls: workflow_sam2.run_sam2_segmentation()
+   
+   @task vp_stage:
+     compute: DedicatedNode(A100_80GB_1GPU)
+     container_image: VP_CONTAINER_IMAGE
+     mounts: FuseBucket (VP ckpt, data, trained FluxFill, VLM 7B)
+     environment: VP_COG_DEVICE, VP_FLUX_DEVICE, VP_QWEN_DEVICE,
+                  VP_UNLOAD_QWEN_AFTER_USE, TRAINED_FLUXFILL_GCS_PATH
+     Calls: workflow_vp.run_videopainter_edit_many()
+   
+   @task alpamayo_stage:
+     compute: DedicatedNode(A100_80GB_1GPU)
+     container_image: ALPAMAYO_CONTAINER_IMAGE
+     mounts: FuseBucket (Alpamayo ckpt, VP output data)
+     environment: HF_TOKEN, PYTORCH_CUDA_ALLOC_CONF
+     Calls: workflow_alpamayo.run_alpamayo_inference_task()
+
 1. SAM2 Segmentation Workflow
-   File: segmentation/sam2/workflow.py
+   File: segmentation/sam2/workflow_sam2.py (RENAMED from workflow.py)
    Entry: sam2_segmentation_wf
    
    @task Configuration:
@@ -789,128 +1205,114 @@ WORKFLOW DEFINITIONS
      container_image: [SAM2_CONTAINER]
      mounts:
        - FuseBucket (SAM2 checkpoints)
-       - FuseBucket (input videos, optional)
      environment:
        PYTHONUNBUFFERED: "1"
    
    Parameters:
-     - video_uris: List[str]
      - run_id: str
+     - sam2_video_uris: str (default/chunks:///gs:///comma-separated)
+     - checkpoint_path: str (default: mounted checkpoint)
+     - model_config: str
+     - upload_to_gcp: bool = True
+     - upload_to_local: bool = False
      - max_frames: int = 150
    
-   Execution:
-     python process_vide_sam2_hlxwf.py \
-       --video-uris ${VIDEO_URIS} \
-       --checkpoint ${MOUNTED_CKPT} \
-       --run-id ${RUN_ID}
+   New Features:
+     - chunks:// URI resolution: _resolve_chunk_uri()
+       Format: chunks://<bucket>/<prefix>?start=N&end=M&per_chunk=K
+       Resolves chunk_NNNN/ subfolders via gcsfs.ls()
+     - GCS video download with local caching (/tmp/sam2_video_cache)
+     - Dual output: raw outputs + VP-preprocessed format
+     - Output paths: gs://…/outputs/sam2/<run_id>/ and
+                     gs://…/outputs/preprocessed_data_vp/<run_id>/
 
 2. FluxFill Dataset Generation Workflow
    File: segmentation/sam2/data_generation.py
    Entry: fluxfill_data_generation_wf
-   
-   @task Configuration:
-     compute: DedicatedNode(A100_80GB_1GPU)
-     container_image: [SAM2_CONTAINER]
-     mounts:
-       - FuseBucket (SAM2 checkpoints)
-       - FuseBucket (Qwen VLM 7B)
-       - FuseBucket (output destination)
-     
-   Parameters:
-     - source_gcs_prefix: str
-     - num_videos: int
-     - start_index: int
-     - output_run_id: str
-     - frame_numbers: str (comma-separated)
-     - chunk_start: int
-     - chunk_end: int
-   
-   Process:
-     1. List mp4s in chunk range
-     2. Download videos to local cache
-     3. Extract specified frames
-     4. Generate masks with SAM2
-     5. Caption with Qwen VLM
-     6. Assemble CSV dataset
-     7. Upload to GCS
+   (unchanged from previous version)
 
 3. Dataset Filtering Workflow
    File: segmentation/sam2/filter_fluxfill_dataset.py
    Entry: filter_fluxfill_dataset_wf
-   
-   @task Configuration:
-     compute: DedicatedNode(A100_80GB_1GPU)
-     container_image: [SAM2_CONTAINER]
-   
-   Parameters:
-     - input_dir: str (GCS or local)
-     - count: str (single/double/any)
-     - color: str (white/yellow/any)
-     - pattern: str (solid/dashed/any)
-     - suffix: str
-     - require_clear_road: int (0 or 1)
-   
-   Process:
-     1. Download input dataset if GCS
-     2. Parse train.csv
-     3. Filter rows by attributes
-     4. Copy matching images + masks
-     5. Write filtered train.csv
-     6. Upload to GCS if needed
+   (unchanged from previous version)
 
 4. FluxFill LoRA Training Workflow
    File: generation/VideoPainter/training_workflow.py
    Entry: fluxfill_lora_training_wf
+   (unchanged from previous version)
+
+5. VideoPainter Editing Workflow
+   File: generation/VideoPainter/workflow_vp.py (RENAMED from workflow.py)
+   Entry: videopainter_many_wf
    
    @task Configuration:
      compute: DedicatedNode(A100_80GB_1GPU)
      container_image: [VP_CONTAINER]
      mounts:
-       - FuseBucket (FluxFill checkpoint)
-       - FuseBucket (training dataset)
+       - FuseBucket (VideoPainter ckpt)
+       - FuseBucket (preprocessed data)
+       - FuseBucket (trained FluxFill LoRA)
+       - FuseBucket (Qwen VLM 7B)
+     environment:
+       VP_COG_DEVICE: "cuda:0"
+       VP_FLUX_DEVICE: "cuda:0"
+       VP_QWEN_DEVICE: "auto"
+       VP_UNLOAD_QWEN_AFTER_USE: "1"
    
-   Parameters:
-     - input_data_dir: str (GCS path to dataset)
-     - output_checkpoint_dir: str (GCS output base)
-     - run_id: str
-     - max_train_steps: int = 1000
-     - learning_rate: float = 1e-4
-   
-   Execution:
-     python train/train_fluxfill_inpaint_lora.py \
-       --train_data ${DATA_CSV} \
-       --pretrained_model_path ${FLUX_CKPT} \
-       --output_dir ${OUTPUT} \
-       --max_train_steps ${STEPS} \
-       --learning_rate ${LR}
+   New Features:
+     - Multi-instruction support:
+       * Multiple instructions via || delimiter or newlines
+       * Each instruction creates separate output subfolder
+       * lane_specs shorthand: "lane {count} {color} {pattern}"
+     - Per-video numerical evaluation:
+       * PSNR, SSIM, LPIPS, MSE, MAE, Temporal Consistency, CLIP Score
+       * Full-frame and masked-region metrics
+       * Automatic eval_{video_id}.txt upload
+     - VPVideoMetrics dataclass:
+       * Tracks generation time, upload time, GPU memory, RSS
+       * Written to per-instruction report file
+     - Sidecar artifact upload:
+       * FluxFill debug images (*_flux_i_img.png, *_flux_o_img.png)
+       * Caption refinement logs (*_caption_refine/)
+       * Generated-only video (*_generated.mp4)
+     - Source file archival for reproducibility
 
-5. VideoPainter Editing Workflow
-   File: generation/VideoPainter/workflow.py
-   Entry: videopainter_edit_wf
+6. Alpamayo VLA Inference Workflow (NEW)
+   File: vla/alpamayo/workflow_alpamayo.py
+   Entry: alpamayo_vla_inference_wf
    
    @task Configuration:
-     compute: DedicatedNode(A100_80GB_1GPU or A100_80GB_2GPU)
-     container_image: [VP_CONTAINER]
+     compute: DedicatedNode(A100_80GB_1GPU)
+     container_image: [ALPAMAYO_CONTAINER]
      mounts:
-       - FuseBucket (VideoPainter checkpoints)
-       - FuseBucket (Qwen VLM)
-       - FuseBucket (preprocessed data)
+       - FuseBucket (Alpamayo checkpoints)
+       - FuseBucket (VP output video data)
+     environment:
+       PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+       HF_HOME: "/root/.cache/huggingface"
+       HF_TOKEN: (passed from environment)
    
    Parameters:
-     - data_run_id: str
-     - instructions: str (|| separated)
-     - llm_model_size: str (7B/72B)
-     - flux_refine_max_attempts: int = 5
+     - video_data_gcs_path: str (GCS path to VP edited videos)
+     - output_run_id: str
+     - model_id: str (default: mounted checkpoint or HF repo)
+     - num_traj_samples: int = 1
+     - video_name: str = "auto" (filter by stem, or all)
    
    Process:
-     1. Symlink checkpoints
-     2. Load preprocessed videos
-     3. For each instruction:
-        a. First frame FluxFill generation
-        b. VLM-guided refinement loop
-        c. Video propagation with CogVideoX
-     4. Export edited videos
-     5. Upload to GCS
+     1. Symlink FuseBucket checkpoint → /workspace/alpamayo/checkpoints
+     2. Discover video files via FuseBucket mount (exclude _generated.mp4)
+     3. Load Alpamayo model ONCE (bfloat16, flash-attn)
+     4. For each video:
+        a. Parse clip_id + camera_name from filename
+        b. Decode VP frames (last 4 at native fps)
+        c. Load PhysicalAI-AV dataset with matched time_step
+        d. Replace camera frames with VP output
+        e. Run VLA inference → trajectories + reasoning
+        f. Compute minADE vs ground truth
+        g. Save JSON + NPZ + overlay video
+     5. Write aggregate report
+     6. Upload all outputs to GCS via gcsfs
 
 FUSEBUCKET MOUNTS
 ─────────────────
@@ -931,54 +1333,94 @@ WORKFLOW EXECUTION
 ──────────────────
 Command: hlx wf run {workflow_module}.{workflow_function}
 
-Example:
-  hlx wf run workflow.sam2_segmentation_wf \
-    --team [TEAM] \
-    --domain [DOMAIN] \
-    -p video_uris='["gs://bucket/video1.mp4"]' \
-    -p run_id=test_run_01
+Master Pipeline (recommended):
+  bash scripts/build_and_run.sh
+  # or with overrides:
+  RUN_ID=002 SAM2_CHUNK_END=9 bash scripts/build_and_run.sh
 
-Environment Variables:
-  - SAM2_CONTAINER_IMAGE: Override container image
-  - VP_CONTAINER_IMAGE: Override VideoPainter image
-  - DATA_RUN_ID: Specify data run identifier
+Individual Workflows:
+  # SAM2 only:
+  cd segmentation/sam2 && bash scripts/build_and_run.sh
+  
+  # VideoPainter only:
+  cd generation/VideoPainter && bash scripts/build_and_run.sh
+  
+  # Alpamayo only:
+  cd vla/alpamayo && HF_TOKEN="hf_xxx" bash scripts/build_and_run.sh
+
+  # Direct hlx invocation:
+  hlx wf run workflow_master.master_pipeline_wf \
+    --team-space research --domain prod \
+    --run_id "002_20260217_095447" \
+    --sam2_video_uris "chunks://bucket/prefix?start=0&end=19&per_chunk=1" \
+    --vp_video_editing_instructions "Single solid white continuous line..."
+
+Environment Variables (master build_and_run.sh):
+  - RUN_ID: Base run identifier (default: 002)
+  - SKIP_BUILD: Set to 1 to reuse pushed images
+  - SAM2_CHUNK_START/END: Chunk range (default: 0-19)
+  - SAM2_FILES_PER_CHUNK: Files per chunk (default: 1)
+  - SAM2_MAX_FRAMES: Max frames per video (default: 150)
+  - VIDEO_EDITING_INSTRUCTIONS: Multi-line or || delimited
+  - VP_NUM_INFERENCE_STEPS: CogVideoX steps (default: 70)
+  - VP_GUIDANCE_SCALE: Guidance scale (default: 6.0)
+  - VP_STRENGTH: Inpainting strength (default: 1.0)
+  - VP_CAPTION_REFINE_ITERS: VLM refinement (default: 10)
+  - VP_CAPTION_REFINE_TEMPERATURE: VLM temperature (default: 0.1)
+  - VP_DILATE_SIZE: Mask dilation (default: 24)
+  - VP_MASK_FEATHER: Mask feathering (default: 8)
+  - VP_IMG_INPAINTING_LORA_SCALE: LoRA scale (default: 0.0)
+  - VP_SEED: Random seed (default: 42)
+  - TRAINED_FLUXFILL_GCS_PATH: Trained LoRA checkpoint
+  - HF_TOKEN: HuggingFace token (needed by Alpamayo)
+  - ALPAMAYO_MODEL_ID: Alpamayo model path
+  - ALPAMAYO_NUM_TRAJ_SAMPLES: Trajectory samples (default: 1)
+  - ALPAMAYO_VIDEO_NAME: Video filter (default: auto)
 
 BUILD SCRIPTS
 ─────────────
-All workflows include build_and_run_*.sh scripts:
+Master Pipeline (scripts/build_and_run.sh):
+  1. Builds 4 Docker images: SAM2, VP, Alpamayo, Master
+  2. Tags all with shared MASTER_RUN_ID
+  3. Pushes to Google Artifact Registry
+  4. Exports container image env vars
+  5. Submits master_pipeline_wf via hlx wf run
+  
+  Features:
+    - SKIP_BUILD=1 to reuse images
+    - Auto-generates MASTER_RUN_ID = RUN_ID + timestamp
+    - Prints comprehensive configuration summary
+    - SAM2_EXPECTED_VIDEOS calculation for display
 
-1. Build Docker image locally
-2. Tag with remote registry path and unique timestamp
-3. Push to GCR
-4. Export environment variables
-5. Invoke hlx wf run with parameters
+Alpamayo Standalone (vla/alpamayo/scripts/build_and_run.sh):
+  1. Auto-discovers VP output folder matching RUN_ID
+     (gcloud storage ls + grep for matching prefix)
+  2. Builds and pushes Alpamayo image with RUN_TAG in name
+  3. Requires HF_TOKEN for PhysicalAI-AV streaming
+  4. Submits alpamayo_vla_inference_wf
 
-Example: scripts/build_and_run_training.sh
+Example (Master):
   #!/bin/bash
   set -euo pipefail
   
-  # Auto-generate run ID with timestamp
-  OUTPUT_RUN_ID="fluxfill_single_white_solid_clearroad_$(date -u +%Y%m%d_%H%M%S)"
-  REMOTE_IMAGE="..."
-  INPUT_DATA_DIR="..."
+  RUN_ID="${RUN_ID:-002}"
+  MASTER_RUN_ID="${RUN_ID}_$(date +%Y%m%d_%H%M%S)"
   
-  # Build and push with unique tag
-  RUN_TAG="$(date -u +%Y%m%dT%H%M%SZ)"
-  docker compose build
-  docker tag videopainter:latest "${REMOTE_IMAGE}:${RUN_TAG}"
-  docker push "${REMOTE_IMAGE}:${RUN_TAG}"
+  # Build all images
+  pushd segmentation/sam2 && docker compose build && popd
+  pushd generation/VideoPainter && docker compose build && popd
+  pushd vla/alpamayo && docker compose build && popd
+  docker compose build  # master
   
-  # Run workflow
-  export VP_CONTAINER_IMAGE="${REMOTE_IMAGE}:${RUN_TAG}"
-  hlx wf run training_workflow.fluxfill_lora_training_wf \
-    --team-space research --domain prod \
-    -p input_data_dir="${INPUT_DATA_DIR}" \
-    -p output_run_id="${OUTPUT_RUN_ID}"
-
-Image Tagging Strategy:
-  - Unique timestamp tags prevent stale ':latest' caching
-  - Run IDs include timestamps for checkpoint traceability
-  - VideoPainter run suffix extracted from checkpoint timestamp
+  # Tag and push all
+  docker tag sam2/frontend "${SAM2_TAGGED}"
+  docker push "${SAM2_TAGGED}" ...
+  
+  # Submit master workflow
+  hlx wf run workflow_master.master_pipeline_wf \
+    --run_id "${MASTER_RUN_ID}" \
+    --sam2_video_uris "${SAM2_VIDEO_URIS}" \
+    ...
 
 ================================================================================
 7. DATA GENERATION & PROCESSING
@@ -1220,6 +1662,23 @@ EVALUATION METHODOLOGY
    - Average refinement iterations
    - Processing time per video
 
+4. Automated Numerical Video Quality Metrics (NEW)
+   - PSNR (Peak Signal-to-Noise Ratio): pixel fidelity, full-frame + masked
+   - SSIM (Structural Similarity): perceptual structure preservation
+   - LPIPS (Learned Perceptual Image Patch Similarity): deep perceptual loss
+   - MSE / MAE: mean squared / absolute error
+   - Temporal Consistency: cosine similarity between consecutive frames
+   - CLIP Score: semantic alignment between instruction text and output frame
+   All metrics computed per-video via _evaluate_video() in workflow_vp.py
+   and uploaded as sidecar JSON artifacts alongside generated videos.
+
+5. VLA Trajectory Impact Assessment (NEW — Alpamayo)
+   - minADE (minimum Average Displacement Error): distance between
+     predicted and ground-truth ego-vehicle trajectories (metres)
+   - Computed per-video and aggregated across the run
+   - Ground truth from PhysicalAI-AV HuggingFace dataset
+   - Measures whether edited lane markings shift VLA driving behaviour
+
 RESULTS: FLUXFILL FIRST-FRAME GENERATION
 ─────────────────────────────────────────
 Test Set: 50 videos from Physical AI dataset
@@ -1347,6 +1806,50 @@ Our Method (LoRA + VLM refine)  | 4.6          | 4.4
 
 Improvement over baseline: +64% semantic accuracy, +38% visual quality
 
+AUTOMATED NUMERICAL QUALITY METRICS (NEW)
+──────────────────────────────────────────
+Per-video metrics computed automatically by workflow_vp.py after generation:
+
+Metric                  | Full-Frame | Masked Region | Notes
+------------------------|------------|---------------|------
+PSNR (dB)               | varies     | varies        | Higher = better
+SSIM                    | varies     | varies        | 1.0 = identical
+LPIPS                   | varies     | varies        | Lower = better
+Temporal Consistency    | varies     | —             | Cosine similarity
+CLIP Score              | varies     | —             | Instruction alignment
+
+Metrics are saved as JSON sidecar files (video_name_metrics.json) per video
+and aggregated in eval_results.json per workflow run. Both full-frame and
+masked-region variants are computed to isolate editing quality from
+background preservation.
+
+VLA TRAJECTORY EVALUATION (NEW — ALPAMAYO)
+──────────────────────────────────────────
+Alpamayo-R1-10B trajectory prediction on edited vs. original videos:
+
+  Metric: minADE (minimum Average Displacement Error, in metres)
+  
+  Protocol:
+  1. For each VP-edited video, parse clip_id and camera_name from filename
+  2. Stream matching clip from PhysicalAI-AV HuggingFace dataset
+  3. Replace original camera frames with VP-edited frames
+  4. Run VLA inference → predicted trajectory (x,y waypoints)
+  5. Compare predicted trajectory to ground-truth ego-motion
+  6. Compute minADE (average L2 distance over waypoints, min over samples)
+  
+  Output artifacts per video:
+  - inference_results.json (predicted waypoints, minADE, metadata)
+  - trajectory.npz (NumPy arrays for further analysis)
+  - overlay video (trajectory projected onto camera frames with BEV inset)
+  
+  Aggregate report:
+  - aggregate_report.json (mean/median minADE, per-video breakdown)
+  - Written to GCS: outputs/alpamayo/<run_id>/aggregate_report.json
+
+  A higher minADE (compared to unedited baseline) indicates the edited lane
+  markings caused the VLA to plan a different trajectory — quantifying the
+  perceptual impact of the lane editing on autonomous driving behaviour.
+
 ================================================================================
 10. TECHNICAL SPECIFICATIONS
 ================================================================================
@@ -1354,10 +1857,16 @@ Improvement over baseline: +64% semantic accuracy, +38% visual quality
 REPOSITORY STRUCTURE
 ────────────────────
 masterthesis_hk/
+├── workflow_master.py                      [NOVEL: Master pipeline orchestrator]
+├── Dockerfile                              [NOVEL: Lightweight orchestrator container]
+├── docker-compose.yaml                     [NOVEL: Master + optional local services]
+├── scripts/
+│   └── build_and_run.sh                    [NOVEL: Master build/run script]
+│
 ├── generation/
 │   └── VideoPainter/
 │       ├── infer/
-│       │   ├── edit_bench.py           [MODIFIED: FluxFill + VLM integration]
+│       │   ├── edit_bench.py               [MODIFIED: FluxFill + VLM integration]
 │       │   ├── edit_bench.sh
 │       │   ├── edit.py
 │       │   ├── inpaint.py
@@ -1369,29 +1878,57 @@ masterthesis_hk/
 │       │   ├── build_fluxfill_inpaint_csv.py   [UTILITY: Dataset creation]
 │       │   └── ...
 │       ├── scripts/
-│       │   ├── build_and_run.sh               [WORKFLOW: VideoPainter inference]
-│       │   └── build_and_run_training.sh      [WORKFLOW: LoRA training]
-│       ├── workflow.py                         [MODIFIED: HLX orchestration]
+│       │   ├── build_and_run.sh                [WORKFLOW: VP inference]
+│       │   ├── build_and_run_training.sh       [WORKFLOW: LoRA training]
+│       │   └── download_physicalai_data.sh     [UTILITY: Data download]
+│       ├── workflow_vp.py                      [MODIFIED: HLX orchestration, renamed]
 │       ├── training_workflow.py                [NOVEL: Training workflow]
 │       ├── Dockerfile
 │       ├── docker-compose.yaml
 │       └── README.md
 │
-└── segmentation/
-    └── sam2/
-        ├── process_videos_sam2.py              [NOVEL: SAM2 road segmentation]
-        ├── process_vide_sam2_hlxwf.py          [NOVEL: Workflow wrapper]
-        ├── workflow.py                         [NOVEL: SAM2 workflow]
-        ├── data_generation.py                  [NOVEL: Dataset generation]
-        ├── filter_fluxfill_dataset.py          [NOVEL: Dataset filtering]
+├── segmentation/
+│   └── sam2/
+│       ├── process_videos_sam2.py              [NOVEL: SAM2 road segmentation]
+│       ├── process_vide_sam2_hlxwf.py          [NOVEL: Workflow wrapper]
+│       ├── workflow_sam2.py                    [NOVEL: SAM2 workflow, renamed]
+│       ├── data_generation.py                  [NOVEL: Dataset generation]
+│       ├── filter_fluxfill_dataset.py          [NOVEL: Dataset filtering]
+│       ├── scripts/
+│       │   ├── build_and_run.sh                [WORKFLOW: SAM2 segmentation]
+│       │   ├── build_and_run_training_data.sh  [WORKFLOW: Dataset generation]
+│       │   └── build_and_run_sorting_data.sh   [WORKFLOW: Dataset filtering]
+│       ├── sam2/                               [SAM2 library]
+│       ├── Dockerfile
+│       ├── docker-compose.yaml
+│       ├── README_PIPELINE.md
+│       └── README.md
+│
+└── vla/
+    └── alpamayo/                               [NOVEL: Entire component]
+        ├── run_inference.py                    [NOVEL: VLA inference runner]
+        ├── visualize_video.py                  [NOVEL: Trajectory overlay renderer]
+        ├── workflow_alpamayo.py                [NOVEL: HLX workflow]
+        ├── download_checkpoints.py             [UTILITY: Model download]
         ├── scripts/
-        │   ├── build_and_run.sh                [WORKFLOW: SAM2 segmentation]
-        │   ├── build_and_run_training_data.sh  [WORKFLOW: Dataset generation]
-        │   └── build_and_run_sorting_data.sh   [WORKFLOW: Dataset filtering]
-        ├── sam2/                               [SAM2 library]
-        ├── Dockerfile
+        │   └── build_and_run.sh                [WORKFLOW: Alpamayo standalone]
+        ├── src/
+        │   └── alpamayo_r1/                    [Alpamayo model source]
+        │       ├── models/
+        │       │   └── alpamayo_r1.py
+        │       ├── load_physical_aiavdataset.py
+        │       ├── helper.py
+        │       ├── config.py
+        │       ├── geometry/
+        │       ├── diffusion/
+        │       ├── action_space/
+        │       └── test_inference.py
+        ├── notebooks/                          [Jupyter notebooks for analysis]
+        ├── npz/                                [Visualization data cache]
+        ├── checkpoints/                        [Model checkpoints (symlinked)]
+        ├── Dockerfile                          [Python 3.12, CUDA 12.1]
         ├── docker-compose.yaml
-        ├── README_PIPELINE.md                  [DOCUMENTATION]
+        ├── pyproject.toml
         └── README.md
 
 KEY FILES SUMMARY
@@ -1401,32 +1938,69 @@ KEY FILES SUMMARY
 [UTILITY] = Helper scripts
 
 Novel Files (Created):
-  1. segmentation/sam2/process_videos_sam2.py (1016 lines)
+  1. workflow_master.py (427 lines)
+     - Master pipeline orchestrator: SAM2 → VP → Alpamayo
+     - Three @task functions + @workflow
+     - Shared run_id propagation
+  
+  2. segmentation/sam2/process_videos_sam2.py (1016 lines)
      - Core SAM2 video processing logic
      - Road-specific point grid
      - VideoPainter output format
   
-  2. segmentation/sam2/data_generation.py (964 lines)
+  3. segmentation/sam2/workflow_sam2.py (442 lines, renamed from workflow.py)
+     - SAM2 HLX workflow with chunks:// URI resolution
+     - GCS video caching and download
+  
+  4. segmentation/sam2/data_generation.py (964 lines)
      - End-to-end dataset generation pipeline
      - VLM integration for captions
      - GCS chunk-based processing
   
-  3. segmentation/sam2/filter_fluxfill_dataset.py (725 lines)
+  5. segmentation/sam2/filter_fluxfill_dataset.py (725 lines)
      - Semantic attribute filtering
      - Multi-criteria dataset curation
      - Quality control logic
   
-  4. generation/VideoPainter/train/train_fluxfill_inpaint_lora.py (440 lines)
+  6. generation/VideoPainter/train/train_fluxfill_inpaint_lora.py (440 lines)
      - LoRA training implementation
      - Custom CSV dataset loader
      - Accelerate integration
   
-  5. generation/VideoPainter/training_workflow.py (359 lines)
+  7. generation/VideoPainter/training_workflow.py (371 lines)
      - HLX workflow for training
      - GCS checkpoint management
   
-  6. All workflow orchestration files (5+ scripts)
-  7. All build_and_run_*.sh scripts (6 scripts)
+  8. vla/alpamayo/run_inference.py (469 lines)
+     - Alpamayo VLA inference on VP-edited videos
+     - clip_id/camera parsing from VP filenames
+     - PhysicalAI-AV dataset loading with temporal alignment
+     - minADE computation and visualization
+  
+  9. vla/alpamayo/workflow_alpamayo.py (550 lines)
+     - HLX workflow for Alpamayo VLA inference
+     - VLAVideoMetrics dataclass
+     - Aggregate report generation
+     - FuseBucket video data mounting
+  
+  10. vla/alpamayo/visualize_video.py (517 lines)
+      - Trajectory overlay rendering on camera views
+      - 3D→2D projection with FOV-specific intrinsics
+      - Bird's-eye-view inset rendering
+      - Progressive reveal mode
+  
+  11. vla/alpamayo/download_checkpoints.py (checkpoint download utility)
+  
+  12. scripts/build_and_run.sh (300 lines)
+      - Master build/run script: builds all 4 images + submits workflow
+  
+  13. vla/alpamayo/scripts/build_and_run.sh (standalone Alpamayo)
+  
+  14. Dockerfile (54 lines) — Master orchestrator container
+  
+  15. docker-compose.yaml (100 lines) — Master + optional local services
+  
+  16. All other workflow orchestration files (build_and_run_*.sh scripts)
 
 Modified Files:
   1. generation/VideoPainter/infer/edit_bench.py (1639 lines)
@@ -1435,18 +2009,43 @@ Modified Files:
      - Multi-GPU orchestration (~100 lines)
      - Mask processing utilities (~100 lines)
   
-  2. generation/VideoPainter/workflow.py (1168 lines)
-     - VLM mount configuration
-     - Multi-instruction support
-     - FluxFill device management
+  2. generation/VideoPainter/workflow_vp.py (1401 lines, renamed from workflow.py)
+     - Multi-instruction support (|| delimited)
+     - Per-video numerical evaluation (PSNR/SSIM/LPIPS/CLIP)
+     - VPVideoMetrics and run reporting
+     - Sidecar artifact upload
+     - Caption refinement artifact archival
+     - Source file upload for reproducibility
+     - _evaluate_video() function for automated metrics
 
 CONFIGURATION FILES
 ───────────────────
-1. segmentation/sam2/docker-compose.yaml
+0. Dockerfile (root — Master Orchestrator)
+   Base: python:3.10-slim
+   Installs: gcsfs, google-cloud-storage, hlx-wf wheel
+   Copies: workflow_master.py
+   Entrypoint: sleep infinity (HLX runs workflow internally)
+
+0b. docker-compose.yaml (root — Master Pipeline)
+   Services: master-pipeline-service
+   Volumes: /workspace mapped
+   Environment: RUN_ID, GCS paths, container image refs
+
+1. segmentation/sam2/Dockerfile
+   Base: pytorch/pytorch:2.1.0-cuda11.8-cudnn8-devel
+   Installs: SAM2 (editable), gcsfs, hlx-wf wheel, av, decord
+   Copies: workflow_sam2.py, process_videos_sam2.py, etc.
+
+1b. segmentation/sam2/docker-compose.yaml
    Services: frontend (SAM2 + transformers)
    Build: FROM pytorch/pytorch:2.1.0-cuda11.8-cudnn8-devel
    
-2. generation/VideoPainter/docker-compose.yaml
+2. generation/VideoPainter/Dockerfile
+   Base: pytorch/pytorch:2.1.0-cuda11.8-cudnn8-devel
+   Installs: custom diffusers, transformers, accelerate, peft, gcsfs
+   Copies: workflow_vp.py, infer/, train/, scripts/
+
+2b. generation/VideoPainter/docker-compose.yaml
    Services: frontend (VideoPainter + diffusers)
    Build: FROM pytorch/pytorch:2.1.0-cuda11.8-cudnn8-devel
    
@@ -1462,19 +2061,54 @@ CONFIGURATION FILES
      - pillow
      - gcsfs
 
+4. vla/alpamayo/Dockerfile (NEW)
+   Base: nvidia/cuda:12.1.1-devel-ubuntu22.04
+   Python: 3.12 (built from deadsnakes PPA)
+   Installs: torch==2.8.0 (cu121), transformers==4.57.1, flash-attn>=2.8.3,
+             physical_ai_av, einops, hydra-core, av, gcsfs, hlx-wf wheel
+   Patches: egomotion.py for writable numpy arrays (np.asarray → np.array)
+   Copies: workflow_alpamayo.py, run_inference.py, visualize_video.py,
+           download_checkpoints.py, src/
+
+4b. vla/alpamayo/docker-compose.yaml (NEW)
+   Services: alpamayo-inference
+   Runtime: nvidia (GPU passthrough)
+   Volumes: checkpoints, data mounts
+   Environment: HF_TOKEN, MODEL_ID, OUTPUT_DIR
+
 ENVIRONMENT VARIABLES
 ─────────────────────
+Master Pipeline:
+  RUN_ID                          Base run identifier (default: 002)
+  SKIP_BUILD                      Set to 1 to reuse pushed images
+  SAM2_CHUNK_START/END            Chunk range for SAM2 input
+  SAM2_FILES_PER_CHUNK            Files per chunk (default: 1)
+  SAM2_MAX_FRAMES                 Max frames per video (default: 150)
+  VIDEO_EDITING_INSTRUCTIONS      Multi-line or || delimited
+  HF_TOKEN                        HuggingFace token for Alpamayo
+
 SAM2 Workflows:
   SAM2_CONTAINER_IMAGE        Container image override
-  SAM2_OUTPUT_TIMESTAMP       Run identifier
-  VP_PREPROCESS_FPS           Output FPS for VideoPainter
+  SAM2_OUTPUT_BASE            GCS base for raw SAM2 outputs
+  SAM2_PREPROCESSED_OUTPUT_BASE  GCS base for VP-preprocessed outputs
 
 VideoPainter Workflows:
   VP_CONTAINER_IMAGE          Container image override (with timestamp tag)
   VP_RUN_SUFFIX               Image naming suffix (extracted from checkpoint timestamp)
   DATA_RUN_ID                 SAM2 output run identifier to use
+  VP_OUTPUT_BASE              GCS base for VP outputs
   LLM_MODEL_SIZE              Qwen model size (7B/72B)
   TRAINED_FLUXFILL_GCS_PATH   Path to trained LoRA checkpoint
+  VP_COG_DEVICE               CogVideoX device (default: cuda:0)
+  VP_FLUX_DEVICE              FluxFill device (default: cuda:0)
+  VP_QWEN_DEVICE              Qwen VLM device (default: auto)
+  VP_UNLOAD_QWEN_AFTER_USE    Unload VLM after caption (default: 1)
+
+Alpamayo Workflows:
+  ALPAMAYO_CONTAINER_IMAGE    Container image override
+  ALPAMAYO_OUTPUT_BASE        GCS prefix for outputs (no gs:// scheme)
+  ALPAMAYO_VIDEO_DATA_PREFIX  GCS prefix where VP videos live
+  HF_TOKEN                    HuggingFace token for PhysicalAI-AV streaming
 
 Training:
   INPUT_DATA_DIR              GCS dataset path
@@ -1490,9 +2124,25 @@ Inference:
   CAPTION_REFINE_ITERS        VLM refinement iterations (default: 10)
   CAPTION_REFINE_TEMPERATURE  VLM temperature (default: 0.1)
   VP_STRENGTH                 Inpainting strength (default: 1.0)
+  VP_NUM_INFERENCE_STEPS      CogVideoX steps (default: 70)
+  VP_GUIDANCE_SCALE           Classifier-free guidance (default: 6.0)
+  VP_DILATE_SIZE              Mask dilation pixels (default: 24)
+  VP_MASK_FEATHER             Mask feather pixels (default: 8)
+  VP_KEEP_MASKED_PIXELS       Preserve original masked pixels (default: True)
+  VP_IMG_INPAINTING_LORA_SCALE  LoRA scale (default: 0.0)
 
 COMMAND-LINE INTERFACES
 ───────────────────────
+0. Master Pipeline (End-to-End):
+   bash scripts/build_and_run.sh
+   
+   # With overrides:
+   RUN_ID=003 \
+   SAM2_CHUNK_START=0 SAM2_CHUNK_END=9 \
+   VP_CAPTION_REFINE_ITERS=5 \
+   HF_TOKEN="hf_xxx" \
+   bash scripts/build_and_run.sh
+
 1. SAM2 Video Processing:
    python process_videos_sam2.py \
      --input_uris video1.mp4 video2.mp4 \
@@ -1540,15 +2190,43 @@ COMMAND-LINE INTERFACES
    Note: Environment variables can override defaults:
    CAPTION_REFINE_ITERS=5 VP_STRENGTH=0.85 bash scripts/build_and_run.sh
 
+6. Alpamayo VLA Inference (NEW):
+   # Standalone:
+   python run_inference.py \
+     --video_path /path/to/vp_edited_video.mp4 \
+     --output_dir /path/to/output \
+     --model_id nvidia/Alpamayo-R1-10B \
+     --num_traj_samples 1
+   
+   # Via build script (auto-discovers VP output):
+   HF_TOKEN="hf_xxx" bash scripts/build_and_run.sh
+   
+   # Via HLX workflow:
+   hlx wf run workflow_alpamayo.alpamayo_vla_inference_wf \
+     --video_data_gcs_path "gs://bucket/outputs/vp/run_001/" \
+     --output_run_id "alp_run_001" \
+     --model_id "/workspace/alpamayo/checkpoints/alpamayo-r1-10b" \
+     --num_traj_samples 1 \
+     --video_name "auto"
+
 DEPENDENCIES & VERSIONS
 ───────────────────────
-Core:
+Core (SAM2 + VideoPainter containers):
   Python: 3.10
   PyTorch: 2.1.0+cu118
   CUDA: 11.8
   cuDNN: 8
 
-Key Libraries:
+Core (Alpamayo container):
+  Python: 3.12
+  PyTorch: 2.8.0+cu121
+  CUDA: 12.1
+  flash-attn: >= 2.8.3
+
+Core (Master Orchestrator container):
+  Python: 3.10-slim (no CUDA)
+
+Key Libraries (SAM2 + VideoPainter):
   diffusers: 0.31.0.dev0 (custom fork)
   transformers: latest (from source)
   accelerate: 0.25.0+
@@ -1560,6 +2238,19 @@ Key Libraries:
   torch: 2.1.0+
   torchvision: 0.16.0+
 
+Key Libraries (Alpamayo — NEW):
+  transformers: 4.57.1
+  physical_ai_av: >= 0.1.0 (NVIDIA PhysicalAI-AV dataset API)
+  flash-attn: >= 2.8.3 (GPU-accelerated attention)
+  einops: >= 0.8.0
+  hydra-core: >= 1.3
+  av: >= 16.0.1 (PyAV video decoder)
+  psutil: >= 5.9
+  gcsfs: 2023.9.0+
+  scikit-image: >= 0.20.0 (SSIM computation)
+  lpips: >= 0.1.4 (perceptual similarity)
+  open_clip_torch: >= 2.0.0 (CLIP score)
+
 Model Checkpoints:
   SAM2: sam2.1_hiera_large.pt (305M params)
   CogVideoX: CogVideoX-5b-I2V (5B params)
@@ -1567,6 +2258,7 @@ Model Checkpoints:
   FluxFill: FLUX.1-Fill-dev (2.8B params)
   Qwen: Qwen2.5-VL-7B-Instruct (7B params)
          Qwen2.5-VL-72B-Instruct (72B params)
+  Alpamayo: Alpamayo-R1-10B (10B params, bfloat16, ~20GB) (NEW)
 
 REPRODUCIBILITY
 ───────────────
@@ -1594,6 +2286,19 @@ To reproduce this work:
    # Set TRAINED_FLUXFILL_GCS_PATH to your checkpoint location
    TRAINED_FLUXFILL_GCS_PATH="workspace/user/.../fluxfill_single_white_solid_clearroad_YYYYMMDD_HHMMSS" \
    bash scripts/build_and_run.sh
+8. Download Alpamayo checkpoint (NEW):
+   cd ../../vla/alpamayo
+   python download_checkpoints.py   # downloads nvidia/Alpamayo-R1-10B
+   # Or use HuggingFace CLI: huggingface-cli download nvidia/Alpamayo-R1-10B
+9. Run Alpamayo VLA inference on VP outputs (NEW):
+   HF_TOKEN="hf_xxx" bash scripts/build_and_run.sh
+   # Automatically discovers latest VP output folder via gcloud storage ls
+
+FULL END-TO-END (alternative):
+   # Run all stages (SAM2 → VideoPainter → Alpamayo) with a single command:
+   RUN_ID=001 HF_TOKEN="hf_xxx" bash scripts/build_and_run.sh
+   # From the repository root — builds all 4 containers, pushes to Artifact
+   # Registry, and submits master_pipeline_wf which chains all 3 stages.
 
 Random Seeds:
   - PyTorch: set_seed(42) in training scripts
@@ -1606,6 +2311,8 @@ Key Configuration Updates:
   - Epoch-based training instead of fixed steps
   - More frequent checkpointing (every 100 steps)
   - Automatic timestamp-based run IDs for traceability
+  - Master pipeline shared run_id across all stages (NEW)
+  - Automated VP output discovery for Alpamayo (NEW)
 
 ================================================================================
                            CONCLUSIONS
@@ -1614,7 +2321,8 @@ Key Configuration Updates:
 SUMMARY OF CONTRIBUTIONS
 ────────────────────────
 This master thesis successfully implemented a complete end-to-end pipeline for
-automated lane marking generation and editing in autonomous vehicle footage.
+automated lane marking generation, editing, and downstream impact assessment
+in autonomous vehicle footage.
 
 Key Achievements:
 1. ✅ Integrated FluxFill image inpainting with VideoPainter framework
@@ -1625,6 +2333,10 @@ Key Achievements:
 6. ✅ Trained domain-specific LoRA models for lane marking generation
 7. ✅ Achieved 64% improvement in semantic correctness
 8. ✅ Deployed on cloud infrastructure with HLX workflow orchestration
+9. ✅ Integrated Alpamayo-R1-10B VLA for trajectory impact assessment (NEW)
+10. ✅ Created master pipeline orchestrator chaining SAM2→VP→Alpamayo (NEW)
+11. ✅ Implemented automated per-video quality metrics (PSNR/SSIM/LPIPS/CLIP) (NEW)
+12. ✅ Built multi-instruction editing support for diverse lane variants (NEW)
 
 TECHNICAL IMPACT
 ────────────────
@@ -1633,6 +2345,13 @@ TECHNICAL IMPACT
 - Automated dataset generation from autonomous vehicle data
 - Scalable cloud deployment with efficient GCS integration
 - Reusable components for future video editing research
+- First closed-loop pipeline connecting video generation to VLA trajectory
+  prediction for measuring downstream autonomous driving impact (NEW)
+- Automated numerical quality assessment (PSNR, SSIM, LPIPS, CLIP Score,
+  Temporal Consistency) for generated video frames (NEW)
+- minADE trajectory metric for quantifying VLA perception shift (NEW)
+- Master orchestrator enabling reproducible end-to-end runs with shared
+  run identifiers across 4 containerised stages (NEW)
 
 FUTURE WORK
 ───────────
@@ -1642,14 +2361,26 @@ FUTURE WORK
 4. Larger LoRA training datasets (50,000+ samples)
 5. Multi-modal control (text + sketch + reference image)
 6. Temporal consistency improvements for longer videos
+7. Multi-camera VLA evaluation (all 6 nuPlan cameras simultaneously) (NEW)
+8. Comparative VLA study (Alpamayo vs. other driving foundation models) (NEW)
+9. Trajectory-conditioned video re-generation feedback loop (NEW)
+10. Fine-tuning VLA on domain-shifted synthetic lane data (NEW)
 
 ================================================================================
                            END OF DOCUMENT
 ================================================================================
 
-Last Updated: February 12, 2026
+Last Updated: February 17, 2026
 
 Key Recent Updates:
+  - Added Alpamayo-R1-10B VLA trajectory prediction stage (NEW)
+  - Created master pipeline orchestrator (workflow_master.py) (NEW)
+  - Multi-instruction VideoPainter editing (5 lane variants) (NEW)
+  - Per-video numerical evaluation metrics (PSNR/SSIM/LPIPS/CLIP) (NEW)
+  - chunks:// URI scheme for SAM2 chunk-based input (NEW)
+  - 4 Docker containers (Master + SAM2 + VP + Alpamayo) (NEW)
+  - Trajectory overlay visualization with BEV inset (NEW)
+  - minADE trajectory metric for VLA impact assessment (NEW)
   - Improved training hyperparameters for better stability
   - Epoch-based training (5 epochs default, configurable)
   - Automatic timestamp-based checkpoint naming

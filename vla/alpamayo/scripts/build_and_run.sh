@@ -107,8 +107,8 @@ echo "Building Docker image..."
 cd "$(dirname "$0")/.."
 docker compose build
 
-# Tag the image for Google Artifact Registry
-REMOTE_IMAGE="europe-west4-docker.pkg.dev/mb-adas-2015-p-a4db/research/alpamayo_vla"
+# Tag the image for Google Artifact Registry (include RUN_TAG in image name)
+REMOTE_IMAGE="europe-west4-docker.pkg.dev/mb-adas-2015-p-a4db/research/alpamayo_vla_${RUN_TAG}"
 REMOTE_IMAGE_TAGGED="${REMOTE_IMAGE}:${RUN_TAG}"
 
 echo "Tagging image: ${REMOTE_IMAGE_TAGGED}"
@@ -134,7 +134,7 @@ hlx wf run \
   --team-space research \
   --domain prod \
   --execution-name "alpamayo-vla-${RUN_TAG//_/-}" \
-  workflow.alpamayo_vla_inference_wf \
+  workflow_alpamayo.alpamayo_vla_inference_wf \
   --video_data_gcs_path "${VIDEO_DATA_GCS_PATH}" \
   --output_run_id "${RUN_TAG}" \
   --model_id "${MODEL_ID}" \

@@ -41,6 +41,7 @@ VLA_OUTPUT_PREFIX = os.environ.get(
 
 # Container image (set by build_and_run.sh)
 REMOTE_IMAGE_DEFAULT = "europe-west4-docker.pkg.dev/mb-adas-2015-p-a4db/research/alpamayo_vla"
+# The build_and_run.sh script sets ALPAMAYO_CONTAINER_IMAGE with RUN_TAG in the image name
 CONTAINER_IMAGE = os.environ.get("ALPAMAYO_CONTAINER_IMAGE", f"{REMOTE_IMAGE_DEFAULT}:latest")
 
 # Compute node - A100_40GB no longer offered; use A100_80GB instead
@@ -177,8 +178,20 @@ def _stage_video_data(video_gcs_path: str, video_name: str = "auto") -> list[str
     for ext in [".mp4", ".avi", ".mov", ".mkv"]:
         video_files.extend(list(Path(fuse_path).rglob(f"*{ext}")))
 
+    # Exclude VP sidecar files (*_generated.mp4 = side-by-side comparison videos)
+    video_files = [
+        p for p in video_files
+        if not p.stem.endswith("_generated")
+    ]
+
     video_paths = sorted(str(p) for p in video_files)
-    logger.info(f"Found {len(video_paths)} video files (before filtering)")
+    logger.info(f"Found {len(video_paths)} video files (after excluding _generated sidecars)")
+
+    # Log first few discovered paths for debugging
+    for vp in video_paths[:5]:
+        logger.info(f"  Discovered: {vp}")
+    if len(video_paths) > 5:
+        logger.info(f"  ... and {len(video_paths) - 5} more")
 
     # Optional: filter to a single video by stem name
     if video_name and video_name.lower() != "auto":
