@@ -39,7 +39,7 @@ cd "${REPO_ROOT}"
 GCS_BUCKET="mbadas-sandbox-research-9bb9c7f"
 
 RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-RUN_ID="${RUN_ID:-002}"
+RUN_ID="${RUN_ID:-003}"
 MASTER_RUN_ID="${RUN_ID}_${RUN_TIMESTAMP}"
 
 # Skip docker builds (reuse previously pushed images)
