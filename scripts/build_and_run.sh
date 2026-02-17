@@ -20,10 +20,14 @@
 # A single RUN_ID + RUN_TIMESTAMP is shared across all stages.
 #
 # Usage:
-#   bash scripts/build_and_run.sh                      # defaults
+#   bash scripts/build_and_run.sh                      # defaults (all 3 stages)
 #   RUN_ID=002 bash scripts/build_and_run.sh           # custom run id
 #   SAM2_CHUNK_END=9 bash scripts/build_and_run.sh     # fewer chunks
 #   SKIP_BUILD=1 bash scripts/build_and_run.sh         # reuse images
+#
+# Resume from a specific stage (skip earlier stages):
+#   START_STAGE=2 SAM2_DATA_RUN_ID=003_20260217_120000 bash scripts/build_and_run.sh
+#   START_STAGE=3 VP_OUTPUT_GCS_PATH=gs://…/outputs/vp/003_…/ bash scripts/build_and_run.sh
 # ==================================================================================
 
 set -euo pipefail
@@ -44,6 +48,15 @@ MASTER_RUN_ID="${RUN_ID}_${RUN_TIMESTAMP}"
 
 # Skip docker builds (reuse previously pushed images)
 SKIP_BUILD="${SKIP_BUILD:-0}"
+
+# Start from a specific stage (1=SAM2, 2=VP, 3=Alpamayo)
+START_STAGE="${START_STAGE:-2}"
+
+# When START_STAGE>=2, provide the SAM2 run_id whose preprocessed data to reuse
+SAM2_DATA_RUN_ID="${SAM2_DATA_RUN_ID:-003_20260217_162441}"
+
+# When START_STAGE>=3, provide the VP output GCS path to reuse
+VP_OUTPUT_GCS_PATH="${VP_OUTPUT_GCS_PATH:-}"
 
 # ==============================================================================
 # STAGE 1: SAM2 CONFIGURATION
@@ -144,6 +157,7 @@ MASTER_TAGGED="${MASTER_REMOTE_IMAGE}:${MASTER_RUN_ID}"
 # ==============================================================================
 # PRINT CONFIGURATION SUMMARY
 # ==============================================================================
+STAGE_NAMES=("" "SAM2" "VideoPainter" "Alpamayo")
 echo "================================================================================"
 echo " MASTER PIPELINE — BUILD AND RUN"
 echo "================================================================================"
@@ -151,6 +165,13 @@ echo ""
 echo "  RUN_ID:             ${RUN_ID}"
 echo "  MASTER_RUN_ID:      ${MASTER_RUN_ID}"
 echo "  TIMESTAMP:          ${RUN_TIMESTAMP}"
+echo "  START_STAGE:        ${START_STAGE} (${STAGE_NAMES[${START_STAGE}]})"
+if [[ "${START_STAGE}" -ge 2 && -n "${SAM2_DATA_RUN_ID}" ]]; then
+    echo "  SAM2_DATA_RUN_ID:   ${SAM2_DATA_RUN_ID}  (reusing SAM2 output)"
+fi
+if [[ "${START_STAGE}" -ge 3 && -n "${VP_OUTPUT_GCS_PATH}" ]]; then
+    echo "  VP_OUTPUT_GCS_PATH: ${VP_OUTPUT_GCS_PATH}  (reusing VP output)"
+fi
 echo ""
 echo " ── Stage 1: SAM2 Segmentation ──────────────────────────────────────────────"
 echo "  Input:              chunks ${SAM2_CHUNK_START}–${SAM2_CHUNK_END} (${SAM2_TOTAL_CHUNKS} chunks × ${SAM2_FILES_PER_CHUNK} files ≈ ${SAM2_EXPECTED_VIDEOS} videos)"
@@ -192,29 +213,37 @@ else
     echo "Building and pushing Docker images …"
     echo ""
 
-    # ── Stage 1: SAM2 ────────────────────────────────────────────────────────
-    echo "▸ Building SAM2 image …"
-    pushd segmentation/sam2 > /dev/null
-    docker compose build
-    docker tag "${SAM2_LOCAL_IMAGE}" "${SAM2_TAGGED}"
-    docker tag "${SAM2_LOCAL_IMAGE}" "${SAM2_REMOTE_IMAGE}:latest"
-    docker push "${SAM2_TAGGED}"
-    docker push "${SAM2_REMOTE_IMAGE}:latest"
-    popd > /dev/null
-    echo "  ✓ SAM2 image pushed: ${SAM2_TAGGED}"
+    # ── Stage 1: SAM2 (only when START_STAGE=1) ─────────────────────────────
+    if [[ "${START_STAGE}" -le 1 ]]; then
+        echo "▸ Building SAM2 image …"
+        pushd segmentation/sam2 > /dev/null
+        docker compose build
+        docker tag "${SAM2_LOCAL_IMAGE}" "${SAM2_TAGGED}"
+        docker tag "${SAM2_LOCAL_IMAGE}" "${SAM2_REMOTE_IMAGE}:latest"
+        docker push "${SAM2_TAGGED}"
+        docker push "${SAM2_REMOTE_IMAGE}:latest"
+        popd > /dev/null
+        echo "  ✓ SAM2 image pushed: ${SAM2_TAGGED}"
+    else
+        echo "  ⏭ SAM2 build skipped (START_STAGE=${START_STAGE})"
+    fi
 
-    # ── Stage 2: VideoPainter ─────────────────────────────────────────────────
-    echo "▸ Building VideoPainter image …"
-    pushd generation/VideoPainter > /dev/null
-    docker compose build
-    docker tag "${VP_LOCAL_IMAGE}" "${VP_TAGGED}"
-    docker tag "${VP_LOCAL_IMAGE}" "${VP_REMOTE_IMAGE}:latest"
-    docker push "${VP_TAGGED}"
-    docker push "${VP_REMOTE_IMAGE}:latest"
-    popd > /dev/null
-    echo "  ✓ VP image pushed: ${VP_TAGGED}"
+    # ── Stage 2: VideoPainter (when START_STAGE<=2) ───────────────────────────
+    if [[ "${START_STAGE}" -le 2 ]]; then
+        echo "▸ Building VideoPainter image …"
+        pushd generation/VideoPainter > /dev/null
+        docker compose build
+        docker tag "${VP_LOCAL_IMAGE}" "${VP_TAGGED}"
+        docker tag "${VP_LOCAL_IMAGE}" "${VP_REMOTE_IMAGE}:latest"
+        docker push "${VP_TAGGED}"
+        docker push "${VP_REMOTE_IMAGE}:latest"
+        popd > /dev/null
+        echo "  ✓ VP image pushed: ${VP_TAGGED}"
+    else
+        echo "  ⏭ VP build skipped (START_STAGE=${START_STAGE})"
+    fi
 
-    # ── Stage 3: Alpamayo ─────────────────────────────────────────────────────
+    # ── Stage 3: Alpamayo (always built) ──────────────────────────────────────
     echo "▸ Building Alpamayo image …"
     pushd vla/alpamayo > /dev/null
     docker compose build
@@ -247,6 +276,7 @@ export VP_OUTPUT_BASE
 export TRAINED_FLUXFILL_GCS_PATH
 export ALPAMAYO_OUTPUT_BASE
 export HF_TOKEN
+export START_STAGE
 
 # ==============================================================================
 # SUBMIT MASTER WORKFLOW
@@ -257,29 +287,90 @@ echo " LAUNCHING MASTER WORKFLOW"
 echo "================================================================================"
 echo ""
 
-hlx wf run \
-  --team-space research \
-  --domain prod \
-  --execution-name "master-${MASTER_RUN_ID//_/-}" \
-  workflow_master.master_pipeline_wf \
-  --run_id "${MASTER_RUN_ID}" \
-  --sam2_video_uris "${SAM2_VIDEO_URIS}" \
-  --sam2_max_frames "${SAM2_MAX_FRAMES}" \
-  --vp_video_editing_instructions "${VIDEO_EDITING_INSTRUCTIONS}" \
-  --vp_llm_model "${VP_LLM_MODEL}" \
-  --vp_num_inference_steps "${VP_NUM_INFERENCE_STEPS}" \
-  --vp_guidance_scale "${VP_GUIDANCE_SCALE}" \
-  --vp_strength "${VP_STRENGTH}" \
-  --vp_caption_refine_iters "${VP_CAPTION_REFINE_ITERS}" \
-  --vp_caption_refine_temperature "${VP_CAPTION_REFINE_TEMPERATURE}" \
-  --vp_dilate_size "${VP_DILATE_SIZE}" \
-  --vp_mask_feather "${VP_MASK_FEATHER}" \
-  --vp_keep_masked_pixels \
-  --vp_img_inpainting_lora_scale "${VP_IMG_INPAINTING_LORA_SCALE}" \
-  --vp_seed "${VP_SEED}" \
-  --alp_model_id "${ALPAMAYO_MODEL_ID}" \
-  --alp_num_traj_samples "${ALPAMAYO_NUM_TRAJ_SAMPLES}" \
-  --alp_video_name "${ALPAMAYO_VIDEO_NAME}"
+if [[ "${START_STAGE}" -eq 1 ]]; then
+    # ── Full pipeline: SAM2 → VP → Alpamayo ──────────────────────────────────
+    echo "Submitting FULL pipeline (all 3 stages) …"
+    hlx wf run \
+      --team-space research \
+      --domain prod \
+      --execution-name "master-${MASTER_RUN_ID//_/-}" \
+      workflow_master.master_pipeline_wf \
+      --run_id "${MASTER_RUN_ID}" \
+      --sam2_video_uris "${SAM2_VIDEO_URIS}" \
+      --sam2_max_frames "${SAM2_MAX_FRAMES}" \
+      --vp_video_editing_instructions "${VIDEO_EDITING_INSTRUCTIONS}" \
+      --vp_llm_model "${VP_LLM_MODEL}" \
+      --vp_num_inference_steps "${VP_NUM_INFERENCE_STEPS}" \
+      --vp_guidance_scale "${VP_GUIDANCE_SCALE}" \
+      --vp_strength "${VP_STRENGTH}" \
+      --vp_caption_refine_iters "${VP_CAPTION_REFINE_ITERS}" \
+      --vp_caption_refine_temperature "${VP_CAPTION_REFINE_TEMPERATURE}" \
+      --vp_dilate_size "${VP_DILATE_SIZE}" \
+      --vp_mask_feather "${VP_MASK_FEATHER}" \
+      --vp_keep_masked_pixels \
+      --vp_img_inpainting_lora_scale "${VP_IMG_INPAINTING_LORA_SCALE}" \
+      --vp_seed "${VP_SEED}" \
+      --alp_model_id "${ALPAMAYO_MODEL_ID}" \
+      --alp_num_traj_samples "${ALPAMAYO_NUM_TRAJ_SAMPLES}" \
+      --alp_video_name "${ALPAMAYO_VIDEO_NAME}"
+
+elif [[ "${START_STAGE}" -eq 2 ]]; then
+    # ── Resume from VP → Alpamayo (skip SAM2) ─────────────────────────────────
+    if [[ -z "${SAM2_DATA_RUN_ID}" ]]; then
+        echo "ERROR: START_STAGE=2 requires SAM2_DATA_RUN_ID to be set."
+        echo "       This is the run_id of a previous SAM2 execution whose"
+        echo "       preprocessed data is at gs://…/outputs/preprocessed_data_vp/<SAM2_DATA_RUN_ID>/"
+        exit 1
+    fi
+    echo "Submitting VP → Alpamayo pipeline (skipping SAM2) …"
+    echo "  Using SAM2 data from run: ${SAM2_DATA_RUN_ID}"
+    hlx wf run \
+      --team-space research \
+      --domain prod \
+      --execution-name "vp-alp-${MASTER_RUN_ID//_/-}" \
+      workflow_master.vp_alpamayo_wf \
+      --run_id "${MASTER_RUN_ID}" \
+      --sam2_data_run_id "${SAM2_DATA_RUN_ID}" \
+      --vp_video_editing_instructions "${VIDEO_EDITING_INSTRUCTIONS}" \
+      --vp_llm_model "${VP_LLM_MODEL}" \
+      --vp_num_inference_steps "${VP_NUM_INFERENCE_STEPS}" \
+      --vp_guidance_scale "${VP_GUIDANCE_SCALE}" \
+      --vp_strength "${VP_STRENGTH}" \
+      --vp_caption_refine_iters "${VP_CAPTION_REFINE_ITERS}" \
+      --vp_caption_refine_temperature "${VP_CAPTION_REFINE_TEMPERATURE}" \
+      --vp_dilate_size "${VP_DILATE_SIZE}" \
+      --vp_mask_feather "${VP_MASK_FEATHER}" \
+      --vp_keep_masked_pixels \
+      --vp_img_inpainting_lora_scale "${VP_IMG_INPAINTING_LORA_SCALE}" \
+      --vp_seed "${VP_SEED}" \
+      --alp_model_id "${ALPAMAYO_MODEL_ID}" \
+      --alp_num_traj_samples "${ALPAMAYO_NUM_TRAJ_SAMPLES}" \
+      --alp_video_name "${ALPAMAYO_VIDEO_NAME}"
+
+elif [[ "${START_STAGE}" -eq 3 ]]; then
+    # ── Resume from Alpamayo only (skip SAM2 + VP) ────────────────────────────
+    echo "Submitting Alpamayo-only pipeline (skipping SAM2 + VP) …"
+    VP_OUTPUT_GCS_PATH="${VP_OUTPUT_GCS_PATH:-}"
+    if [[ -n "${VP_OUTPUT_GCS_PATH}" ]]; then
+        echo "  Using VP output: ${VP_OUTPUT_GCS_PATH}"
+    else
+        echo "  VP_OUTPUT_GCS_PATH not set — will default to gs://…/outputs/vp/<run_id>/"
+    fi
+    hlx wf run \
+      --team-space research \
+      --domain prod \
+      --execution-name "alp-${MASTER_RUN_ID//_/-}" \
+      workflow_master.alpamayo_only_wf \
+      --run_id "${MASTER_RUN_ID}" \
+      --vp_output_gcs_path "${VP_OUTPUT_GCS_PATH}" \
+      --alp_model_id "${ALPAMAYO_MODEL_ID}" \
+      --alp_num_traj_samples "${ALPAMAYO_NUM_TRAJ_SAMPLES}" \
+      --alp_video_name "${ALPAMAYO_VIDEO_NAME}"
+
+else
+    echo "ERROR: Invalid START_STAGE=${START_STAGE}. Must be 1, 2, or 3."
+    exit 1
+fi
 
 echo ""
 echo "================================================================================"

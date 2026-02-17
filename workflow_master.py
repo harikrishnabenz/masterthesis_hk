@@ -437,3 +437,121 @@ def master_pipeline_wf(
     )
 
     return alp_output_path
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  PARTIAL WORKFLOWS — Resume from a specific stage
+# ══════════════════════════════════════════════════════════════════════════════
+
+@workflow
+def vp_alpamayo_wf(
+    run_id: str,
+    sam2_data_run_id: str = "",
+    # ── Stage 2: VideoPainter ─────────────────────────────────────────────────
+    vp_video_editing_instructions: str = (
+        "Single solid white continuous line, aligned exactly to the original "
+        "lane positions and perspective; keep road texture, lighting, and "
+        "shadows unchanged\n"
+        "Double solid white continuous line, aligned exactly to the original "
+        "lane positions and perspective; keep road texture, lighting, and "
+        "shadows unchanged\n"
+        "Single solid yellow continuous line, aligned exactly to the original "
+        "lane positions and perspective; keep road texture, lighting, and "
+        "shadows unchanged\n"
+        "Double solid yellow continuous line, aligned exactly to the original "
+        "lane positions and perspective; keep road texture, lighting, and "
+        "shadows unchanged\n"
+        "Single dashed white intermitted line, aligned exactly to the original "
+        "lane positions and perspective; keep road texture, lighting, and "
+        "shadows unchanged"
+    ),
+    vp_llm_model: str = "/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct",
+    vp_num_inference_steps: int = 70,
+    vp_guidance_scale: float = 6.0,
+    vp_strength: float = 1.0,
+    vp_caption_refine_iters: int = 10,
+    vp_caption_refine_temperature: float = 0.1,
+    vp_dilate_size: int = 24,
+    vp_mask_feather: int = 8,
+    vp_keep_masked_pixels: bool = True,
+    vp_img_inpainting_lora_scale: float = 0.0,
+    vp_seed: int = 42,
+    # ── Stage 3: Alpamayo ─────────────────────────────────────────────────────
+    alp_model_id: str = "/workspace/alpamayo/checkpoints/alpamayo-r1-10b",
+    alp_num_traj_samples: int = 1,
+    alp_video_name: str = "auto",
+) -> str:
+    """Resume pipeline from VideoPainter → Alpamayo (skip SAM2).
+
+    Use when SAM2 has already produced preprocessed data under
+    ``gs://…/outputs/preprocessed_data_vp/<sam2_data_run_id>/``.
+
+    Parameters
+    ----------
+    run_id
+        Run ID for this execution (used for VP + Alpamayo output paths).
+    sam2_data_run_id
+        The run_id of the *previous* SAM2 execution whose preprocessed
+        data should be consumed.  If empty, defaults to ``run_id``.
+    """
+    data_run_id = sam2_data_run_id if sam2_data_run_id else run_id
+
+    # Stage 2 — VideoPainter Editing
+    vp_output_path = vp_stage(
+        data_run_id=data_run_id,
+        output_run_id=run_id,
+        video_editing_instructions=vp_video_editing_instructions,
+        llm_model=vp_llm_model,
+        num_inference_steps=vp_num_inference_steps,
+        guidance_scale=vp_guidance_scale,
+        strength=vp_strength,
+        caption_refine_iters=vp_caption_refine_iters,
+        caption_refine_temperature=vp_caption_refine_temperature,
+        dilate_size=vp_dilate_size,
+        mask_feather=vp_mask_feather,
+        keep_masked_pixels=vp_keep_masked_pixels,
+        img_inpainting_lora_scale=vp_img_inpainting_lora_scale,
+        seed=vp_seed,
+    )
+
+    # Stage 3 — Alpamayo VLA Inference
+    alp_output_path = alpamayo_stage(
+        video_data_gcs_path=vp_output_path,
+        output_run_id=run_id,
+        model_id=alp_model_id,
+        num_traj_samples=alp_num_traj_samples,
+        video_name=alp_video_name,
+    )
+
+    return alp_output_path
+
+
+@workflow
+def alpamayo_only_wf(
+    run_id: str,
+    vp_output_gcs_path: str = "",
+    # ── Stage 3: Alpamayo ─────────────────────────────────────────────────────
+    alp_model_id: str = "/workspace/alpamayo/checkpoints/alpamayo-r1-10b",
+    alp_num_traj_samples: int = 1,
+    alp_video_name: str = "auto",
+) -> str:
+    """Resume pipeline from Alpamayo only (skip SAM2 + VideoPainter).
+
+    Parameters
+    ----------
+    vp_output_gcs_path
+        Full GCS path to the VP output directory.  If empty, defaults to
+        ``gs://<bucket>/…/outputs/vp/<run_id>/``.
+    """
+    if not vp_output_gcs_path:
+        vp_output_gcs_path = f"gs://{GCS_BUCKET}/workspace/user/hbaskar/outputs/vp/{run_id}/"
+
+    alp_output_path = alpamayo_stage(
+        video_data_gcs_path=vp_output_gcs_path,
+        output_run_id=run_id,
+        model_id=alp_model_id,
+        num_traj_samples=alp_num_traj_samples,
+        video_name=alp_video_name,
+    )
+
+    return alp_output_path
