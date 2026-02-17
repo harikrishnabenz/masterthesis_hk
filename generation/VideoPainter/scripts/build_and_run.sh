@@ -116,7 +116,7 @@ hlx wf run \
   workflow.videopainter_many_wf \
   --data_run_id "${VP_DATA_RUN_ID}" \
   --output_run_id "${RUN_TAG}" \
-  --data_video_ids "01d3588e-bca7-4a18-8e74-c6cfe9e996db.camera_front_tele_30fov" \
+  --data_video_ids "auto" \
   --inpainting_sample_id 0 \
   --model_path "/workspace/VideoPainter/ckpt/CogVideoX-5b-I2V" \
   --inpainting_branch "/workspace/VideoPainter/ckpt/VideoPainter/checkpoints/branch" \
