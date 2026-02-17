@@ -547,11 +547,17 @@ def _evaluate_video(
 	try:
 		device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 		
-		# Import metrics calculator
-		sys.path.insert(0, os.path.join(BASE_WORKDIR, "evaluate"))
-		from metrics import MetricsCalculator
-		
 		logger.info("[EVAL][%s] Loading videos for evaluation", video_id)
+		
+		# Import metrics calculator — guard against missing optional deps
+		# (e.g. qwen-vl-utils, clip) that metrics.py may pull in at module level.
+		try:
+			sys.path.insert(0, os.path.join(BASE_WORKDIR, "evaluate"))
+			from metrics import MetricsCalculator
+		except ImportError as imp_err:
+			logger.warning("[EVAL][%s] Cannot import MetricsCalculator (%s); skipping evaluation", video_id, imp_err)
+			return {'error': f"MetricsCalculator import failed: {imp_err}"}
+		
 		original_frames, original_fps = _load_video_frames(original_path)
 		generated_frames, _ = _load_video_frames(generated_path)
 		

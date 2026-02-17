@@ -18,14 +18,75 @@ from diffusers import (
     FluxFillPipeline
 )
 import cv2
-from openai import OpenAI
 from diffusers.utils import export_to_video, load_image, load_video
 from PIL import Image
 from io import BytesIO
 import base64
+import importlib
+import gc
+
+# ---------------------------------------------------------------------------
+# Qwen2.5-VL helper (replaces OpenAI API calls)
+# ---------------------------------------------------------------------------
+try:
+    from transformers import Qwen2_5_VLForConditionalGeneration as _QwenForConditionalGeneration, AutoProcessor
+except Exception:
+    _QwenForConditionalGeneration = None
+    AutoProcessor = None
+
+_qwen_model = None
+_qwen_processor = None
+_qwen_model_id = None
+
+_DEFAULT_QWEN_MODEL_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "ckpt", "vlm", "Qwen2.5-VL-7B-Instruct",
+)
 
 
-vlm_model = OpenAI()
+def _get_qwen_model(model_id: str):
+    global _qwen_model, _qwen_processor, _qwen_model_id
+    if _QwenForConditionalGeneration is None or AutoProcessor is None:
+        raise ImportError("Qwen2.5-VL requires `transformers`, `accelerate`, and `qwen-vl-utils`.")
+    if _qwen_model is not None and _qwen_processor is not None and _qwen_model_id == model_id:
+        return _qwen_model, _qwen_processor
+    is_local_path = os.path.isdir(model_id)
+    _qwen_model = _QwenForConditionalGeneration.from_pretrained(
+        model_id, torch_dtype=torch.bfloat16, device_map="auto",
+        local_files_only=is_local_path, low_cpu_mem_usage=True,
+    )
+    _qwen_processor = AutoProcessor.from_pretrained(model_id, local_files_only=is_local_path)
+    _qwen_model_id = model_id
+    return _qwen_model, _qwen_processor
+
+
+def _qwen_generate_text(
+    *, model: str, system_prompt: str, user_prompt: str,
+    image_bytes: bytes | None = None, temperature: float | None = None,
+    max_output_tokens: int | None = None,
+) -> str:
+    qwen_model, qwen_processor = _get_qwen_model(model)
+    process_vision_info = importlib.import_module("qwen_vl_utils").process_vision_info
+    messages = [{"role": "system", "content": system_prompt}]
+    user_content = []
+    if image_bytes is not None:
+        image = Image.open(BytesIO(image_bytes))
+        user_content.append({"type": "image", "image": image})
+    user_content.append({"type": "text", "text": user_prompt})
+    messages.append({"role": "user", "content": user_content})
+    text = qwen_processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    image_inputs, video_inputs = process_vision_info(messages)
+    inputs = qwen_processor(text=[text], images=image_inputs, videos=video_inputs, padding=True, return_tensors="pt")
+    inputs = inputs.to(qwen_model.device)
+    gen_kwargs = {}
+    if temperature is not None:
+        gen_kwargs["temperature"] = temperature
+    gen_kwargs["max_new_tokens"] = max_output_tokens or 512
+    with torch.inference_mode():
+        generated_ids = qwen_model.generate(**inputs, **gen_kwargs)
+    trimmed = [out[len(inp):] for inp, out in zip(inputs.input_ids, generated_ids)]
+    output_text = qwen_processor.batch_decode(trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+    return output_text[0].strip()
 
 def _visualize_video(pipe, mask_background, original_video, video, masks):
     
@@ -130,19 +191,15 @@ def video_editing_prompt(prompt, llm_model, masked_image=None, target_img_captio
     '''
     if prompt is None:
         raise ValueError("prompt is None")
-        
-    vlm_model = OpenAI()
     
     if target_img_caption:
         if masked_image is None:
             raise ValueError("masked_image is None when target_img_caption=True")
             
-        # Convert PIL image to base64
-        import base64
-        from io import BytesIO
+        # Convert PIL image to bytes for Qwen
         buffered = BytesIO()
         masked_image.save(buffered, format="PNG")
-        img_str = base64.b64encode(buffered.getvalue()).decode()
+        image_bytes = buffered.getvalue()
         
         system_prompt = "You are an expert in image description. Based on the given masked image, please generate a concise description for target for following inpainting."
         
@@ -152,24 +209,12 @@ def video_editing_prompt(prompt, llm_model, masked_image=None, target_img_captio
         3. Black background is not a visual element
         Only return the description, no other words."""
 
-        # Call OpenAI vision API with image
-        response = vlm_model.chat.completions.create(
-            model=llm_model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": user_prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/png;base64,{img_str}"
-                            }
-                        }
-                    ]
-                }
-            ]
+        # Call Qwen VLM with image
+        image_inpainting_prompt = _qwen_generate_text(
+            model=llm_model or _DEFAULT_QWEN_MODEL_PATH,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            image_bytes=image_bytes,
         )
     else:
         # Original text-only prompt processing
@@ -182,15 +227,12 @@ def video_editing_prompt(prompt, llm_model, masked_image=None, target_img_captio
         3. Avoid using any dynamic or temporal-related words
         Only return the description, no other words."""
         
-        response = vlm_model.chat.completions.create(
-            model=llm_model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ]
+        image_inpainting_prompt = _qwen_generate_text(
+            model=llm_model or _DEFAULT_QWEN_MODEL_PATH,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
         )
 
-    image_inpainting_prompt = response.choices[0].message.content
     return prompt, image_inpainting_prompt
 
 def generate_video(
