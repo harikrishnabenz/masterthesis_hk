@@ -335,10 +335,16 @@ def render_trajectory_video(
     logger.info(f"Input video: {num_frames} frames, {w}x{h}, {fps:.1f} fps")
     logger.info(f"Trajectories: {pred_xyz.shape[0]} samples, {num_waypoints} waypoints")
 
-    # Write output video
+    # Write output video using PyAV with H.264 codec for universal playback
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(output_path, fourcc, fps, (w, h))
+
+    out_container = av.open(output_path, mode="w")
+    out_stream = out_container.add_stream("libx264", rate=fps)
+    out_stream.width = w
+    out_stream.height = h
+    out_stream.pix_fmt = "yuv420p"
+    # Use a reasonable CRF for quality/size balance
+    out_stream.options = {"crf": "18", "preset": "medium"}
 
     for i, frame in enumerate(all_frames):
         # Progressive reveal: linearly map frame index to waypoint count
@@ -370,10 +376,17 @@ def render_trajectory_video(
             x_off = 10
             annotated[y_off : y_off + bev_size, x_off : x_off + bev_size] = bev_img
 
-        writer.write(annotated)
+        # Convert BGR (OpenCV) → RGB (PyAV) and encode
+        rgb_frame = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
+        av_frame = av.VideoFrame.from_ndarray(rgb_frame, format="rgb24")
+        for packet in out_stream.encode(av_frame):
+            out_container.mux(packet)
 
-    writer.release()
-    logger.info(f"Output video saved: {output_path} ({num_frames} frames)")
+    # Flush remaining packets
+    for packet in out_stream.encode():
+        out_container.mux(packet)
+    out_container.close()
+    logger.info(f"Output video saved: {output_path} ({num_frames} frames, H.264/mp4)")
     return output_path
 
 
