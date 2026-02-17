@@ -680,24 +680,44 @@ class InceptionI3d(nn.Module):
 
 
 
+# Resolve CLIP checkpoint: prefer a local copy under /workspace/VideoPainter/ckpt,
+# fall back to the canonical HuggingFace model ID so it works regardless of CWD.
+_CLIP_CKPT_LOCAL = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ckpt", "clip-vit-large-patch14"
+)
+_CLIP_MODEL_NAME = _CLIP_CKPT_LOCAL if os.path.isdir(_CLIP_CKPT_LOCAL) else "openai/clip-vit-large-patch14"
+
+_CAPTION_CKPT_LOCAL = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ckpt", "cogvlm2-llama3-caption"
+)
+
+
 class MetricsCalculator:
     def __init__(self, device) -> None:
         self.device=device
-        self.clip_metric_calculator = CLIPScore(model_name_or_path="../ckpt/clip-vit-large-patch14").to(device)
+        self.clip_metric_calculator = CLIPScore(model_name_or_path=_CLIP_MODEL_NAME).to(device)
         self.psnr_metric_calculator = PeakSignalNoiseRatio(data_range=1.0).to(device)
         self.lpips_metric_calculator = LearnedPerceptualImagePatchSimilarity(net_type='squeeze').to(device)
         self.mse_metric_calculator = MeanSquaredError().to(device)
         self.ssim_metric_calculator = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
-        self.video_caption_tokenizer = AutoTokenizer.from_pretrained(
-            "../ckpt/cogvlm2-llama3-caption",
-            trust_remote_code=True,
-        )
 
-        self.video_caption_model = AutoModelForCausalLM.from_pretrained(
-            "../ckpt/cogvlm2-llama3-caption",
-            torch_dtype=torch.bfloat16,
-            trust_remote_code=True
-        ).eval()
+        # Video-caption model is optional; skip gracefully if checkpoint is missing.
+        self.video_caption_tokenizer = None
+        self.video_caption_model = None
+        if os.path.isdir(_CAPTION_CKPT_LOCAL):
+            try:
+                self.video_caption_tokenizer = AutoTokenizer.from_pretrained(
+                    _CAPTION_CKPT_LOCAL,
+                    trust_remote_code=True,
+                )
+                self.video_caption_model = AutoModelForCausalLM.from_pretrained(
+                    _CAPTION_CKPT_LOCAL,
+                    torch_dtype=torch.bfloat16,
+                    trust_remote_code=True
+                ).eval()
+            except Exception as _e:
+                import logging as _logging
+                _logging.getLogger(__name__).warning("Failed to load cogvlm2-llama3-caption: %s", _e)
         self.llm_model = _DEFAULT_QWEN_MODEL_PATH
         self.l1_metric_calculator = MeanAbsoluteError().to(device)
         self.clip_model = clip.load("ViT-B/32", device=device)[0]
