@@ -28,7 +28,7 @@ GCS_BUCKET="mbadas-sandbox-research-9bb9c7f"
 # RUN ID  (set this to identify your run; combined with timestamp for output folders)
 # ==============================================================================
 RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-RUN_ID="${RUN_ID:-003}"
+RUN_ID="${RUN_ID:-001}"
 SAM2_RUN_ID="${SAM2_RUN_ID:-${RUN_ID}_${RUN_TIMESTAMP}}"
 
 # ==============================================================================

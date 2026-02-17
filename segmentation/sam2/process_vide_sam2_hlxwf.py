@@ -54,7 +54,6 @@ def main():
     process_all_videos.__globals__["BASE_DATA_DIR"] = BASE_DATA_DIR
     process_all_videos.__globals__["OUTPUT_DIR"] = OUTPUT_DIR
     process_all_videos.__globals__["FRAMES_DIR"] = FRAMES_DIR
-    process_all_videos.__globals__["INPUT_URIS"] = args.video_uris
     
     print(f"Starting SAM2 processing for run_id: {args.run_id}")
     print(f"Processing {len(args.video_uris)} videos")

@@ -22,23 +22,15 @@ from contextlib import contextmanager
 from collections.abc import Iterator
 from dataclasses import dataclass, asdict
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 # sam2 is already installed via pip install -e .
 from sam2.build_sam import build_sam2_video_predictor
 
 # Configuration
-INPUT_URIS: List[str] = [
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/datasets/public/physical_ai_av/camera/camera_front_tele_30fov/25534c8d-4d02-463a-84c9-dad015f320ac.camera_front_tele_30fov.mp4",
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/datasets/public/physical_ai_av/camera/camera_front_tele_30fov/13e7d364-6476-4f2f-b94e-060440bf1a36.camera_front_tele_30fov.mp4",
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/datasets/public/physical_ai_av/camera/camera_front_tele_30fov/025887fd-9f6a-4ba4-aa30-60d7ab1e137f.camera_front_tele_30fov.mp4",
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/datasets/public/physical_ai_av/camera/camera_front_tele_30fov/ee680a47-b981-468f-b817-8712af5953d5.camera_front_tele_30fov.mp4",
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/datasets/public/physical_ai_av/camera/camera_front_tele_30fov/d3317bae-0c7e-4e34-8975-50b6bd715dc3.camera_front_tele_30fov.mp4",
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/datasets/public/physical_ai_av/camera/camera_front_tele_30fov/4809025e-0cef-414c-bf59-8c86a5177ef7.camera_front_tele_30fov.mp4",
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/datasets/public/physical_ai_av/camera/camera_front_tele_30fov/83563feb-695f-4152-a0bf-346d56f89373.camera_front_tele_30fov.mp4",
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/datasets/public/physical_ai_av/camera/camera_front_tele_30fov/99b474d6-9ea5-4e17-87a2-84267728763d.camera_front_tele_30fov.mp4",
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/datasets/public/physical_ai_av/camera/camera_front_tele_30fov/d2cadb4e-585e-4b7f-890f-2fa198713203.camera_front_tele_30fov.mp4",
-    "https://storage.googleapis.com/mbadas-sandbox-research-9bb9c7f/datasets/public/physical_ai_av/camera/camera_front_tele_30fov/6e08b4de-9282-409f-be26-2d24e066baac.camera_front_tele_30fov.mp4",
-]
+# Video URIs are always passed at runtime via build_and_run.sh / workflow.py.
+# No hardcoded defaults — use --video-uris when running this script directly.
 
 # Model configuration - Using the LARGEST model for best quality
 # Use paths relative to this script's location
@@ -51,7 +43,7 @@ UPLOAD_TO_GCP = True
 UPLOAD_TO_LOCAL = False
 
 # GCS bucket base paths (timestamp will be passed from workflow or generated at runtime)
-GCP_OUTPUT_BUCKET_BASE = "gs://mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/outputs/sam2_final_output"
+GCP_OUTPUT_BUCKET_BASE = "gs://mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/outputs/sam2"
 GCP_PREPROCESSED_BUCKET_BASE = "gs://mbadas-sandbox-research-9bb9c7f/workspace/user/hbaskar/outputs/preprocessed_data_vp"
 
 # Timestamp/run_id - set to "10" to match workflow, or use env var
@@ -174,17 +166,27 @@ def _sync_frame_folder_to_max_frames(frames_dir: Path, max_frames: int) -> None:
             pass
 
 
+_gcs_fs = None
+_gcs_fs_lock = threading.Lock()
+
+
 def get_gcs_filesystem():
-    """Get GCS filesystem with default authentication (matches VideoPainter approach)"""
-    return gcsfs.GCSFileSystem(token="google_default")
+    """Get GCS filesystem with default authentication (cached singleton)."""
+    global _gcs_fs
+    if _gcs_fs is None:
+        with _gcs_fs_lock:
+            if _gcs_fs is None:
+                _gcs_fs = gcsfs.GCSFileSystem(token="google_default")
+    return _gcs_fs
 
 
-def upload_directory_to_gcs(local_dir: str, gcs_path: str) -> None:
-    """Recursively upload a local directory to GCS using gcsfs.
+def upload_directory_to_gcs(local_dir: str, gcs_path: str, max_workers: int = 8) -> None:
+    """Recursively upload a local directory to GCS using gcsfs (parallel).
     
     Args:
         local_dir: Local directory path
         gcs_path: Full gs:// destination path
+        max_workers: Number of parallel upload threads
     """
     fs = get_gcs_filesystem()
     base = Path(local_dir)
@@ -193,16 +195,40 @@ def upload_directory_to_gcs(local_dir: str, gcs_path: str) -> None:
     if gcs_path.startswith("gs://"):
         gcs_path = gcs_path[5:]
     
+    # Collect all files to upload
+    files_to_upload = []
     for path in base.rglob("*"):
         if path.is_dir():
             continue
         rel = path.relative_to(base).as_posix()
         remote = f"{gcs_path.rstrip('/')}/{rel}"
-        remote_parent = os.path.dirname(remote)
-        if remote_parent:
-            fs.makedirs(remote_parent, exist_ok=True)
-        print(f"  Uploading: {rel}")
-        fs.put(path.as_posix(), remote)
+        files_to_upload.append((path.as_posix(), remote))
+    
+    if not files_to_upload:
+        return
+    
+    # Pre-create all remote parent directories
+    remote_parents = set(os.path.dirname(r) for _, r in files_to_upload)
+    for rp in remote_parents:
+        if rp:
+            fs.makedirs(rp, exist_ok=True)
+    
+    def _upload_one(local_remote):
+        local, remote = local_remote
+        fs.put(local, remote)
+        return os.path.basename(local)
+    
+    # Upload in parallel
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_upload_one, item): item for item in files_to_upload}
+        for future in as_completed(futures):
+            try:
+                name = future.result()
+                print(f"  Uploaded: {name}")
+            except Exception as e:
+                _, remote = futures[future]
+                print(f"  ⚠ Upload failed for {remote}: {e}")
+                raise
 
 
 def upload_file_to_gcs(local_path: str, gcs_path: str) -> None:
@@ -438,6 +464,60 @@ def extract_frames(video_path: Path, frames_dir: Path, max_frames: int | None = 
     return frame_paths
 
 
+def _postprocess_single_frame(
+    frame_idx: int,
+    frame_path: Path,
+    raw_mask: np.ndarray,
+    ref_point: Tuple[int, int],
+    output_masks_dir: Path,
+    output_vis_dir: Path,
+) -> np.ndarray:
+    """Post-process and save a single frame's mask + visualization.
+
+    Returns the final binary mask (uint8, values {0, 255}) so callers can
+    reuse it without re-reading from disk.
+    """
+    frame = cv2.imread(str(frame_path))
+    mask_uint8 = (raw_mask * 255).astype(np.uint8)
+
+    # Morphological opening to disconnect leaking regions
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    opened_mask = cv2.morphologyEx(mask_uint8, cv2.MORPH_OPEN, kernel)
+
+    # Connected-component filtering
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+        opened_mask, connectivity=8
+    )
+
+    if num_labels > 1:
+        label_at_point = labels[ref_point[1], ref_point[0]]
+        if label_at_point > 0:
+            filtered_mask = (labels == label_at_point).astype(np.uint8) * 255
+        else:
+            largest_component = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
+            filtered_mask = (labels == largest_component).astype(np.uint8) * 255
+    else:
+        filtered_mask = opened_mask
+
+    # Closing + hole-fill
+    kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+    filtered_mask = cv2.morphologyEx(
+        filtered_mask, cv2.MORPH_CLOSE, kernel_close, iterations=2
+    )
+    filtered_mask = _fill_binary_mask_holes(filtered_mask)
+
+    # Save binary mask
+    cv2.imwrite(str(output_masks_dir / f"{frame_idx:05d}.png"), filtered_mask)
+
+    # Save visualization overlay
+    overlay = frame.copy()
+    mask_bool = filtered_mask > 0
+    overlay[mask_bool] = overlay[mask_bool] * 0.5 + np.array([0, 255, 0]) * 0.5
+    cv2.imwrite(str(output_vis_dir / f"{frame_idx:05d}.jpg"), overlay)
+
+    return filtered_mask
+
+
 def segment_road_in_video(
     predictor,
     video_frames_dir: Path,
@@ -446,9 +526,13 @@ def segment_road_in_video(
     timed_frames: int = 100,
     output_fps: float | None = None,
     timings: VideoTiming | None = None,
-) -> None:
+) -> List[np.ndarray]:
     """
-    Segment road in video using SAM2
+    Segment road in video using SAM2.
+
+    Returns a list of post-processed binary masks (uint8, {0,255}) aligned
+    with the sorted frame files, so downstream VP preprocessing can reuse
+    them without re-reading from disk.
     
     For road segmentation, we'll use a simple strategy:
     1. Initialize on first frame with points in lower portion (road area)
@@ -538,61 +622,30 @@ def segment_road_in_video(
     
     print(f"Saving results to {output_dir}...")
     post_start = time.perf_counter()
-    for frame_idx, frame_path in enumerate(tqdm(frame_files, desc="Saving masks")):
-        # Load original frame
-        frame = cv2.imread(str(frame_path))
-        
-        if frame_idx in video_segments:
-            mask = video_segments[frame_idx][ann_obj_id][0]  # Get road mask
-            
-            # Post-process: keep only the connected component containing the reference point
-            mask_uint8 = (mask * 255).astype(np.uint8)
-            
-            # Apply morphological opening to remove thin connections/sharp points
-            # This disconnects leaking regions from the main road
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-            opened_mask = cv2.morphologyEx(mask_uint8, cv2.MORPH_OPEN, kernel)
-            
-            # Find connected components after opening
-            num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(opened_mask, connectivity=8)
-            
-            # Find which component contains the reference point
-            if num_labels > 1:  # 0 is background
-                label_at_point = labels[ref_point[1], ref_point[0]]
-                if label_at_point > 0:  # If point is on a component
-                    # Keep only this component
-                    filtered_mask = (labels == label_at_point).astype(np.uint8) * 255
-                else:
-                    # If point is not on any component, keep the largest component
-                    largest_component = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
-                    filtered_mask = (labels == largest_component).astype(np.uint8) * 255
-            else:
-                filtered_mask = opened_mask
-            
-            # Apply closing to smooth boundaries and fill small holes
-            kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
-            filtered_mask = cv2.morphologyEx(filtered_mask, cv2.MORPH_CLOSE, kernel_close, iterations=2)
 
-            # Explicitly fill any remaining internal holes to produce one solid region.
-            filtered_mask = _fill_binary_mask_holes(filtered_mask)
-            
-            # Save binary mask
-            cv2.imwrite(
-                str(output_masks_dir / f"{frame_idx:05d}.png"),
-                filtered_mask
-            )
-            
-            # Create visualization overlay
-            overlay = frame.copy()
-            # Green overlay for road
-            mask_bool = filtered_mask > 0
-            overlay[mask_bool] = overlay[mask_bool] * 0.5 + np.array([0, 255, 0]) * 0.5
-            
-            # Save visualization
-            cv2.imwrite(
-                str(output_vis_dir / f"{frame_idx:05d}.jpg"),
-                overlay
-            )
+    # Build work items for parallel post-processing
+    work_items = []
+    for frame_idx, frame_path in enumerate(frame_files):
+        if frame_idx in video_segments:
+            raw_mask = video_segments[frame_idx][ann_obj_id][0]
+            work_items.append((frame_idx, frame_path, raw_mask))
+
+    # Process frames in parallel (OpenCV releases the GIL)
+    num_workers = min(os.cpu_count() or 4, len(work_items), 8)
+    processed_masks: dict[int, np.ndarray] = {}
+
+    def _process_frame(item):
+        fidx, fpath, raw = item
+        mask = _postprocess_single_frame(
+            fidx, fpath, raw, ref_point, output_masks_dir, output_vis_dir,
+        )
+        return fidx, mask
+
+    with ThreadPoolExecutor(max_workers=num_workers) as pool:
+        futures = [pool.submit(_process_frame, w) for w in work_items]
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Saving masks"):
+            fidx, mask = future.result()
+            processed_masks[fidx] = mask
 
     if timings is not None:
         timings.postprocess_write_s = _elapsed_s(post_start)
@@ -617,6 +670,10 @@ def segment_road_in_video(
     else:
         print(f"⚠ Warning: Video creation may have failed")
 
+    # Return ordered list of processed masks for VP preprocessing (avoids re-reading)
+    ordered_masks = [processed_masks[i] for i in sorted(processed_masks.keys())]
+    return ordered_masks
+
 
 def preprocess_and_upload_video(
     video_name: str,
@@ -624,8 +681,14 @@ def preprocess_and_upload_video(
     masks_dir: Path,
     timestamp: str,
     timings: VideoTiming | None = None,
+    in_memory_masks: List[np.ndarray] | None = None,
 ) -> None:
-    """Preprocess a video into VideoPainter format and upload to GCS"""
+    """Preprocess a video into VideoPainter format and upload to GCS.
+
+    Args:
+        in_memory_masks: If provided, skip re-reading masks from disk.
+            Each element is a uint8 mask with values {0, 255}.
+    """
     print(f"\n{'='*60}")
     print(f"Preprocessing {video_name} for VideoPainter...")
     print(f"{'='*60}\n")
@@ -657,19 +720,23 @@ def preprocess_and_upload_video(
             print(f"⚠ Failed to load frames for {video_name}")
             return
         
-        # Load and combine masks
-        mask_paths = sorted(masks_dir.glob("*.png"))
-        if not mask_paths:
-            print(f"⚠ No masks found for {video_name}")
-            return
-        
-        masks = []
-        for p in mask_paths:
-            img = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
-            if img is not None:
-                # Binarize mask
-                binary = (img > 127).astype(np.uint8)
-                masks.append(binary)
+        # Use in-memory masks if provided; otherwise read from disk
+        if in_memory_masks is not None and len(in_memory_masks) > 0:
+            masks = [(m > 127).astype(np.uint8) for m in in_memory_masks]
+            print(f"  Using {len(masks)} in-memory masks (skipped disk read)")
+        else:
+            # Fallback: Load and combine masks from disk
+            mask_paths = sorted(masks_dir.glob("*.png"))
+            if not mask_paths:
+                print(f"⚠ No masks found for {video_name}")
+                return
+            
+            masks = []
+            for p in mask_paths:
+                img = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
+                if img is not None:
+                    binary = (img > 127).astype(np.uint8)
+                    masks.append(binary)
 
         if timings is not None:
             timings.vp_load_frames_masks_ram_s = _elapsed_s(load_start)
@@ -842,8 +909,8 @@ def process_all_videos(video_uris: List[str]):
             vt.load_frames_ram_s = _elapsed_s(ram_start)
             del _ram_buf
             
-            # Segment road
-            segment_road_in_video(
+            # Segment road (returns processed masks for reuse)
+            processed_masks = segment_road_in_video(
                 predictor,
                 frames_dir,
                 OUTPUT_DIR,
@@ -867,17 +934,21 @@ def process_all_videos(video_uris: List[str]):
                     vt.upload_raw_s = _elapsed_s(up_start)
                     print(f"✓ Upload successful: {gcs_destination}")
                     
-                    # Preprocess and upload for VideoPainter
+                    # Preprocess and upload for VideoPainter (reuse in-memory masks)
                     preprocess_and_upload_video(
                         video_name=video_name,
                         frames_dir=frames_dir,
                         masks_dir=video_output_dir / "masks",
                         timestamp=TIMESTAMP,
                         timings=vt,
+                        in_memory_masks=processed_masks,
                     )
                 except Exception as e:
                     print(f"⚠ Warning: Upload failed: {e}")
                     print(f"   Skipping preprocessing upload for this video")
+            
+            # Free masks from memory now that uploads are done
+            del processed_masks
             
             # Clean up video-specific files after processing/upload
             print(f"\n{'='*60}")
@@ -1012,4 +1083,12 @@ def process_all_videos(video_uris: List[str]):
 
 
 if __name__ == "__main__":
-    process_all_videos(INPUT_URIS)
+    import argparse
+
+    parser = argparse.ArgumentParser(description="SAM2 Video Segmentation")
+    parser.add_argument(
+        "--video-uris", nargs="+", required=True,
+        help="One or more gs:// or local video paths to process",
+    )
+    args = parser.parse_args()
+    process_all_videos(args.video_uris)
