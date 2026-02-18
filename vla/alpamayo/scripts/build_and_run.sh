@@ -40,18 +40,27 @@ RUN_TAG="${RUN_ID}_${RUN_TIMESTAMP}"
 VP_OUTPUT_BASE="${VP_OUTPUT_BASE:-gs://${GCS_BUCKET}/workspace/user/hbaskar/outputs/vp}"
 export VP_OUTPUT_BASE
 
-# Auto-discover the VP output folder matching RUN_ID.
-# The folder name is <RUN_ID>_<timestamp>, e.g. 001_20260217_095447.
-VP_RUN_FOLDER=$(gcloud storage ls "${VP_OUTPUT_BASE}/" 2>/dev/null \
-  | grep "/${RUN_ID}_" \
-  | head -1 \
-  | sed 's|.*/\([^/]*\)/$|\1|')
-if [[ -z "${VP_RUN_FOLDER}" ]]; then
-  echo "ERROR: No VP output folder found matching '${RUN_ID}_*' under ${VP_OUTPUT_BASE}/"
-  exit 1
+# VP run folder: set explicitly via VP_RUN_FOLDER, or auto-discover from RUN_ID.
+# Override: VP_RUN_FOLDER="001_20260218_082950" bash scripts/build_and_run.sh
+VP_RUN_FOLDER="${VP_RUN_FOLDER:-001_20260218_082950}"
+
+if [[ -n "${VP_RUN_FOLDER}" ]]; then
+  echo "Using explicit VP run folder: ${VP_RUN_FOLDER}"
+else
+  # Auto-discover the VP output folder matching RUN_ID.
+  # The folder name is <RUN_ID>_<timestamp>, e.g. 001_20260217_095447.
+  VP_RUN_FOLDER=$(gcloud storage ls "${VP_OUTPUT_BASE}/" 2>/dev/null \
+    | grep "/${RUN_ID}_" \
+    | head -1 \
+    | sed 's|.*/\([^/]*\)/$|\1|')
+  if [[ -z "${VP_RUN_FOLDER}" ]]; then
+    echo "ERROR: No VP output folder found matching '${RUN_ID}_*' under ${VP_OUTPUT_BASE}/"
+    exit 1
+  fi
+  echo "Auto-detected VP data folder: ${VP_RUN_FOLDER}"
 fi
 VIDEO_DATA_GCS_PATH="${VP_OUTPUT_BASE}/${VP_RUN_FOLDER}"
-echo "Auto-detected VP data folder: ${VIDEO_DATA_GCS_PATH}"
+echo "VP data path: ${VIDEO_DATA_GCS_PATH}"
 
 # ==============================================================================
 # OUTPUT PATHS
