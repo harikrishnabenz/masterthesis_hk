@@ -624,6 +624,7 @@ def _get_qwen_model(model_id: str, *, qwen_device: str | None = None):
     _qwen_processor = AutoProcessor.from_pretrained(
         model_id,
         local_files_only=is_local_path,
+        use_fast=True,
     )
     _qwen_model_id = model_id
     _qwen_device = qwen_device_key
