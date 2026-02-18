@@ -178,11 +178,11 @@ def _stage_video_data(video_gcs_path: str, video_name: str = "auto") -> list[str
     for ext in [".mp4", ".avi", ".mov", ".mkv"]:
         video_files.extend(list(Path(fuse_path).rglob(f"*{ext}")))
 
-    # Exclude VP sidecar files (*_generated.mp4 = side-by-side comparison videos)
-    video_files = [
-        p for p in video_files
-        if not p.stem.endswith("_generated")
-    ]
+    # Use only the *_generated.mp4 files (generated-only videos, not comparisons)
+    generated_files = [p for p in video_files if p.stem.endswith("_generated")]
+    if generated_files:
+        video_files = generated_files
+    # else: fall back to all videos if no _generated variants exist
 
     video_paths = sorted(str(p) for p in video_files)
     logger.info(f"Found {len(video_paths)} video files (after excluding _generated sidecars)")

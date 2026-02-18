@@ -339,7 +339,8 @@ def render_trajectory_video(
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
     out_container = av.open(output_path, mode="w")
-    out_stream = out_container.add_stream("libx264", rate=fps)
+    from fractions import Fraction
+    out_stream = out_container.add_stream("libx264", rate=Fraction(fps).limit_denominator(10000))
     out_stream.width = w
     out_stream.height = h
     out_stream.pix_fmt = "yuv420p"
