@@ -45,6 +45,17 @@ CAMERA_NAME_TO_INDEX = {
     "camera_front_tele_30fov": 6,
 }
 
+# The Alpamayo model and physical_ai_av dataset both operate at 10 Hz.
+# VideoPainter downsamples source clips (typically 30 fps) with
+#   stride = source_fps // down_sample_fps = 30 // 8 = 3
+# giving an effective content rate of 30/3 = 10 fps.
+# However, VP encodes its output at 8 fps (hardcoded), so playing the
+# VP video at face value yields 20-25 % slow motion.
+# We always use the true content rate (0.1 s = 10 Hz) for both the
+# dataset ego-trajectory alignment AND the output video frame rate.
+CONTENT_TIME_STEP = 0.1      # seconds  (10 Hz — dataset / model native rate)
+CONTENT_FPS = 1.0 / CONTENT_TIME_STEP  # 10.0 fps
+
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 def get_gpu_memory_gb() -> tuple[float, float]:
@@ -158,6 +169,49 @@ def decode_video_frames(
     return frames_t, fps, total
 
 
+def _run_model_inference(data, model, processor, helper_mod, device, num_traj_samples):
+    """Run Alpamayo forward pass and return (pred_xyz, pred_rot, extra).
+
+    This is a stateless helper so we can call it on both the original and
+    the VP-modified data without duplicating the model-input construction.
+    """
+    messages = helper_mod.create_message(data["image_frames"].flatten(0, 1))
+    inputs = processor.apply_chat_template(
+        messages,
+        tokenize=True,
+        add_generation_prompt=False,
+        continue_final_message=True,
+        return_dict=True,
+        return_tensors="pt",
+    )
+    model_inputs = {
+        "tokenized_data": inputs,
+        "ego_history_xyz": data["ego_history_xyz"],
+        "ego_history_rot": data["ego_history_rot"],
+    }
+    model_inputs = helper_mod.to_device(model_inputs, device)
+
+    torch.cuda.manual_seed_all(42)
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        pred_xyz, pred_rot, extra = model.sample_trajectories_from_data_with_vlm_rollout(
+            data=model_inputs,
+            top_p=0.98,
+            temperature=0.6,
+            num_traj_samples=num_traj_samples,
+            max_generation_length=256,
+            return_extra=True,
+        )
+    return pred_xyz, pred_rot, extra
+
+
+def _compute_min_ade(pred_xyz, gt_future_xyz):
+    """Compute minADE (meters) between predicted and GT trajectories."""
+    gt_xy = gt_future_xyz.cpu()[0, 0, :, :2].T.numpy()       # (2, T)
+    pred_xy = pred_xyz.cpu().numpy()[0, 0, :, :, :2].transpose(0, 2, 1)  # (S, 2, T)
+    diff = np.linalg.norm(pred_xy - gt_xy[None, ...], axis=1).mean(-1)   # (S,)
+    return float(diff.min())
+
+
 # ── Main inference logic ─────────────────────────────────────────────────
 def run_inference_on_video(
     video_path: str,
@@ -168,7 +222,12 @@ def run_inference_on_video(
     num_traj_samples: int = 1,
     device: str = "cuda",
 ) -> dict:
-    """Run Alpamayo inference on one VideoPainter-edited video."""
+    """Run Alpamayo inference on one VideoPainter-edited video.
+
+    Runs inference **twice** — once on the original (unmodified) dataset
+    frames and once on the VP-modified frames — so that the two predictions
+    can be compared side-by-side.
+    """
     from alpamayo_r1.load_physical_aiavdataset import load_physical_aiavdataset
 
     video_id = Path(video_path).stem
@@ -186,50 +245,79 @@ def run_inference_on_video(
         num_frames = 4  # Alpamayo always uses 4 frames per camera
         vp_frames, vp_fps, vp_total_frames = decode_video_frames(video_path, num_frames=num_frames)
         # vp_frames: (num_frames, 3, H_vp, W_vp)
+        vp_h_native, vp_w_native = vp_frames.shape[-2], vp_frames.shape[-1]  # save before resize
 
-        # 3. Compute t0_us from VP video metadata for temporal alignment.
+        # 3. Compute t0_us from VP video for temporal alignment.
         #
-        #    The VP video is generated from the FIRST N native frames of
-        #    the original clip (extracted by ffmpeg from frame 0, no seek
-        #    offset).  The VP output is at 8 fps but each frame maps 1:1
-        #    to a native frame in the source clip.
+        #    VP downsamples the source clip (typically 30 fps) with
+        #    stride = source_fps // 8 = 3, giving an effective content
+        #    rate of 10 fps.  The output is encoded at 8 fps, but each
+        #    frame actually represents 0.1 s of real time.
         #
-        #    We take the last 4 frames of the VP video as the observation
-        #    window, so the "present" moment t0 corresponds to the last
-        #    VP frame.  The source clip's native data in physical_ai_av
-        #    starts at timestamp 0, so:
+        #    The model / dataset operate at 10 Hz (time_step = 0.1 s),
+        #    so we use CONTENT_TIME_STEP for both t0 and the dataset
+        #    load.  This also avoids the ~25 % slow-motion artefact
+        #    caused by encoding 10 fps content at 8 fps.
         #
-        #      t0_us = (vp_total_frames - 1) * time_step_us
-        #
-        #    where time_step matches the VP video's frame interval.
-        #    This ensures the ego history, ego future, and all other
-        #    camera frames downloaded from HuggingFace are temporally
-        #    aligned with the generated VP frames.
-        vp_time_step = 1.0 / vp_fps  # e.g. 1/8 = 0.125s for 8fps
-        t0_us = int((vp_total_frames - 1) * vp_time_step * 1_000_000)
+        #    t0_us = (vp_total_frames − 1) × 0.1 s × 1e6
+        t0_us = int((vp_total_frames - 1) * CONTENT_TIME_STEP * 1_000_000)
         logger.info(
-            f"  VP video: {vp_total_frames} frames at {vp_fps:.1f} fps → "
-            f"time_step={vp_time_step:.4f}s"
+            f"  VP video: {vp_total_frames} frames, encoded at {vp_fps:.1f} fps, "
+            f"content rate = {CONTENT_FPS:.0f} fps (time_step={CONTENT_TIME_STEP}s)"
         )
         logger.info(
             f"  Computed t0_us={t0_us} ({t0_us / 1_000_000:.3f}s) from "
             f"last VP frame index ({vp_total_frames - 1}) × "
-            f"time_step ({vp_time_step:.4f}s)  "
-            f"[dataset default would be 5_100_000 = 5.1s]"
+            f"content_time_step ({CONTENT_TIME_STEP}s)"
         )
-        logger.info("  Loading original clip data from physical_ai_av …")
+
+        # 3b. Load the FULL frame sequence from physical_ai_av so that
+        #     the comparison video has 1-to-1 original frames for every
+        #     VP frame.  The model only needs the last 4 frames per
+        #     camera, but we load all vp_total_frames so the target
+        #     camera's original footage is available for visualisation.
+        logger.info(
+            f"  Loading original clip data from physical_ai_av "
+            f"({vp_total_frames} frames @ {CONTENT_TIME_STEP}s) …"
+        )
         data = load_physical_aiavdataset(
             clip_id,
             t0_us=t0_us,
-            time_step=vp_time_step,
-            num_frames=num_frames,
+            time_step=CONTENT_TIME_STEP,
+            num_frames=vp_total_frames,  # full sequence for comparison
         )
-        # data["image_frames"]: (N_cameras, num_frames, 3, H, W)
+        # data["image_frames"]: (N_cameras, vp_total_frames, 3, H, W)
 
         # 4. Determine which camera index to replace
         cam_idx_value = CAMERA_NAME_TO_INDEX[camera_name]
         # data["camera_indices"] is sorted; find position
         positions = (data["camera_indices"] == cam_idx_value).nonzero(as_tuple=True)[0]
+
+        # ── Save full original frames for the target camera ──────────
+        orig_camera_full_frames = None   # (vp_total_frames, 3, H, W)
+        if len(positions) > 0:
+            pos = positions[0].item()
+            orig_camera_full_frames = data["image_frames"][pos].clone()
+
+        # ── Trim to last `num_frames` for inference ──────────────────
+        #    The model expects exactly 4 frames per camera.
+        data["image_frames"] = data["image_frames"][:, -num_frames:]
+        if "relative_timestamps" in data:
+            data["relative_timestamps"] = data["relative_timestamps"][:, -num_frames:]
+        if "absolute_timestamps" in data:
+            data["absolute_timestamps"] = data["absolute_timestamps"][:, -num_frames:]
+        # data["image_frames"]: (N_cameras, 4, 3, H, W) — inference window
+
+        # ── 4a. ORIGINAL inference (before VP replacement) ───────────
+        logger.info("  ── Running inference on ORIGINAL frames ──")
+        reset_gpu_memory_stats()
+        orig_pred_xyz, orig_pred_rot, orig_extra = _run_model_inference(
+            data, model, processor, helper_mod, device, num_traj_samples,
+        )
+        orig_min_ade = _compute_min_ade(orig_pred_xyz, data["ego_future_xyz"])
+        logger.info(f"  Original minADE = {orig_min_ade:.4f} m")
+
+        # ── 4b. Replace camera frames with VP output ─────────────────
         if len(positions) == 0:
             logger.warning(
                 f"  Camera {camera_name} (idx {cam_idx_value}) not in loaded data; "
@@ -250,44 +338,18 @@ def run_inference_on_video(
                     vp_frames_float, size=(orig_h, orig_w), mode="bilinear", align_corners=False
                 )
                 vp_frames = vp_frames_float.to(data["image_frames"].dtype)
-            data["image_frames"][pos] = vp_frames
+            data["image_frames"][pos] = vp_frames  # replaces last-4 slice
             logger.info(f"  Replaced camera {camera_name} frames with VideoPainter output")
 
-        # 5. Build model inputs (following test_inference.py pattern)
-        messages = helper_mod.create_message(data["image_frames"].flatten(0, 1))
-        inputs = processor.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=False,
-            continue_final_message=True,
-            return_dict=True,
-            return_tensors="pt",
+        # ── 4c. GENERATED inference (after VP replacement) ───────────
+        logger.info("  ── Running inference on GENERATED (VP) frames ──")
+        reset_gpu_memory_stats()
+        pred_xyz, pred_rot, extra = _run_model_inference(
+            data, model, processor, helper_mod, device, num_traj_samples,
         )
-        model_inputs = {
-            "tokenized_data": inputs,
-            "ego_history_xyz": data["ego_history_xyz"],
-            "ego_history_rot": data["ego_history_rot"],
-        }
-        model_inputs = helper_mod.to_device(model_inputs, device)
-
-        # 6. Run inference
-        logger.info(f"  Running inference with {num_traj_samples} trajectory sample(s) …")
-        torch.cuda.manual_seed_all(42)
-        with torch.autocast("cuda", dtype=torch.bfloat16):
-            pred_xyz, pred_rot, extra = model.sample_trajectories_from_data_with_vlm_rollout(
-                data=model_inputs,
-                top_p=0.98,
-                temperature=0.6,
-                num_traj_samples=num_traj_samples,
-                max_generation_length=256,
-                return_extra=True,
-            )
 
         # 7. Compute minADE
-        gt_xy = data["ego_future_xyz"].cpu()[0, 0, :, :2].T.numpy()  # (2, T)
-        pred_xy = pred_xyz.cpu().numpy()[0, 0, :, :, :2].transpose(0, 2, 1)  # (S, 2, T)
-        diff = np.linalg.norm(pred_xy - gt_xy[None, ...], axis=1).mean(-1)  # (S,)
-        min_ade = float(diff.min())
+        min_ade = _compute_min_ade(pred_xyz, data["ego_future_xyz"])
 
         inference_time = time.time() - start_time
         gpu_current, gpu_peak = get_gpu_memory_gb()
@@ -302,6 +364,12 @@ def run_inference_on_video(
             for text in traj_set:
                 cot_flat.append(str(text))
 
+        orig_cot_texts = orig_extra.get("cot", [[[""]]])[0]
+        orig_cot_flat = []
+        for traj_set in orig_cot_texts:
+            for text in traj_set:
+                orig_cot_flat.append(str(text))
+
         results = {
             "video_id": video_id,
             "video_path": video_path,
@@ -309,17 +377,20 @@ def run_inference_on_video(
             "camera_name": camera_name,
             "num_trajectories": num_traj_samples,
             "min_ade_meters": min_ade,
+            "original_min_ade_meters": orig_min_ade,
             "reasoning_traces": cot_flat,
+            "original_reasoning_traces": orig_cot_flat,
             "temporal_config": {
-                "vp_video_fps": vp_fps,
+                "vp_video_encoded_fps": vp_fps,
+                "content_fps": CONTENT_FPS,
+                "content_time_step_seconds": CONTENT_TIME_STEP,
                 "vp_total_frames": vp_total_frames,
-                "time_step_seconds": vp_time_step,
                 "t0_us": t0_us,
                 "t0_seconds": t0_us / 1_000_000,
                 "num_frames_per_camera": num_frames,
-                "frame_window_seconds": (num_frames - 1) * vp_time_step,
+                "frame_window_seconds": (num_frames - 1) * CONTENT_TIME_STEP,
                 "image_frame_timestamps_s": [
-                    (t0_us - (num_frames - 1 - i) * int(vp_time_step * 1_000_000)) / 1_000_000
+                    (t0_us - (num_frames - 1 - i) * int(CONTENT_TIME_STEP * 1_000_000)) / 1_000_000
                     for i in range(num_frames)
                 ],
             },
@@ -348,8 +419,10 @@ def run_inference_on_video(
                 .reshape(-1, *data["image_frames"].shape[-2:], 3)  # (N_cam*T, H, W, 3)
             )
             vis_data = {
-                "pred_xyz": pred_xyz.cpu().numpy()[0, 0],       # (S, 64, 3)
+                "pred_xyz": pred_xyz.cpu().numpy()[0, 0],       # (S, 64, 3)  — VP inference
                 "pred_rot": pred_rot.cpu().numpy()[0, 0],       # (S, 64, 3, 3)
+                "orig_pred_xyz": orig_pred_xyz.cpu().numpy()[0, 0],  # (S, 64, 3) — original inference
+                "orig_pred_rot": orig_pred_rot.cpu().numpy()[0, 0],  # (S, 64, 3, 3)
                 "gt_future_xyz": data["ego_future_xyz"].cpu().numpy()[0, 0],   # (64, 3)
                 "gt_future_rot": data["ego_future_rot"].cpu().numpy()[0, 0],   # (64, 3, 3)
                 "ego_history_xyz": data["ego_history_xyz"].cpu().numpy()[0, 0],  # (16, 3)
@@ -357,12 +430,26 @@ def run_inference_on_video(
                 "image_frames": image_frames_np,                # (N_cam*T, H, W, 3)
                 "camera_indices": data["camera_indices"].cpu().numpy(),  # (N_cam,)
             }
+            # Save full original camera frames for the target camera
+            # (all vp_total_frames, resized to VP resolution to keep NPZ small)
+            if orig_camera_full_frames is not None:
+                orig_np = orig_camera_full_frames.cpu().numpy()  # (vp_total_frames, 3, H, W)
+                orig_np = orig_np.transpose(0, 2, 3, 1)         # (vp_total_frames, H, W, 3)
+                # Resize to VP video resolution to avoid huge NPZ files
+                dataset_h, dataset_w = orig_np.shape[1], orig_np.shape[2]
+                if (dataset_h, dataset_w) != (vp_h_native, vp_w_native):
+                    import cv2 as _cv2
+                    resized = np.empty((orig_np.shape[0], vp_h_native, vp_w_native, 3), dtype=np.uint8)
+                    for fi in range(orig_np.shape[0]):
+                        resized[fi] = _cv2.resize(orig_np[fi], (vp_w_native, vp_h_native))
+                    orig_np = resized
+                vis_data["orig_camera_frames"] = orig_np  # (vp_total_frames, H_vp, W_vp, 3)
             np.savez_compressed(vis_file, **vis_data)
             logger.info(f"  Visualization data saved → {vis_file}")
         except Exception as vis_err:
             logger.warning(f"  Failed to save visualization data: {vis_err}")
 
-        # 10. Render overlay video (trajectories on original video)
+        # 10. Render overlay video (trajectories on generated video)
         overlay_file = os.path.join(output_dir, f"{video_id}_overlay.mp4")
         try:
             from visualize_video import render_trajectory_video
@@ -376,13 +463,39 @@ def run_inference_on_video(
                 fov_deg=fov,
                 progressive_reveal=True,
                 bev_inset=True,
+                camera_name=camera_name,
+                output_fps=CONTENT_FPS,   # 10 fps (true content rate)
             )
             results["overlay_video_path"] = overlay_file
             logger.info(f"  Overlay video saved → {overlay_file}")
         except Exception as overlay_err:
             logger.error(f"  Failed to render overlay video: {overlay_err}", exc_info=True)
 
-        logger.info(f"  minADE = {min_ade:.4f} m | time = {inference_time:.1f}s | saved → {output_file}")
+        # 11. Render side-by-side comparison video (original vs generated)
+        comparison_file = os.path.join(output_dir, f"{video_id}_comparison.mp4")
+        try:
+            from visualize_video import render_comparison_video
+
+            fov = 120.0 if "120fov" in camera_name else (30.0 if "30fov" in camera_name else 70.0)
+            render_comparison_video(
+                generated_video_path=video_path,
+                npz_path=vis_file,
+                output_path=comparison_file,
+                json_path=output_file,
+                fov_deg=fov,
+                camera_name=camera_name,
+                output_fps=CONTENT_FPS,   # 10 fps (true content rate)
+            )
+            results["comparison_video_path"] = comparison_file
+            logger.info(f"  Comparison video saved → {comparison_file}")
+        except Exception as comp_err:
+            logger.error(f"  Failed to render comparison video: {comp_err}", exc_info=True)
+
+        logger.info(
+            f"  Generated minADE = {min_ade:.4f} m | "
+            f"Original minADE = {orig_min_ade:.4f} m | "
+            f"time = {inference_time:.1f}s | saved → {output_file}"
+        )
         return results
 
     except Exception as e:
