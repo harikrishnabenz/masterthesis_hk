@@ -78,6 +78,143 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return default
 
 
+# ---------------------------------------------------------------------------
+# Preloaded-models API — load all heavy models once, reuse across videos
+# ---------------------------------------------------------------------------
+
+def preload_models(
+    *,
+    model_path: str,
+    inpainting_branch: str | None = None,
+    img_inpainting_model: str | None = None,
+    img_inpainting_lora_path: str | None = None,
+    img_inpainting_lora_scale: float = 1.0,
+    llm_model: str | None = None,
+    dtype: torch.dtype = torch.bfloat16,
+    cog_device: str = "cuda",
+    flux_device: str = "cuda",
+    qwen_device: str | None = None,
+    id_adapter_resample_learnable_path: str | None = None,
+) -> dict:
+    """Pre-load all heavy models once and return them in a dict.
+
+    The returned dict can be passed as ``preloaded_models`` to
+    :func:`generate_video` so that it skips its own model loading.
+
+    Models loaded:
+    - ``cog_pipe``: CogVideoX inpainting pipeline (always)
+    - ``flux_pipe``: FluxFill first-frame inpainting pipeline (if *img_inpainting_model* given)
+    - Qwen VLM is loaded into the module-level cache via ``_get_qwen_model`` (if *llm_model* given)
+
+    Returns a dict with keys ``cog_pipe``, ``flux_pipe`` (or None), plus metadata.
+    """
+
+    result: dict = {
+        "cog_pipe": None,
+        "flux_pipe": None,
+        "cog_device": cog_device,
+        "flux_device": flux_device,
+        "qwen_device": qwen_device,
+    }
+
+    # ---- 1. Qwen VLM (into module-level cache) ----
+    if llm_model and not _llm_disabled(llm_model):
+        print(f"[preload] Loading Qwen VLM: {llm_model}")
+        _get_qwen_model(llm_model, qwen_device=qwen_device)
+
+    # ---- 2. FluxFill pipeline ----
+    if img_inpainting_model:
+        print(f"[preload] Loading FluxFill pipeline: {img_inpainting_model}")
+        flux_pipe = FluxFillPipeline.from_pretrained(
+            img_inpainting_model,
+            torch_dtype=torch.bfloat16,
+        ).to(flux_device)
+        if img_inpainting_lora_path:
+            flux_pipe.load_lora_weights(img_inpainting_lora_path)
+            flux_pipe.set_adapters(["default"], adapter_weights=[float(img_inpainting_lora_scale)])
+        result["flux_pipe"] = flux_pipe
+
+    # ---- 3. CogVideoX pipeline ----
+    print(f"[preload] Loading CogVideoX pipeline: {model_path}")
+    branch = None
+    transformer = None
+    pipe = None
+
+    if inpainting_branch:
+        branch = CogvideoXBranchModel.from_pretrained(
+            inpainting_branch, torch_dtype=dtype
+        ).to(dtype=dtype).to(cog_device)
+        if id_adapter_resample_learnable_path is None:
+            pipe = CogVideoXI2VDualInpaintAnyLPipeline.from_pretrained(
+                model_path,
+                branch=branch,
+                torch_dtype=dtype,
+            )
+        else:
+            transformer = CogVideoXTransformer3DModel.from_pretrained(
+                model_path,
+                subfolder="transformer",
+                torch_dtype=dtype,
+                id_pool_resample_learnable=True,
+            ).to(dtype=dtype).to(cog_device)
+            pipe = CogVideoXI2VDualInpaintAnyLPipeline.from_pretrained(
+                model_path,
+                branch=branch,
+                transformer=transformer,
+                torch_dtype=dtype,
+            )
+            pipe.load_lora_weights(
+                id_adapter_resample_learnable_path,
+                weight_name="pytorch_lora_weights.safetensors",
+                adapter_name="test_1",
+                target_modules=["transformer"],
+            )
+    else:
+        transformer = CogVideoXTransformer3DModel.from_pretrained(
+            model_path,
+            subfolder="transformer",
+            torch_dtype=dtype,
+        ).to(dtype=dtype).to(cog_device)
+        branch = CogvideoXBranchModel.from_transformer(
+            transformer=transformer,
+            num_layers=1,
+            attention_head_dim=transformer.config.attention_head_dim,
+            num_attention_heads=transformer.config.num_attention_heads,
+            load_weights_from_transformer=True,
+        ).to(dtype=dtype).to(cog_device)
+        pipe = CogVideoXI2VDualInpaintAnyLPipeline.from_pretrained(
+            model_path,
+            branch=branch,
+            transformer=transformer,
+            torch_dtype=dtype,
+        )
+
+    pipe.text_encoder.requires_grad_(False)
+    pipe.transformer.requires_grad_(False)
+    pipe.vae.requires_grad_(False)
+    pipe.branch.requires_grad_(False)
+
+    pipe.scheduler = CogVideoXDPMScheduler.from_config(
+        pipe.scheduler.config, timestep_spacing="trailing"
+    )
+    pipe.to(cog_device)
+
+    result["cog_pipe"] = pipe
+    print("[preload] All models loaded successfully.")
+    return result
+
+
+def unload_all_models(preloaded: dict | None = None) -> None:
+    """Free all model VRAM/RAM — both preloaded dict and Qwen module cache."""
+    if preloaded:
+        preloaded["cog_pipe"] = None
+        preloaded["flux_pipe"] = None
+    _unload_qwen_model()
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 def _dilate_and_feather_mask_images(
     masks: list[Image.Image],
     *,
@@ -868,6 +1005,8 @@ def generate_video(
     long_video: bool = False,
     id_adapter_resample_learnable_path: str = None,
     strength: float = 1.0,
+    # Pre-loaded models (from preload_models()) — skip loading when provided.
+    preloaded_models: dict | None = None,
 ):
 
     def _normalize_device(dev: str, *, fallback_cuda: str = "cuda:0") -> str:
@@ -1026,8 +1165,11 @@ def generate_video(
         # new lanes exactly where the originals were.
         masked_video_for_pipe = video if keep_masked_pixels else masked_video_black
 
-        # Defer building the heavy CogVideoX pipeline until after Qwen+Flux steps.
-        pipe = None
+        # Use pre-loaded CogVideoX pipeline if available; otherwise build on demand.
+        if preloaded_models and preloaded_models.get("cog_pipe") is not None:
+            pipe = preloaded_models["cog_pipe"]
+        else:
+            pipe = None
         transformer = None
         branch = None
 
@@ -1162,12 +1304,14 @@ def generate_video(
             # unloading it here frees VRAM so FluxFill can be loaded.
             #
             # If caption refinement is enabled, we need Qwen later again.
+            # If models are preloaded, keep Qwen alive for reuse across videos.
             same_gpu_risk = (
                 (not _llm_disabled(llm_model))
                 and (qwen_device is None or str(qwen_device).lower() != "cpu")
                 and str(flux_device).startswith("cuda")
             )
-            if unload_qwen_after_caption and same_gpu_risk and int(caption_refine_iters or 0) <= 0:
+            _models_preloaded = preloaded_models is not None
+            if unload_qwen_after_caption and same_gpu_risk and int(caption_refine_iters or 0) <= 0 and not _models_preloaded:
                 print("Unloading Qwen model to free VRAM before FluxFill...")
                 _unload_qwen_model()
 
@@ -1201,13 +1345,18 @@ def generate_video(
                 json.dump(prompt_dict, f, indent=4, ensure_ascii=False)
             
 
-            pipe_img_inpainting = FluxFillPipeline.from_pretrained(
-                img_inpainting_model,
-                torch_dtype=torch.bfloat16,
-            ).to(flux_device)
-            if img_inpainting_lora_path:
-                pipe_img_inpainting.load_lora_weights(img_inpainting_lora_path)
-                pipe_img_inpainting.set_adapters(["default"], adapter_weights=[float(img_inpainting_lora_scale)])
+            # Reuse pre-loaded FluxFill pipeline if available.
+            _flux_preloaded = preloaded_models.get("flux_pipe") if preloaded_models else None
+            if _flux_preloaded is not None:
+                pipe_img_inpainting = _flux_preloaded
+            else:
+                pipe_img_inpainting = FluxFillPipeline.from_pretrained(
+                    img_inpainting_model,
+                    torch_dtype=torch.bfloat16,
+                ).to(flux_device)
+                if img_inpainting_lora_path:
+                    pipe_img_inpainting.load_lora_weights(img_inpainting_lora_path)
+                    pipe_img_inpainting.set_adapters(["default"], adapter_weights=[float(img_inpainting_lora_scale)])
 
             masked_image_caption_initial = masked_image_caption
 
@@ -1296,8 +1445,10 @@ def generate_video(
             video[0] = image_inpainting
             masked_video_for_pipe[0] = image_inpainting
 
-            del pipe_img_inpainting
-            torch.cuda.empty_cache()
+            # Only delete FluxFill if it was loaded ad-hoc (not pre-loaded).
+            if _flux_preloaded is None:
+                del pipe_img_inpainting
+                torch.cuda.empty_cache()
 
         # Build CogVideoX only after Qwen+Flux work is complete.
         _build_cog_pipe()
@@ -1305,9 +1456,10 @@ def generate_video(
     if pipe is None:
         raise RuntimeError("CogVideoX pipeline was not constructed.")
 
-    pipe.scheduler = CogVideoXDPMScheduler.from_config(pipe.scheduler.config, timestep_spacing="trailing")
-
-    pipe.to(cog_device)
+    # When using a preloaded pipeline, scheduler and device are already set.
+    if not (preloaded_models and preloaded_models.get("cog_pipe") is not None):
+        pipe.scheduler = CogVideoXDPMScheduler.from_config(pipe.scheduler.config, timestep_spacing="trailing")
+        pipe.to(cog_device)
 
     if long_video:
         pipe.vae.enable_slicing()

@@ -822,11 +822,67 @@ def _run_edit_bench(
 	caption_refine_temperature: float,
 	keep_masked_pixels: bool,
 	seed: int,
+	preloaded_models: dict | None = None,
 ) -> None:
+	"""Run VideoPainter generation via direct in-process call.
+
+	When *preloaded_models* is provided (from ``preload_models()``), all heavy
+	models (CogVideoX, FluxFill, Qwen) are reused across calls — no redundant
+	loading.  Falls back to the old subprocess path when *preloaded_models* is None.
+	"""
 	cog_device = (os.environ.get("VP_COG_DEVICE") or "").strip()
 	flux_device = (os.environ.get("VP_FLUX_DEVICE") or "").strip()
 	qwen_device = (os.environ.get("VP_QWEN_DEVICE") or "").strip()
 	unload_qwen = (os.environ.get("VP_UNLOAD_QWEN_AFTER_USE") or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+	dtype_torch = torch.bfloat16 if dtype == "bfloat16" else torch.float16
+
+	# ---- Direct in-process call (fast path) ----
+	if preloaded_models is not None:
+		sys.path.insert(0, os.path.join(BASE_WORKDIR, "infer"))
+		from edit_bench import generate_video  # type: ignore[import-untyped]
+
+		generate_video(
+			prompt=prompt,
+			model_path=model_path,
+			output_path=output_path,
+			image_or_video_path=image_or_video_path,
+			num_inference_steps=num_inference_steps,
+			guidance_scale=guidance_scale,
+			num_videos_per_prompt=num_videos_per_prompt,
+			dtype=dtype_torch,
+			generate_type="i2v_inpainting",
+			seed=seed,
+			inpainting_mask_meta=inpainting_mask_meta,
+			inpainting_sample_id=inpainting_sample_id,
+			inpainting_branch=inpainting_branch,
+			inpainting_frames=inpainting_frames,
+			down_sample_fps=down_sample_fps,
+			overlap_frames=overlap_frames,
+			prev_clip_weight=prev_clip_weight,
+			strength=float(strength),
+			img_inpainting_model=img_inpainting_model,
+			img_inpainting_lora_path=img_inpainting_lora_path,
+			img_inpainting_lora_scale=float(img_inpainting_lora_scale),
+			video_editing_instruction=video_editing_instruction,
+			llm_model=llm_model,
+			qwen_device=qwen_device or None,
+			unload_qwen_after_caption=unload_qwen,
+			cog_device=cog_device or "cuda",
+			flux_device=flux_device or "cuda",
+			dilate_size=dilate_size,
+			mask_feather=mask_feather,
+			caption_refine_iters=int(caption_refine_iters or 0),
+			caption_refine_temperature=float(caption_refine_temperature or 0.2),
+			keep_masked_pixels=keep_masked_pixels,
+			first_frame_gt=True,
+			replace_gt=True,
+			mask_add=True,
+			preloaded_models=preloaded_models,
+		)
+		return
+
+	# ---- Subprocess fallback (legacy path) ----
 	cmd = [
 		sys.executable,
 		"infer/edit_bench.py",
@@ -1165,6 +1221,44 @@ def run_videopainter_edit_many(
 
 	logger.info("Running %d instruction(s)", len(instruction_list))
 
+	# -----------------------------------------------------------------------
+	# PRE-LOAD ALL HEAVY MODELS ONCE (Qwen, FluxFill, CogVideoX)
+	# -----------------------------------------------------------------------
+	# Previously, each video × instruction spawned a new subprocess that loaded
+	# all models from scratch (~3-5 min each).  Now we load once and reuse.
+	# -----------------------------------------------------------------------
+	cog_device = (os.environ.get("VP_COG_DEVICE") or "cuda:0").strip()
+	flux_device = (os.environ.get("VP_FLUX_DEVICE") or VP_FLUX_DEVICE_DEFAULT).strip()
+	qwen_device = (os.environ.get("VP_QWEN_DEVICE") or "auto").strip()
+	dtype_torch = torch.bfloat16 if dtype == "bfloat16" else torch.float16
+
+	preloaded_models: dict | None = None
+	try:
+		sys.path.insert(0, os.path.join(BASE_WORKDIR, "infer"))
+		from edit_bench import preload_models, unload_all_models  # type: ignore[import-untyped]
+
+		logger.info("Pre-loading all models (Qwen=%s, FluxFill=%s, CogVideoX=%s)...",
+					llm_model, img_inpainting_model, model_path)
+		load_start = time.perf_counter()
+		preloaded_models = preload_models(
+			model_path=model_path,
+			inpainting_branch=inpainting_branch,
+			img_inpainting_model=img_inpainting_model if img_inpainting_model else None,
+			img_inpainting_lora_path=img_inpainting_lora_path if img_inpainting_lora_path else None,
+			img_inpainting_lora_scale=img_inpainting_lora_scale,
+			llm_model=llm_model if llm_model else None,
+			dtype=dtype_torch,
+			cog_device=cog_device,
+			flux_device=flux_device,
+			qwen_device=qwen_device if qwen_device else None,
+		)
+		load_s = time.perf_counter() - load_start
+		logger.info("All models pre-loaded in %.1fs — will reuse across %d video(s) × %d instruction(s)",
+					load_s, len(video_ids), len(instruction_list))
+	except Exception as e:
+		logger.warning("Model preloading failed (%s); falling back to per-video subprocess mode.", e)
+		preloaded_models = None
+
 	# Collect evaluation jobs to run *after* all generation is complete,
 	# so that generation models can be unloaded and GPU memory freed first.
 	deferred_evals: list[dict] = []
@@ -1221,6 +1315,7 @@ def run_videopainter_edit_many(
 				caption_refine_temperature=caption_refine_temperature,
 				keep_masked_pixels=keep_masked_pixels,
 				seed=seed,
+				preloaded_models=preloaded_models,
 			)
 			gen_s = time.perf_counter() - gen_start
 			device, gpu_name, gpu_cc, peak_alloc_mb, peak_reserved_mb = _get_torch_cuda_metrics()
@@ -1290,6 +1385,15 @@ def run_videopainter_edit_many(
 
 	if deferred_evals:
 		logger.info("Freeing GPU memory before evaluation pass (%d videos)...", len(deferred_evals))
+		# Unload all preloaded generation models before evaluation.
+		if preloaded_models is not None:
+			try:
+				from edit_bench import unload_all_models  # type: ignore[import-untyped]
+				unload_all_models(preloaded_models)
+				preloaded_models = None
+				logger.info("Preloaded models unloaded successfully.")
+			except Exception as e:
+				logger.warning("Failed to unload preloaded models: %s", e)
 		import gc
 		import signal
 		if torch.cuda.is_available():
