@@ -113,6 +113,7 @@ def decode_video_frames(
     -------
     frames : torch.Tensor of shape (num_frames, 3, H, W), uint8.
     fps    : float – detected fps of the video.
+    total_frames : int – total number of frames in the video.
     """
     container = av.open(video_path)
     stream = container.streams.video[0]
@@ -154,7 +155,7 @@ def decode_video_frames(
     frames_np = np.stack(selected)  # (num_frames, H, W, 3)
     frames_t = torch.from_numpy(frames_np)
     frames_t = rearrange(frames_t, "t h w c -> t c h w")
-    return frames_t, fps
+    return frames_t, fps, total
 
 
 # ── Main inference logic ─────────────────────────────────────────────────
@@ -181,22 +182,45 @@ def run_inference_on_video(
         clip_id, camera_name = parse_video_filename(video_path)
         logger.info(f"  clip_id={clip_id}  camera={camera_name}")
 
-        # 2. Decode VP frames first so we know the video fps
+        # 2. Decode VP frames first so we know the video fps and length
         num_frames = 4  # Alpamayo always uses 4 frames per camera
-        vp_frames, vp_fps = decode_video_frames(video_path, num_frames=num_frames)
+        vp_frames, vp_fps, vp_total_frames = decode_video_frames(video_path, num_frames=num_frames)
         # vp_frames: (num_frames, 3, H_vp, W_vp)
 
-        # 3. Load dataset with time_step matching VP video fps
-        #    This ensures ego-motion and other cameras use the same
-        #    temporal spacing as the generated video frames.
+        # 3. Compute t0_us from VP video metadata for temporal alignment.
+        #
+        #    The VP video is generated from the FIRST N native frames of
+        #    the original clip (extracted by ffmpeg from frame 0, no seek
+        #    offset).  The VP output is at 8 fps but each frame maps 1:1
+        #    to a native frame in the source clip.
+        #
+        #    We take the last 4 frames of the VP video as the observation
+        #    window, so the "present" moment t0 corresponds to the last
+        #    VP frame.  The source clip's native data in physical_ai_av
+        #    starts at timestamp 0, so:
+        #
+        #      t0_us = (vp_total_frames - 1) * time_step_us
+        #
+        #    where time_step matches the VP video's frame interval.
+        #    This ensures the ego history, ego future, and all other
+        #    camera frames downloaded from HuggingFace are temporally
+        #    aligned with the generated VP frames.
         vp_time_step = 1.0 / vp_fps  # e.g. 1/8 = 0.125s for 8fps
+        t0_us = int((vp_total_frames - 1) * vp_time_step * 1_000_000)
         logger.info(
-            f"  VP video fps={vp_fps:.1f} → time_step={vp_time_step:.4f}s "
-            f"(dataset default is 0.1s / 10Hz)"
+            f"  VP video: {vp_total_frames} frames at {vp_fps:.1f} fps → "
+            f"time_step={vp_time_step:.4f}s"
+        )
+        logger.info(
+            f"  Computed t0_us={t0_us} ({t0_us / 1_000_000:.3f}s) from "
+            f"last VP frame index ({vp_total_frames - 1}) × "
+            f"time_step ({vp_time_step:.4f}s)  "
+            f"[dataset default would be 5_100_000 = 5.1s]"
         )
         logger.info("  Loading original clip data from physical_ai_av …")
         data = load_physical_aiavdataset(
             clip_id,
+            t0_us=t0_us,
             time_step=vp_time_step,
             num_frames=num_frames,
         )
@@ -288,9 +312,16 @@ def run_inference_on_video(
             "reasoning_traces": cot_flat,
             "temporal_config": {
                 "vp_video_fps": vp_fps,
+                "vp_total_frames": vp_total_frames,
                 "time_step_seconds": vp_time_step,
+                "t0_us": t0_us,
+                "t0_seconds": t0_us / 1_000_000,
                 "num_frames_per_camera": num_frames,
                 "frame_window_seconds": (num_frames - 1) * vp_time_step,
+                "image_frame_timestamps_s": [
+                    (t0_us - (num_frames - 1 - i) * int(vp_time_step * 1_000_000)) / 1_000_000
+                    for i in range(num_frames)
+                ],
             },
             "metrics": {
                 "inference_time_seconds": inference_time,
