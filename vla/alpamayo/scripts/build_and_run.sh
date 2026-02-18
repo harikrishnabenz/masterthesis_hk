@@ -29,7 +29,7 @@ GCS_BUCKET="mbadas-sandbox-research-9bb9c7f"
 # RUN ID  (set this to identify your run; combined with timestamp for output folders)
 # ==============================================================================
 RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-RUN_ID="${RUN_ID:-001}"
+RUN_ID="${RUN_ID:-002}"
 RUN_TAG="${RUN_ID}_${RUN_TIMESTAMP}"
 
 # ==============================================================================
@@ -42,7 +42,7 @@ export VP_OUTPUT_BASE
 
 # VP run folder: set explicitly via VP_RUN_FOLDER, or auto-discover from RUN_ID.
 # Override: VP_RUN_FOLDER="001_20260218_082950" bash scripts/build_and_run.sh
-VP_RUN_FOLDER="${VP_RUN_FOLDER:-001_20260218_082950}"
+VP_RUN_FOLDER="${VP_RUN_FOLDER:-002_20260217_134615_1}"
 
 if [[ -n "${VP_RUN_FOLDER}" ]]; then
   echo "Using explicit VP run folder: ${VP_RUN_FOLDER}"

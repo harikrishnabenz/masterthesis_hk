@@ -29,7 +29,7 @@ GCS_BUCKET="mbadas-sandbox-research-9bb9c7f"
 # RUN ID  (set this to identify your run; combined with timestamp for output folders)
 # ==============================================================================
 RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-RUN_ID="${RUN_ID:-001}"
+RUN_ID="${RUN_ID:-002}"
 RUN_TAG="${RUN_ID}_${RUN_TIMESTAMP}"
 
 # ==============================================================================
@@ -103,8 +103,10 @@ docker push "${REMOTE_IMAGE}:latest"
 export VP_CONTAINER_IMAGE="${REMOTE_IMAGE_TAGGED}"
 
 # Video editing instructions (newline-separated; core change first, constraints after ';')
-VIDEO_EDITING_INSTRUCTIONS=$'Single solid white continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged\nDouble solid white continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged\nSingle solid yellow continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged\nDouble solid yellow continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged\nSingle dashed white intermitted line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged'
+# VIDEO_EDITING_INSTRUCTIONS=$'Single solid white continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged\nDouble solid white continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged\nSingle solid yellow continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged\nDouble solid yellow continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged\nSingle dashed white intermitted line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged'
+VIDEO_EDITING_INSTRUCTIONS=$'Single solid white continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged'
 CAPTION_REFINE_ITERS="${CAPTION_REFINE_ITERS:-10}"
+
 CAPTION_REFINE_TEMPERATURE="${CAPTION_REFINE_TEMPERATURE:-0.1}"
 VP_STRENGTH="${VP_STRENGTH:-1.0}"
 
