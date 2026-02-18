@@ -107,7 +107,7 @@ VP_LLM_MODEL="${VP_LLM_MODEL:-/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Ins
 VIDEO_EDITING_INSTRUCTIONS="${VIDEO_EDITING_INSTRUCTIONS:-Single solid white continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged}"
 
 # VP inference parameters
-VP_NUM_INFERENCE_STEPS="${VP_NUM_INFERENCE_STEPS:-70}"
+VP_NUM_INFERENCE_STEPS="${VP_NUM_INFERENCE_STEPS:-50}"
 VP_GUIDANCE_SCALE="${VP_GUIDANCE_SCALE:-6.0}"
 VP_STRENGTH="${VP_STRENGTH:-1.0}"
 VP_CAPTION_REFINE_ITERS="${VP_CAPTION_REFINE_ITERS:-10}"
