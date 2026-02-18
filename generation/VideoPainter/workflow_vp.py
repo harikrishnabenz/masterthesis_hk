@@ -707,6 +707,8 @@ class VPVideoMetrics:
 	video_id: str
 	output_name: str
 	generation_s: float
+	phase1_s: float  # Qwen + FluxFill (first-frame generation)
+	phase2_s: float  # CogVideoX (video generation)
 	upload_s: float
 	device: str
 	gpu_name: str
@@ -781,6 +783,8 @@ def _write_videopainter_run_report(
 		lines.append(f"- video_id: {m.video_id}")
 		lines.append(f"  output_name: {m.output_name}")
 		lines.append(f"  generation_s: {m.generation_s:.3f}")
+		lines.append(f"  phase1_s: {m.phase1_s:.3f}")
+		lines.append(f"  phase2_s: {m.phase2_s:.3f}")
 		lines.append(f"  upload_s: {m.upload_s:.3f}")
 		lines.append(f"  device: {m.device}")
 		lines.append(f"  gpu_name: {m.gpu_name}")
@@ -1233,6 +1237,9 @@ def run_videopainter_edit_many(
 
 	per_instr_metrics: dict[str, list[VPVideoMetrics]] = {d: [] for d in instr_dirs}
 
+	# Track Phase 1 timings so they can be combined with Phase 2 in final metrics.
+	phase1_timings: dict[tuple[str, str], float] = {}  # (instr_dir, vid) -> seconds
+
 	# -----------------------------------------------------------------------
 	# PHASE 1: Qwen + FluxFill (first-frame generation for ALL videos)
 	# -----------------------------------------------------------------------
@@ -1265,6 +1272,7 @@ def run_videopainter_edit_many(
 				phase="first_frame",
 			))
 			gen_s = time.perf_counter() - gen_start
+			phase1_timings[(instr_dir, vid)] = gen_s
 			logger.info("[%s][%s] Phase 1 done (%.1fs)", instr_dir, vid, gen_s)
 
 	# -----------------------------------------------------------------------
@@ -1338,11 +1346,18 @@ def run_videopainter_edit_many(
 				"instruction": instruction,
 			})
 
+			p1_s = phase1_timings.get((instr_dir, vid), 0.0)
+			total_gen_s = p1_s + gen_s
+			logger.info("[%s][%s] Phase 2 done (%.1fs); total generation: %.1fs (P1=%.1fs + P2=%.1fs)",
+						instr_dir, vid, gen_s, total_gen_s, p1_s, gen_s)
+
 			per_instr_metrics[instr_dir].append(
 				VPVideoMetrics(
 					video_id=vid,
 					output_name=os.path.join(instr_dir, vid, output_name),
-					generation_s=float(gen_s),
+					generation_s=float(total_gen_s),
+					phase1_s=float(p1_s),
+					phase2_s=float(gen_s),
 					upload_s=float(upload_s),
 					device=device,
 					gpu_name=gpu_name,
