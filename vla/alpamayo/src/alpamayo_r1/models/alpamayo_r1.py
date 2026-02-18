@@ -89,6 +89,8 @@ class AlpamayoR1(ReasoningVLA):
         if config.expert_cfg is not None:
             for key, value in config.expert_cfg.items():
                 setattr(expert_config, key, value)
+        # Enforce flash_attention_2 for the expert model (mathematically equivalent, faster)
+        expert_config._attn_implementation = "flash_attention_2"
         self.expert = AutoModel.from_config(expert_config)
         # we don't need the embed_tokens of the expert model
         del self.expert.embed_tokens
@@ -116,6 +118,9 @@ class AlpamayoR1(ReasoningVLA):
             self.diffusion = self.diffusion.to(dtype=expert_dtype)
             self.action_in_proj = self.action_in_proj.to(dtype=expert_dtype)
             self.action_out_proj = self.action_out_proj.to(dtype=expert_dtype)
+
+        # Compile the expert model for faster inference (numerically identical)
+        self.expert = torch.compile(self.expert, mode="reduce-overhead")
 
         self.post_init()
 
@@ -251,11 +256,33 @@ class AlpamayoR1(ReasoningVLA):
         if self.config.expert_non_causal_attention:
             forward_kwargs["is_causal"] = False
 
+        # Pre-allocate a static KV cache for the expert to avoid reallocation
+        # every diffusion step.  We convert the dynamic prompt_cache into a
+        # fixed-size buffer that has room for exactly n_diffusion_tokens more.
+        from transformers.cache_utils import StaticCache
+        expert_cfg = self.expert.config
+        static_cache = StaticCache(
+            config=expert_cfg,
+            batch_size=b_star,
+            max_cache_len=prefill_seq_len + n_diffusion_tokens,
+            device=device,
+            dtype=prompt_cache.key_cache[0].dtype,
+        )
+        # Copy the prompt KV into the static cache
+        for layer_idx in range(len(prompt_cache.key_cache)):
+            seq_len = prompt_cache.key_cache[layer_idx].shape[2]
+            static_cache.key_cache[layer_idx][:, :, :seq_len, :] = prompt_cache.key_cache[layer_idx]
+            static_cache.value_cache[layer_idx][:, :, :seq_len, :] = prompt_cache.value_cache[layer_idx]
+
+        # Track the original cache length for resetting after each step
+        static_cache_seen = prefill_seq_len
+
         # 2) Define denoising step that consumes noisy action and timestep
         def step_fn(
             x: torch.Tensor,
             t: torch.Tensor,
         ) -> torch.Tensor:
+            nonlocal static_cache_seen
             # x: (B*, *action_dim)
             # t: broadcastable to x leading dims
             b_star = x.shape[0]
@@ -265,17 +292,19 @@ class AlpamayoR1(ReasoningVLA):
             if future_token_embeds.dim() == 2:
                 future_token_embeds = future_token_embeds.view(b_star, n_diffusion_tokens, -1)
 
-            # Run expert with cached prefill, only on the future tokens
+            # Run expert with static KV cache (avoids reallocation each step)
+            # Reset the cache position to prefill length before each step
+            static_cache._seen_tokens = prefill_seq_len
             expert_out_base = self.expert(
                 inputs_embeds=future_token_embeds,
                 position_ids=position_ids,
-                past_key_values=prompt_cache,
+                past_key_values=static_cache,
                 attention_mask=attention_mask,
                 use_cache=True,
                 **forward_kwargs,
             )
-            # crop the prompt cache to remove the newly added tokens
-            prompt_cache.crop(prefill_seq_len)
+            # Static cache resets via _seen_tokens at the top of step_fn
+            # (no need to crop — the buffer is overwritten in-place)
             last_hidden = expert_out_base.last_hidden_state  # (b*, Tf, hidden_size)
             last_hidden = last_hidden[:, -n_diffusion_tokens:]
             pred = self.action_out_proj(last_hidden).view(

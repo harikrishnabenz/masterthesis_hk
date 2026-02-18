@@ -60,7 +60,7 @@ class BaseDiffusion(ABC, nn.Module):
         self.x_dims = [x_dims] if isinstance(x_dims, int) else list(x_dims)
 
     @abstractmethod
-    @torch.no_grad()
+    @torch.inference_mode()
     def sample(
         self,
         batch_size: int,

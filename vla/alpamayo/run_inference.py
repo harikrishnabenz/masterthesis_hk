@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import av
@@ -27,6 +28,9 @@ import numpy as np
 import psutil
 import torch
 from einops import rearrange
+
+# Thread pool for async I/O (visualization saving)
+_io_pool = ThreadPoolExecutor(max_workers=2)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -59,7 +63,6 @@ def get_gpu_memory_gb() -> tuple[float, float]:
 def reset_gpu_memory_stats():
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
-        torch.cuda.empty_cache()
 
 
 def get_ram_mb() -> float:
@@ -122,7 +125,22 @@ def decode_video_frames(
     detected_fps = float(stream.average_rate) if stream.average_rate else 8.0
     fps = detected_fps if detected_fps > 0 else 8.0
 
-    # Decode all frames
+    # Smart seeking: count total frames first, then seek near the end
+    total = stream.frames
+    if total <= 0:
+        # Fallback: duration-based estimate
+        if stream.duration and stream.time_base:
+            total = int(float(stream.duration * stream.time_base) * fps)
+        else:
+            total = 0
+
+    if total > 0 and total > num_frames + 10:
+        # Seek to near the end and decode only the tail frames
+        seek_frame = max(0, total - num_frames - 5)  # small margin
+        # Convert frame index to stream time_base pts
+        target_pts = int(seek_frame / fps / stream.time_base)
+        container.seek(target_pts, stream=stream)
+
     all_frames = []
     for frame in container.decode(stream):
         all_frames.append(frame.to_ndarray(format="rgb24"))
@@ -131,25 +149,28 @@ def decode_video_frames(
     if not all_frames:
         raise RuntimeError(f"No frames decoded from {video_path}")
 
-    total = len(all_frames)
+    # If we sought, total count comes from seek offset + decoded count
+    if total <= 0:
+        total = len(all_frames)
+
     logger.info(
         f"  Video stats: {total} frames, {fps:.1f} fps "
         f"({total / fps:.2f}s duration)"
     )
 
-    if total < num_frames:
+    if len(all_frames) < num_frames:
         logger.warning(
-            f"Video has only {total} frames but {num_frames} requested; "
+            f"Video has only {len(all_frames)} frames but {num_frames} requested; "
             f"duplicating last frame."
         )
         while len(all_frames) < num_frames:
             all_frames.append(all_frames[-1])
-        total = len(all_frames)
 
     # Take the last num_frames consecutive frames (native fps spacing)
-    start_idx = total - num_frames
-    indices = list(range(start_idx, total))
-    logger.info(f"  Selected frame indices: {indices} (last {num_frames} consecutive at {fps:.1f} fps)")
+    start_idx = len(all_frames) - num_frames
+    indices = list(range(start_idx, len(all_frames)))
+    logger.info(f"  Selected frame indices (in decoded window): {indices} "
+                f"(last {num_frames} consecutive at {fps:.1f} fps)")
     selected = [all_frames[i] for i in indices]
 
     frames_np = np.stack(selected)  # (num_frames, H, W, 3)
@@ -273,7 +294,7 @@ def run_inference_on_video(
         # 6. Run inference
         logger.info(f"  Running inference with {num_traj_samples} trajectory sample(s) …")
         torch.cuda.manual_seed_all(42)
-        with torch.autocast("cuda", dtype=torch.bfloat16):
+        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
             pred_xyz, pred_rot, extra = model.sample_trajectories_from_data_with_vlm_rollout(
                 data=model_inputs,
                 top_p=0.98,
@@ -336,51 +357,56 @@ def run_inference_on_video(
         with open(output_file, "w") as f:
             json.dump(results, f, indent=2)
 
-        # 9. Save visualization data (tensors) for offline plotting
+        # 9. Save visualization data (tensors) for offline plotting — async I/O
         vis_file = os.path.join(output_dir, f"{video_id}_vis_data.npz")
+        overlay_file = os.path.join(output_dir, f"{video_id}_overlay.mp4")
+
+        # Pre-compute numpy arrays on main thread (needs GPU tensors)
         try:
-            # image_frames: (N_cameras, num_frames, 3, H, W) -> (N_cams*num_frames, H, W, 3) uint8
             image_frames_np = (
                 data["image_frames"]
                 .cpu()
                 .numpy()
-                .transpose(0, 1, 3, 4, 2)          # (N_cam, T, H, W, 3)
-                .reshape(-1, *data["image_frames"].shape[-2:], 3)  # (N_cam*T, H, W, 3)
+                .transpose(0, 1, 3, 4, 2)
+                .reshape(-1, *data["image_frames"].shape[-2:], 3)
             )
             vis_data = {
-                "pred_xyz": pred_xyz.cpu().numpy()[0, 0],       # (S, 64, 3)
-                "pred_rot": pred_rot.cpu().numpy()[0, 0],       # (S, 64, 3, 3)
-                "gt_future_xyz": data["ego_future_xyz"].cpu().numpy()[0, 0],   # (64, 3)
-                "gt_future_rot": data["ego_future_rot"].cpu().numpy()[0, 0],   # (64, 3, 3)
-                "ego_history_xyz": data["ego_history_xyz"].cpu().numpy()[0, 0],  # (16, 3)
-                "ego_history_rot": data["ego_history_rot"].cpu().numpy()[0, 0],  # (16, 3, 3)
-                "image_frames": image_frames_np,                # (N_cam*T, H, W, 3)
-                "camera_indices": data["camera_indices"].cpu().numpy(),  # (N_cam,)
+                "pred_xyz": pred_xyz.cpu().numpy()[0, 0],
+                "pred_rot": pred_rot.cpu().numpy()[0, 0],
+                "gt_future_xyz": data["ego_future_xyz"].cpu().numpy()[0, 0],
+                "gt_future_rot": data["ego_future_rot"].cpu().numpy()[0, 0],
+                "ego_history_xyz": data["ego_history_xyz"].cpu().numpy()[0, 0],
+                "ego_history_rot": data["ego_history_rot"].cpu().numpy()[0, 0],
+                "image_frames": image_frames_np,
+                "camera_indices": data["camera_indices"].cpu().numpy(),
             }
-            np.savez_compressed(vis_file, **vis_data)
-            logger.info(f"  Visualization data saved → {vis_file}")
         except Exception as vis_err:
-            logger.warning(f"  Failed to save visualization data: {vis_err}")
+            logger.warning(f"  Failed to prepare visualization data: {vis_err}")
+            vis_data = None
 
-        # 10. Render overlay video (trajectories on original video)
-        overlay_file = os.path.join(output_dir, f"{video_id}_overlay.mp4")
-        try:
-            from visualize_video import render_trajectory_video
+        # Schedule saving & rendering on background thread pool
+        def _save_vis_and_overlay():
+            try:
+                if vis_data is not None:
+                    np.savez_compressed(vis_file, **vis_data)
+                    logger.info(f"  Visualization data saved → {vis_file}")
 
-            fov = 120.0 if "120fov" in camera_name else (30.0 if "30fov" in camera_name else 70.0)
-            render_trajectory_video(
-                video_path=video_path,
-                npz_path=vis_file,
-                output_path=overlay_file,
-                json_path=output_file,
-                fov_deg=fov,
-                progressive_reveal=True,
-                bev_inset=True,
-            )
-            results["overlay_video_path"] = overlay_file
-            logger.info(f"  Overlay video saved → {overlay_file}")
-        except Exception as overlay_err:
-            logger.error(f"  Failed to render overlay video: {overlay_err}", exc_info=True)
+                    from visualize_video import render_trajectory_video
+                    fov = 120.0 if "120fov" in camera_name else (30.0 if "30fov" in camera_name else 70.0)
+                    render_trajectory_video(
+                        video_path=video_path,
+                        npz_path=vis_file,
+                        output_path=overlay_file,
+                        json_path=output_file,
+                        fov_deg=fov,
+                        progressive_reveal=True,
+                        bev_inset=True,
+                    )
+                    logger.info(f"  Overlay video saved → {overlay_file}")
+            except Exception as e:
+                logger.error(f"  Async vis/overlay failed: {e}", exc_info=True)
+
+        _io_pool.submit(_save_vis_and_overlay)
 
         logger.info(f"  minADE = {min_ade:.4f} m | time = {inference_time:.1f}s | saved → {output_file}")
         return results

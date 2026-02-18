@@ -46,7 +46,7 @@ class FlowMatching(BaseDiffusion):
         self.int_method = int_method
         self.num_inference_steps = num_inference_steps
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def sample(
         self,
         batch_size: int,
