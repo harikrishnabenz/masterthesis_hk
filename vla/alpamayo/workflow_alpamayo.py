@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Optional
 
 import gcsfs
-import psutil
 
 from hlx.wf import DedicatedNode, Node, task, workflow
 from hlx.wf.mounts import MOUNTPOINT, FuseBucket
@@ -112,6 +111,7 @@ def _reset_gpu_memory_stats():
 def _get_ram_mb() -> float:
     """Get current RAM usage in MB."""
     try:
+        import psutil
         process = psutil.Process()
         return process.memory_info().rss / (1024 * 1024)
     except Exception:

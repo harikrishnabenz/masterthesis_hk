@@ -42,7 +42,7 @@ export VP_OUTPUT_BASE
 
 # VP run folder: set explicitly via VP_RUN_FOLDER, or auto-discover from RUN_ID.
 # Override: VP_RUN_FOLDER="001_20260218_082950" bash scripts/build_and_run.sh
-VP_RUN_FOLDER="${VP_RUN_FOLDER:-001_20260218_082950}"
+VP_RUN_FOLDER="${VP_RUN_FOLDER:-002_20260218_204616}"
 
 if [[ -n "${VP_RUN_FOLDER}" ]]; then
   echo "Using explicit VP run folder: ${VP_RUN_FOLDER}"
