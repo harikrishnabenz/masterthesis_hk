@@ -96,18 +96,22 @@ def preload_models(
     qwen_device: str | None = None,
     id_adapter_resample_learnable_path: str | None = None,
 ) -> dict:
-    """Pre-load all heavy models once and return them in a dict.
+    """Pre-load heavy models once and return them in a dict.
 
     The returned dict can be passed as ``preloaded_models`` to
     :func:`generate_video` so that it skips its own model loading.
 
-    Models loaded:
-    - ``cog_pipe``: CogVideoX inpainting pipeline (always)
-    - ``flux_pipe``: FluxFill first-frame inpainting pipeline (if *img_inpainting_model* given)
-    - Qwen VLM is loaded into the module-level cache via ``_get_qwen_model`` (if *llm_model* given)
+    **Single-GPU strategy** (Qwen 7B ~14 GiB + FluxFill ~32 GiB ≈ 46 GiB ≤ 80 GiB):
+    Load Qwen + FluxFill together — they coexist on one GPU.  CogVideoX is
+    deferred and built lazily in ``generate_video`` *after* Qwen + FluxFill
+    are unloaded, because CogVideoX alone needs ~35 GiB.
+
+    **Multi-GPU strategy**: Load all three models onto separate GPUs.
 
     Returns a dict with keys ``cog_pipe``, ``flux_pipe`` (or None), plus metadata.
     """
+
+    _single_gpu = (not torch.cuda.is_available()) or torch.cuda.device_count() <= 1
 
     result: dict = {
         "cog_pipe": None,
@@ -115,9 +119,20 @@ def preload_models(
         "cog_device": cog_device,
         "flux_device": flux_device,
         "qwen_device": qwen_device,
+        # Store CogVideoX build params so generate_video can construct it lazily.
+        "_cog_deferred": _single_gpu,
+        "_cog_build_params": {
+            "model_path": model_path,
+            "inpainting_branch": inpainting_branch,
+            "dtype": dtype,
+            "cog_device": cog_device,
+            "id_adapter_resample_learnable_path": id_adapter_resample_learnable_path,
+        },
     }
 
     # ---- 1. Qwen VLM (into module-level cache) ----
+    # Qwen 7B (~14 GiB bf16) is loaded first.  On single-GPU it coexists with
+    # FluxFill (~32 GiB).  On multi-GPU it gets its own device.
     if llm_model and not _llm_disabled(llm_model):
         print(f"[preload] Loading Qwen VLM: {llm_model}")
         _get_qwen_model(llm_model, qwen_device=qwen_device)
@@ -135,7 +150,33 @@ def preload_models(
         result["flux_pipe"] = flux_pipe
 
     # ---- 3. CogVideoX pipeline ----
-    print(f"[preload] Loading CogVideoX pipeline: {model_path}")
+    if _single_gpu:
+        # Defer CogVideoX on single-GPU: Qwen + FluxFill already occupy ~46 GiB.
+        # CogVideoX will be built in generate_video after Qwen+FluxFill are freed.
+        print(f"[preload] Deferring CogVideoX on single-GPU — will build after Qwen+FluxFill phase")
+    else:
+        print(f"[preload] Loading CogVideoX pipeline: {model_path}")
+        result["cog_pipe"] = _build_cog_pipeline(
+            model_path=model_path,
+            inpainting_branch=inpainting_branch,
+            dtype=dtype,
+            cog_device=cog_device,
+            id_adapter_resample_learnable_path=id_adapter_resample_learnable_path,
+        )
+
+    print("[preload] All requested models loaded successfully.")
+    return result
+
+
+def _build_cog_pipeline(
+    *,
+    model_path: str,
+    inpainting_branch: str | None,
+    dtype: torch.dtype,
+    cog_device: str,
+    id_adapter_resample_learnable_path: str | None = None,
+):
+    """Construct and return a fully-configured CogVideoX pipeline on *cog_device*."""
     branch = None
     transformer = None
     pipe = None
@@ -198,10 +239,7 @@ def preload_models(
         pipe.scheduler.config, timestep_spacing="trailing"
     )
     pipe.to(cog_device)
-
-    result["cog_pipe"] = pipe
-    print("[preload] All models loaded successfully.")
-    return result
+    return pipe
 
 
 def unload_all_models(preloaded: dict | None = None) -> None:
@@ -1007,6 +1045,10 @@ def generate_video(
     strength: float = 1.0,
     # Pre-loaded models (from preload_models()) — skip loading when provided.
     preloaded_models: dict | None = None,
+    # Two-phase execution for single-GPU multi-video:
+    #   "first_frame" — Qwen + FluxFill only, save results, return early
+    #   "video"       — CogVideoX only, load first frame + prompt from disk
+    run_phase: str = "first_frame",
 ):
 
     def _normalize_device(dev: str, *, fallback_cuda: str = "cuda:0") -> str:
@@ -1165,79 +1207,7 @@ def generate_video(
         # new lanes exactly where the originals were.
         masked_video_for_pipe = video if keep_masked_pixels else masked_video_black
 
-        # Use pre-loaded CogVideoX pipeline if available; otherwise build on demand.
-        if preloaded_models and preloaded_models.get("cog_pipe") is not None:
-            pipe = preloaded_models["cog_pipe"]
-        else:
-            pipe = None
-        transformer = None
-        branch = None
-
-        def _build_cog_pipe() -> None:
-            nonlocal pipe, transformer, branch
-            if pipe is not None:
-                return
-
-            if inpainting_branch:
-                print(f"Using the provided inpainting branch: {inpainting_branch}")
-                branch = CogvideoXBranchModel.from_pretrained(inpainting_branch, torch_dtype=dtype).to(dtype=dtype).to(cog_device)
-                if id_adapter_resample_learnable_path is None:
-                    pipe = CogVideoXI2VDualInpaintAnyLPipeline.from_pretrained(
-                        model_path,
-                        branch=branch,
-                        torch_dtype=dtype,
-                    )
-                else:
-                    print(f"Loading the id adapter resample learnable from: {id_adapter_resample_learnable_path}")
-                    transformer = CogVideoXTransformer3DModel.from_pretrained(
-                        model_path,
-                        subfolder="transformer",
-                        torch_dtype=dtype,
-                        id_pool_resample_learnable=True,
-                    ).to(dtype=dtype).to(cog_device)
-
-                    pipe = CogVideoXI2VDualInpaintAnyLPipeline.from_pretrained(
-                        model_path,
-                        branch=branch,
-                        transformer=transformer,
-                        torch_dtype=dtype,
-                    )
-
-                    pipe.load_lora_weights(
-                        id_adapter_resample_learnable_path,
-                        weight_name="pytorch_lora_weights.safetensors",
-                        adapter_name="test_1",
-                        target_modules=["transformer"],
-                    )
-
-                    list_adapters_component_wise = pipe.get_list_adapters()
-                    print(f"list_adapters_component_wise: {list_adapters_component_wise}")
-            else:
-                print("No inpainting branch provided, using the default branch...")
-                transformer = CogVideoXTransformer3DModel.from_pretrained(
-                    model_path,
-                    subfolder="transformer",
-                    torch_dtype=dtype,
-                ).to(dtype=dtype).to(cog_device)
-                branch = CogvideoXBranchModel.from_transformer(
-                    transformer=transformer,
-                    num_layers=1,
-                    attention_head_dim=transformer.config.attention_head_dim,
-                    num_attention_heads=transformer.config.num_attention_heads,
-                    load_weights_from_transformer=True,
-                ).to(dtype=dtype).to(cog_device)
-
-                pipe = CogVideoXI2VDualInpaintAnyLPipeline.from_pretrained(
-                    model_path,
-                    branch=branch,
-                    transformer=transformer,
-                    torch_dtype=dtype,
-                )
-
-            pipe.text_encoder.requires_grad_(False)
-            pipe.transformer.requires_grad_(False)
-            pipe.vae.requires_grad_(False)
-            pipe.branch.requires_grad_(False)
+        pipe = preloaded_models["cog_pipe"] if preloaded_models else None
 
         if img_inpainting_model:
             print(f"Using the provided image inpainting model: {img_inpainting_model}")
@@ -1245,221 +1215,217 @@ def generate_video(
             image = video[0]
             mask = binary_masks[0]
 
-            # FluxFill expects white = inpaint region. When mask_background=True, our
-            # binary mask is inverted (black=inpaint), so invert for FluxFill.
-            flux_mask = mask
-            if mask_background:
-                m = np.array(mask)
-                if m.ndim == 3:
-                    m = m[:, :, 0]
-                flux_mask = Image.fromarray((255 - m).astype(np.uint8)).convert("RGB")
-
-            # Optional preprocessing on the FluxFill mask as well.
-            if (dilate_size and dilate_size > 0) or (mask_feather and mask_feather > 0):
-                flux_mask = _dilate_and_feather_mask_images(
-                    [flux_mask],
-                    dilate_size=dilate_size if dilate_size and dilate_size > 0 else 0,
-                    feather_radius=mask_feather if mask_feather and mask_feather > 0 else 0,
-                    inpaint_is_white=True,
-                )[0]
-
-            image_array = np.array(image)
-            mask_array = np.array(mask)
-            foreground_mask = (mask_array == 255)
-            masked_image = np.where(foreground_mask, image_array, 0)
-            masked_image = Image.fromarray(masked_image.astype(np.uint8))
-
-            # For the VLM prompt, provide *surrounding context* (unmasked area)
-            # by showing the original frame with the inpaint region removed.
-            # This matches the instructions in `video_editing_prompt` and helps
-            # Qwen generate a caption consistent with scene lighting/perspective.
-            # For lane-placement tasks, showing the original frame helps the VLM
-            # preserve perspective and align edits with existing lane markings.
-            vlm_context_image = video[0] if keep_masked_pixels else masked_video_for_pipe[0]
-
-            if llm_model is None:
-                llm_model = "none"
-
-            if video_editing_instruction == 'auto':
-                if _llm_disabled(llm_model):
-                    raise ValueError(
-                        "video_editing_instruction='auto' requires an LLM. "
-                        "Provide --video_editing_instruction explicitly, or set --llm_model (e.g., 'Qwen/Qwen2.5-VL-72B-Instruct')."
+            # -------------------------------------------------------
+            # Phase "video": skip Qwen+FluxFill, load results from disk.
+            # -------------------------------------------------------
+            _skip_qwen_flux = (run_phase == "video")
+            if _skip_qwen_flux:
+                prompt_json_path = output_path.replace(".mp4", ".json")
+                flux_img_path = os.path.join(
+                    os.path.dirname(output_path),
+                    f"{os.path.basename(output_path)}_flux_o_img.png",
+                )
+                if not os.path.exists(prompt_json_path) or not os.path.exists(flux_img_path):
+                    raise FileNotFoundError(
+                        f"Phase 'video' requires first_frame outputs. "
+                        f"Missing: {prompt_json_path if not os.path.exists(prompt_json_path) else flux_img_path}"
                     )
-                video_editing_instruction = generate_video_editing_instruction(masked_image, llm_model, qwen_device=qwen_device)
-                output_path = output_path.replace("auto", video_editing_instruction).replace("..", ".")
-
-            original_prompt = prompt
-            prompt, masked_image_caption = video_editing_prompt(
-                prompt, 
-                video_editing_instruction, 
-                llm_model, 
-                masked_image=vlm_context_image, 
-                target_img_caption=True,
-                qwen_device=qwen_device,
-            )
-
-            # Single-GPU / same-GPU fallback: if Qwen used CUDA, it can occupy most
-            # of VRAM. When we only need Qwen for prompt/caption generation,
-            # unloading it here frees VRAM so FluxFill can be loaded.
-            #
-            # If caption refinement is enabled, we need Qwen later again.
-            # If models are preloaded, keep Qwen alive for reuse across videos.
-            same_gpu_risk = (
-                (not _llm_disabled(llm_model))
-                and (qwen_device is None or str(qwen_device).lower() != "cpu")
-                and str(flux_device).startswith("cuda")
-            )
-            _models_preloaded = preloaded_models is not None
-            if unload_qwen_after_caption and same_gpu_risk and int(caption_refine_iters or 0) <= 0 and not _models_preloaded:
-                print("Unloading Qwen model to free VRAM before FluxFill...")
-                _unload_qwen_model()
-
-            print("-"*100)
-            print(f"Original video caption: {original_prompt}")
-            print("-"*100)
-            print(f"Edited video caption: {prompt}")
-            print("-"*100)
-            print(f"Masked image caption: {masked_image_caption}")
-            print("-"*100)
-            print(f"Video editing instruction: {video_editing_instruction}")
-            print("-"*100)
-
-            prompt_json_path = output_path.replace(".mp4", f".json")
-            with open(prompt_json_path, "w") as f:
-                prompt_dict = {
-                    "path": meta_data['path'],
-                    "mask_id": int(mask_id),
-                    "start_frame": int(start_frame),
-                    "end_frame": int(end_frame),
-                    "fps": int(meta_data['fps']),
-                    "Original_video_caption": original_prompt,
-                    "Edited_video_caption": prompt,
-                    "Edited_image_caption": masked_image_caption,
-                    "Edited_image_caption_initial": masked_image_caption,
-                    "Edited_image_caption_final": None,
-                    "Editing_instruction": video_editing_instruction,
-                    "Caption_refine_iters_requested": int(caption_refine_iters or 0),
-                    "Caption_refine_temperature": float(caption_refine_temperature or 0.2),
-                }
-                json.dump(prompt_dict, f, indent=4, ensure_ascii=False)
-            
-
-            # Reuse pre-loaded FluxFill pipeline if available.
-            _flux_preloaded = preloaded_models.get("flux_pipe") if preloaded_models else None
-            if _flux_preloaded is not None:
-                pipe_img_inpainting = _flux_preloaded
-            else:
-                pipe_img_inpainting = FluxFillPipeline.from_pretrained(
-                    img_inpainting_model,
-                    torch_dtype=torch.bfloat16,
-                ).to(flux_device)
-                if img_inpainting_lora_path:
-                    pipe_img_inpainting.load_lora_weights(img_inpainting_lora_path)
-                    pipe_img_inpainting.set_adapters(["default"], adapter_weights=[float(img_inpainting_lora_scale)])
-
-            masked_image_caption_initial = masked_image_caption
-
-            def _run_flux(prompt_text: str) -> Image.Image:
-                return pipe_img_inpainting(
-                    prompt=prompt_text,
-                    image=image,
-                    mask_image=flux_mask,
-                    height=image.size[1],
-                    width=image.size[0],
-                    guidance_scale=30,
-                    num_inference_steps=50,
-                    max_sequence_length=512,
-                    generator=torch.Generator("cpu").manual_seed(0),
-                ).images[0]
-
-            image.save(os.path.join(os.path.dirname(output_path), f"{os.path.basename(output_path)}_flux_i_img.png"))
-            flux_mask.save(os.path.join(os.path.dirname(output_path), f"{os.path.basename(output_path)}_flux_i_mask.png"))
-
-            iters_used = 0
-            last_notes = ""
-            image_inpainting = None
-            refine_enabled = (int(caption_refine_iters or 0) > 0) and (not _llm_disabled(llm_model))
-            if refine_enabled:
-                # Put iterative artifacts under a dedicated folder per video.
-                # Folder name is stable and derived from the output basename.
-                base_no_ext = os.path.splitext(os.path.basename(output_path))[0]
-                refine_dir = os.path.join(os.path.dirname(output_path), f"{base_no_ext}_caption_refine")
-                os.makedirs(refine_dir, exist_ok=True)
-                max_iters = int(caption_refine_iters or 0)
-                for i in range(1, max_iters + 1):
-                    iters_used = i
-                    image_inpainting = _run_flux(masked_image_caption)
-                    image_inpainting.save(
-                        os.path.join(refine_dir, f"iter{i:03d}_flux_o_img.png")
-                    )
-                    passed, revised_caption, notes = _qwen_refine_first_frame_caption(
-                        llm_model=llm_model,
-                        qwen_device=qwen_device,
-                        instruction=video_editing_instruction,
-                        current_caption=masked_image_caption,
-                        original_frame=image,
-                        inpainted_frame=image_inpainting,
-                        flux_mask=flux_mask,
-                        temperature=float(caption_refine_temperature or 0.2),
-                    )
-                    last_notes = notes
-                    eval_payload = {
-                        "iter": i,
-                        "verdict": "PASS" if passed else "FAIL",
-                        "caption_in": masked_image_caption,
-                        "caption_out": revised_caption,
-                        "notes": notes,
-                    }
-                    with open(
-                        os.path.join(refine_dir, f"iter{i:03d}_qwen_eval.json"),
-                        "w",
-                    ) as f:
-                        json.dump(eval_payload, f, indent=2, ensure_ascii=False)
-                    if passed:
-                        break
-                    masked_image_caption = revised_caption
-            else:
-                image_inpainting = _run_flux(masked_image_caption)
-
-            # Always write the final image to the legacy output name.
-            if image_inpainting is not None:
-                image_inpainting.save(os.path.join(os.path.dirname(output_path), f"{os.path.basename(output_path)}_flux_o_img.png"))
-
-            # Update sidecar JSON with refinement results.
-            try:
                 with open(prompt_json_path, "r") as f:
                     pj = json.load(f)
-                pj["Edited_image_caption_initial"] = masked_image_caption_initial
-                pj["Edited_image_caption_final"] = masked_image_caption
-                pj["Caption_refine_iterations_used"] = int(iters_used)
-                if last_notes:
-                    pj["Caption_refine_last_notes"] = last_notes
+                prompt = pj.get("Edited_video_caption", prompt)
+                image_inpainting = Image.open(flux_img_path).convert("RGB")
+                print(f"[phase=video] Loaded first frame from {flux_img_path}")
+                print(f"[phase=video] Loaded edited prompt: {prompt[:120]}...")
+
+                gt_video_first_frame = video[0]
+                video[0] = image_inpainting
+                masked_video_for_pipe[0] = image_inpainting
+
+            if not _skip_qwen_flux:
+
+                # FluxFill expects white = inpaint region. When mask_background=True, our
+                # binary mask is inverted (black=inpaint), so invert for FluxFill.
+                flux_mask = mask
+                if mask_background:
+                    m = np.array(mask)
+                    if m.ndim == 3:
+                        m = m[:, :, 0]
+                    flux_mask = Image.fromarray((255 - m).astype(np.uint8)).convert("RGB")
+
+                # Optional preprocessing on the FluxFill mask as well.
+                if (dilate_size and dilate_size > 0) or (mask_feather and mask_feather > 0):
+                    flux_mask = _dilate_and_feather_mask_images(
+                        [flux_mask],
+                        dilate_size=dilate_size if dilate_size and dilate_size > 0 else 0,
+                        feather_radius=mask_feather if mask_feather and mask_feather > 0 else 0,
+                        inpaint_is_white=True,
+                    )[0]
+
+                image_array = np.array(image)
+                mask_array = np.array(mask)
+                foreground_mask = (mask_array == 255)
+                masked_image = np.where(foreground_mask, image_array, 0)
+                masked_image = Image.fromarray(masked_image.astype(np.uint8))
+
+                # For the VLM prompt, provide *surrounding context* (unmasked area)
+                # by showing the original frame with the inpaint region removed.
+                # This matches the instructions in `video_editing_prompt` and helps
+                # Qwen generate a caption consistent with scene lighting/perspective.
+                # For lane-placement tasks, showing the original frame helps the VLM
+                # preserve perspective and align edits with existing lane markings.
+                vlm_context_image = video[0] if keep_masked_pixels else masked_video_for_pipe[0]
+
+                if llm_model is None:
+                    llm_model = "none"
+
+                if video_editing_instruction == 'auto':
+                    if _llm_disabled(llm_model):
+                        raise ValueError(
+                            "video_editing_instruction='auto' requires an LLM. "
+                            "Provide --video_editing_instruction explicitly, or set --llm_model (e.g., 'Qwen/Qwen2.5-VL-72B-Instruct')."
+                        )
+                    video_editing_instruction = generate_video_editing_instruction(masked_image, llm_model, qwen_device=qwen_device)
+                    output_path = output_path.replace("auto", video_editing_instruction).replace("..", ".")
+
+                original_prompt = prompt
+
+                prompt, masked_image_caption = video_editing_prompt(
+                    prompt, 
+                    video_editing_instruction, 
+                    llm_model, 
+                    masked_image=vlm_context_image, 
+                    target_img_caption=True,
+                    qwen_device=qwen_device,
+                )
+
+                print("-"*100)
+                print(f"Original video caption: {original_prompt}")
+                print("-"*100)
+                print(f"Edited video caption: {prompt}")
+                print("-"*100)
+                print(f"Masked image caption: {masked_image_caption}")
+                print("-"*100)
+                print(f"Video editing instruction: {video_editing_instruction}")
+                print("-"*100)
+
+                prompt_json_path = output_path.replace(".mp4", f".json")
                 with open(prompt_json_path, "w") as f:
-                    json.dump(pj, f, indent=4, ensure_ascii=False)
-            except Exception:
-                pass
+                    prompt_dict = {
+                        "path": meta_data['path'],
+                        "mask_id": int(mask_id),
+                        "start_frame": int(start_frame),
+                        "end_frame": int(end_frame),
+                        "fps": int(meta_data['fps']),
+                        "Original_video_caption": original_prompt,
+                        "Edited_video_caption": prompt,
+                        "Edited_image_caption": masked_image_caption,
+                        "Edited_image_caption_initial": masked_image_caption,
+                        "Edited_image_caption_final": None,
+                        "Editing_instruction": video_editing_instruction,
+                        "Caption_refine_iters_requested": int(caption_refine_iters or 0),
+                        "Caption_refine_temperature": float(caption_refine_temperature or 0.2),
+                    }
+                    json.dump(prompt_dict, f, indent=4, ensure_ascii=False)
+            
 
-            masked_image.save(os.path.join(os.path.dirname(output_path), f"{os.path.basename(output_path)}_gt_o_img.png"))
-            gt_video_first_frame = video[0]
-            video[0] = image_inpainting
-            masked_video_for_pipe[0] = image_inpainting
+                pipe_img_inpainting = preloaded_models["flux_pipe"]
 
-            # Only delete FluxFill if it was loaded ad-hoc (not pre-loaded).
-            if _flux_preloaded is None:
-                del pipe_img_inpainting
-                torch.cuda.empty_cache()
+                masked_image_caption_initial = masked_image_caption
 
-        # Build CogVideoX only after Qwen+Flux work is complete.
-        _build_cog_pipe()
+                def _run_flux(prompt_text: str) -> Image.Image:
+                    return pipe_img_inpainting(
+                        prompt=prompt_text,
+                        image=image,
+                        mask_image=flux_mask,
+                        height=image.size[1],
+                        width=image.size[0],
+                        guidance_scale=30,
+                        num_inference_steps=50,
+                        max_sequence_length=512,
+                        generator=torch.Generator("cpu").manual_seed(0),
+                    ).images[0]
+
+                image.save(os.path.join(os.path.dirname(output_path), f"{os.path.basename(output_path)}_flux_i_img.png"))
+                flux_mask.save(os.path.join(os.path.dirname(output_path), f"{os.path.basename(output_path)}_flux_i_mask.png"))
+
+                iters_used = 0
+                last_notes = ""
+                image_inpainting = None
+                refine_enabled = (int(caption_refine_iters or 0) > 0) and (not _llm_disabled(llm_model))
+                if refine_enabled:
+                    # Put iterative artifacts under a dedicated folder per video.
+                    # Folder name is stable and derived from the output basename.
+                    base_no_ext = os.path.splitext(os.path.basename(output_path))[0]
+                    refine_dir = os.path.join(os.path.dirname(output_path), f"{base_no_ext}_caption_refine")
+                    os.makedirs(refine_dir, exist_ok=True)
+                    max_iters = int(caption_refine_iters or 0)
+                    for i in range(1, max_iters + 1):
+                        iters_used = i
+                        image_inpainting = _run_flux(masked_image_caption)
+                        image_inpainting.save(
+                            os.path.join(refine_dir, f"iter{i:03d}_flux_o_img.png")
+                        )
+                        passed, revised_caption, notes = _qwen_refine_first_frame_caption(
+                            llm_model=llm_model,
+                            qwen_device=qwen_device,
+                            instruction=video_editing_instruction,
+                            current_caption=masked_image_caption,
+                            original_frame=image,
+                            inpainted_frame=image_inpainting,
+                            flux_mask=flux_mask,
+                            temperature=float(caption_refine_temperature or 0.2),
+                        )
+                        last_notes = notes
+                        eval_payload = {
+                            "iter": i,
+                            "verdict": "PASS" if passed else "FAIL",
+                            "caption_in": masked_image_caption,
+                            "caption_out": revised_caption,
+                            "notes": notes,
+                        }
+                        with open(
+                            os.path.join(refine_dir, f"iter{i:03d}_qwen_eval.json"),
+                            "w",
+                        ) as f:
+                            json.dump(eval_payload, f, indent=2, ensure_ascii=False)
+                        if passed:
+                            break
+                        masked_image_caption = revised_caption
+                else:
+                    image_inpainting = _run_flux(masked_image_caption)
+
+                # Always write the final image to the legacy output name.
+                if image_inpainting is not None:
+                    image_inpainting.save(os.path.join(os.path.dirname(output_path), f"{os.path.basename(output_path)}_flux_o_img.png"))
+
+                # Update sidecar JSON with refinement results.
+                try:
+                    with open(prompt_json_path, "r") as f:
+                        pj = json.load(f)
+                    pj["Edited_image_caption_initial"] = masked_image_caption_initial
+                    pj["Edited_image_caption_final"] = masked_image_caption
+                    pj["Caption_refine_iterations_used"] = int(iters_used)
+                    if last_notes:
+                        pj["Caption_refine_last_notes"] = last_notes
+                    with open(prompt_json_path, "w") as f:
+                        json.dump(pj, f, indent=4, ensure_ascii=False)
+                except Exception:
+                    pass
+
+                masked_image.save(os.path.join(os.path.dirname(output_path), f"{os.path.basename(output_path)}_gt_o_img.png"))
+                gt_video_first_frame = video[0]
+                video[0] = image_inpainting
+                masked_video_for_pipe[0] = image_inpainting
+
+            # -------------------------------------------------------
+            # Phase "first_frame": Qwen + FluxFill done → return early.
+            # -------------------------------------------------------
+            if run_phase == "first_frame":
+                print(f"[phase=first_frame] Saved first frame + prompt. Skipping CogVideoX.")
+                return
 
     if pipe is None:
         raise RuntimeError("CogVideoX pipeline was not constructed.")
-
-    # When using a preloaded pipeline, scheduler and device are already set.
-    if not (preloaded_models and preloaded_models.get("cog_pipe") is not None):
-        pipe.scheduler = CogVideoXDPMScheduler.from_config(pipe.scheduler.config, timestep_spacing="trailing")
-        pipe.to(cog_device)
 
     if long_video:
         pipe.vae.enable_slicing()

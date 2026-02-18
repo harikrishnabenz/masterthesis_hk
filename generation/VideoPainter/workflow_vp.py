@@ -823,157 +823,64 @@ def _run_edit_bench(
 	keep_masked_pixels: bool,
 	seed: int,
 	preloaded_models: dict | None = None,
+	run_phase: str = "all",
 ) -> None:
 	"""Run VideoPainter generation via direct in-process call.
 
-	When *preloaded_models* is provided (from ``preload_models()``), all heavy
-	models (CogVideoX, FluxFill, Qwen) are reused across calls — no redundant
-	loading.  Falls back to the old subprocess path when *preloaded_models* is None.
+	All heavy models (CogVideoX, FluxFill, Qwen) are pre-loaded and reused
+	across calls via *preloaded_models*.
+
+	*run_phase* controls two-phase execution:
+	  - ``"first_frame"`` — Qwen + FluxFill only, save results to disk
+	  - ``"video"``       — CogVideoX only (reads Phase-1 outputs from disk)
 	"""
 	cog_device = (os.environ.get("VP_COG_DEVICE") or "").strip()
 	flux_device = (os.environ.get("VP_FLUX_DEVICE") or "").strip()
 	qwen_device = (os.environ.get("VP_QWEN_DEVICE") or "").strip()
-	unload_qwen = (os.environ.get("VP_UNLOAD_QWEN_AFTER_USE") or "").strip().lower() in {"1", "true", "yes", "y", "on"}
 
 	dtype_torch = torch.bfloat16 if dtype == "bfloat16" else torch.float16
 
-	# ---- Direct in-process call (fast path) ----
-	if preloaded_models is not None:
-		sys.path.insert(0, os.path.join(BASE_WORKDIR, "infer"))
-		from edit_bench import generate_video  # type: ignore[import-untyped]
+	sys.path.insert(0, os.path.join(BASE_WORKDIR, "infer"))
+	from edit_bench import generate_video  # type: ignore[import-untyped]
 
-		generate_video(
-			prompt=prompt,
-			model_path=model_path,
-			output_path=output_path,
-			image_or_video_path=image_or_video_path,
-			num_inference_steps=num_inference_steps,
-			guidance_scale=guidance_scale,
-			num_videos_per_prompt=num_videos_per_prompt,
-			dtype=dtype_torch,
-			generate_type="i2v_inpainting",
-			seed=seed,
-			inpainting_mask_meta=inpainting_mask_meta,
-			inpainting_sample_id=inpainting_sample_id,
-			inpainting_branch=inpainting_branch,
-			inpainting_frames=inpainting_frames,
-			down_sample_fps=down_sample_fps,
-			overlap_frames=overlap_frames,
-			prev_clip_weight=prev_clip_weight,
-			strength=float(strength),
-			img_inpainting_model=img_inpainting_model,
-			img_inpainting_lora_path=img_inpainting_lora_path,
-			img_inpainting_lora_scale=float(img_inpainting_lora_scale),
-			video_editing_instruction=video_editing_instruction,
-			llm_model=llm_model,
-			qwen_device=qwen_device or None,
-			unload_qwen_after_caption=unload_qwen,
-			cog_device=cog_device or "cuda",
-			flux_device=flux_device or "cuda",
-			dilate_size=dilate_size,
-			mask_feather=mask_feather,
-			caption_refine_iters=int(caption_refine_iters or 0),
-			caption_refine_temperature=float(caption_refine_temperature or 0.2),
-			keep_masked_pixels=keep_masked_pixels,
-			first_frame_gt=True,
-			replace_gt=True,
-			mask_add=True,
-			preloaded_models=preloaded_models,
-		)
-		return
-
-	# ---- Subprocess fallback (legacy path) ----
-	cmd = [
-		sys.executable,
-		"infer/edit_bench.py",
-		"--model_path",
-		model_path,
-		"--inpainting_branch",
-		inpainting_branch,
-		"--output_path",
-		output_path,
-		"--num_inference_steps",
-		str(num_inference_steps),
-		"--guidance_scale",
-		str(guidance_scale),
-		"--num_videos_per_prompt",
-		str(num_videos_per_prompt),
-		"--dtype",
-		dtype,
-		"--generate_type",
-		"i2v_inpainting",
-		"--inpainting_mask_meta",
-		inpainting_mask_meta,
-		"--inpainting_sample_id",
-		str(inpainting_sample_id),
-		"--inpainting_frames",
-		str(inpainting_frames),
-		"--image_or_video_path",
-		image_or_video_path,
-		"--down_sample_fps",
-		str(down_sample_fps),
-		"--overlap_frames",
-		str(overlap_frames),
-		"--prev_clip_weight",
-		str(prev_clip_weight),
-		"--strength",
-		str(float(strength)),
-		"--img_inpainting_model",
-		img_inpainting_model,
-		"--img_inpainting_lora_path",
-		img_inpainting_lora_path,
-		"--img_inpainting_lora_scale",
-		str(float(img_inpainting_lora_scale)),
-		"--video_editing_instruction",
-		video_editing_instruction,
-		"--llm_model",
-		llm_model,
-		"--dilate_size",
-		str(dilate_size),
-		"--mask_feather",
-		str(mask_feather),
-		"--caption_refine_iters",
-		str(int(caption_refine_iters or 0)),
-		"--caption_refine_temperature",
-		str(float(caption_refine_temperature or 0.2)),
-	]
-	if qwen_device:
-		cmd.extend(["--qwen_device", qwen_device])
-	if unload_qwen:
-		cmd.append("--unload_qwen_after_caption")
-	if keep_masked_pixels:
-		cmd.append("--keep_masked_pixels")
-	cmd.extend([
-		"--seed",
-		str(seed),
-	])
-	if cog_device:
-		cmd.extend(["--cog_device", cog_device])
-	if flux_device:
-		cmd.extend(["--flux_device", flux_device])
-	cmd.extend([
-		"--first_frame_gt",
-		"--replace_gt",
-		"--mask_add",
-	])
-	if prompt:
-		cmd.extend(["--prompt", prompt])
-
-	logger.info("Running command: %s", " ".join(cmd))
-	result = subprocess.run(cmd, capture_output=True, text=True, cwd=BASE_WORKDIR)
-	if result.stdout:
-		logger.info(result.stdout)
-	if result.stderr:
-		# tqdm/progress bars often go to stderr even on success.
-		logger.info(result.stderr)
-	if result.returncode != 0:
-		stdout_tail = (result.stdout or "")[-4000:]
-		stderr_tail = (result.stderr or "")[-4000:]
-		raise RuntimeError(
-			f"VideoPainter edit failed with code {result.returncode}\n"
-			f"--- stdout (tail) ---\n{stdout_tail}\n"
-			f"--- stderr (tail) ---\n{stderr_tail}"
-		)
+	generate_video(
+		prompt=prompt,
+		model_path=model_path,
+		output_path=output_path,
+		image_or_video_path=image_or_video_path,
+		num_inference_steps=num_inference_steps,
+		guidance_scale=guidance_scale,
+		num_videos_per_prompt=num_videos_per_prompt,
+		dtype=dtype_torch,
+		generate_type="i2v_inpainting",
+		seed=seed,
+		inpainting_mask_meta=inpainting_mask_meta,
+		inpainting_sample_id=inpainting_sample_id,
+		inpainting_branch=inpainting_branch,
+		inpainting_frames=inpainting_frames,
+		down_sample_fps=down_sample_fps,
+		overlap_frames=overlap_frames,
+		prev_clip_weight=prev_clip_weight,
+		strength=float(strength),
+		img_inpainting_model=img_inpainting_model,
+		img_inpainting_lora_path=img_inpainting_lora_path,
+		img_inpainting_lora_scale=float(img_inpainting_lora_scale),
+		video_editing_instruction=video_editing_instruction,
+		llm_model=llm_model,
+		qwen_device=qwen_device or None,
+		cog_device=cog_device or "cuda",
+		flux_device=flux_device or "cuda",
+		dilate_size=dilate_size,
+		mask_feather=mask_feather,
+		caption_refine_iters=int(caption_refine_iters or 0),
+		caption_refine_temperature=float(caption_refine_temperature or 0.2),
+		keep_masked_pixels=keep_masked_pixels,
+		first_frame_gt=True,
+		replace_gt=True,
+		mask_add=True,
+		preloaded_models=preloaded_models,
+		run_phase=run_phase,
+	)
 
 
 def _upload_outputs(
@@ -1263,18 +1170,81 @@ def run_videopainter_edit_many(
 	# so that generation models can be unloaded and GPU memory freed first.
 	deferred_evals: list[dict] = []
 
-	# Run each instruction into its own subfolder.
+	# -----------------------------------------------------------------------
+	# Two-phase execution (single-GPU optimisation):
+	#   Phase 1 ("first_frame"): Qwen + FluxFill for ALL videos × instructions
+	#   Model swap:              Unload Qwen + FluxFill → build CogVideoX
+	#   Phase 2 ("video"):       CogVideoX for ALL videos × instructions
+	# Only 1 model swap total regardless of how many videos × instructions.
+	# -----------------------------------------------------------------------
+	logger.info(
+		"Two-phase mode: Phase 1 (Qwen+FluxFill) for %d video(s) × %d instruction(s), "
+		"then Phase 2 (CogVideoX).",
+		len(video_ids), len(instruction_list),
+	)
+
+	# Pre-compute stable instruction directory names (shared by both phases).
 	used_instr_dirs: set[str] = set()
+	instr_dirs: list[str] = []
 	for instr_idx, instruction in enumerate(instruction_list, start=1):
 		instr_dir = _sanitize_folder_component(instruction, max_len=120)
 		if instr_dir in used_instr_dirs:
 			instr_dir = f"{instr_dir}_{instr_idx:02d}"
 		used_instr_dirs.add(instr_dir)
+		instr_dirs.append(instr_dir)
+
+	# Helper: common arguments for _run_edit_bench (avoids duplicating the long
+	# keyword list between Phase 1 and Phase 2).
+	def _make_edit_bench_kwargs(
+		*, output_path: str, inpainting_mask_meta: str, video_root: str,
+		instruction: str, phase: str,
+	) -> dict:
+		return dict(
+			output_path=output_path,
+			inpainting_mask_meta=inpainting_mask_meta,
+			image_or_video_path=video_root,
+			prompt=prompt,
+			model_path=model_path,
+			inpainting_branch=inpainting_branch,
+			img_inpainting_model=img_inpainting_model,
+			img_inpainting_lora_path=img_inpainting_lora_path,
+			img_inpainting_lora_scale=img_inpainting_lora_scale,
+			num_inference_steps=num_inference_steps,
+			guidance_scale=guidance_scale,
+			num_videos_per_prompt=num_videos_per_prompt,
+			dtype=dtype,
+			inpainting_sample_id=inpainting_sample_id,
+			inpainting_frames=inpainting_frames,
+			down_sample_fps=down_sample_fps,
+			overlap_frames=overlap_frames,
+			prev_clip_weight=prev_clip_weight,
+			strength=strength,
+			video_editing_instruction=instruction,
+			llm_model=llm_model,
+			dilate_size=dilate_size,
+			mask_feather=mask_feather,
+			caption_refine_iters=caption_refine_iters,
+			caption_refine_temperature=caption_refine_temperature,
+			keep_masked_pixels=keep_masked_pixels,
+			seed=seed,
+			preloaded_models=preloaded_models,
+			run_phase=phase,
+		)
+
+	per_instr_metrics: dict[str, list[VPVideoMetrics]] = {d: [] for d in instr_dirs}
+
+	# -----------------------------------------------------------------------
+	# PHASE 1: Qwen + FluxFill (first-frame generation for ALL videos)
+	# -----------------------------------------------------------------------
+	logger.info("=== Phase 1: Qwen + FluxFill (first-frame generation) ===")
+
+	for instr_idx, (instruction, instr_dir) in enumerate(
+		zip(instruction_list, instr_dirs), start=1
+	):
 		logger.info("Instruction %d/%d -> %s", instr_idx, len(instruction_list), instr_dir)
 
-		per_video_metrics: list[VPVideoMetrics] = []
 		for vid in video_ids:
-			logger.info("[%s][%s] Starting", instr_dir, vid)
+			logger.info("[%s][%s] Starting (phase=first_frame)", instr_dir, vid)
 			inpainting_mask_meta, video_root = _stage_preprocessed_inputs(
 				data_run_id=data_run_id,
 				data_video_id=vid,
@@ -1287,36 +1257,68 @@ def run_videopainter_edit_many(
 
 			_reset_torch_cuda_peaks()
 			gen_start = time.perf_counter()
-			_run_edit_bench(
+			_run_edit_bench(**_make_edit_bench_kwargs(
 				output_path=output_path,
 				inpainting_mask_meta=inpainting_mask_meta,
-				image_or_video_path=video_root,
-				prompt=prompt,
-				model_path=model_path,
-				inpainting_branch=inpainting_branch,
-				img_inpainting_model=img_inpainting_model,
-				img_inpainting_lora_path=img_inpainting_lora_path,
-				img_inpainting_lora_scale=img_inpainting_lora_scale,
-				num_inference_steps=num_inference_steps,
-				guidance_scale=guidance_scale,
-				num_videos_per_prompt=num_videos_per_prompt,
-				dtype=dtype,
+				video_root=video_root,
+				instruction=instruction,
+				phase="first_frame",
+			))
+			gen_s = time.perf_counter() - gen_start
+			logger.info("[%s][%s] Phase 1 done (%.1fs)", instr_dir, vid, gen_s)
+
+	# -----------------------------------------------------------------------
+	# MODEL SWAP: Unload Qwen + FluxFill → Load CogVideoX
+	# -----------------------------------------------------------------------
+	logger.info("=== Model swap: Unloading Qwen + FluxFill, building CogVideoX ===")
+	from edit_bench import (  # type: ignore[import-untyped]
+		_unload_qwen_model,
+		_build_cog_pipeline,
+	)
+	_unload_qwen_model()
+	if preloaded_models.get("flux_pipe") is not None:
+		del preloaded_models["flux_pipe"]
+	preloaded_models["flux_pipe"] = None
+	import gc
+	gc.collect()
+	torch.cuda.empty_cache()
+
+	_cog_params = preloaded_models.get("_cog_build_params", {})
+	logger.info("Building CogVideoX pipeline: %s", _cog_params.get("model_path"))
+	cog_pipe = _build_cog_pipeline(**_cog_params)
+	preloaded_models["cog_pipe"] = cog_pipe
+	preloaded_models["_cog_deferred"] = False
+	logger.info("CogVideoX loaded on GPU — starting Phase 2")
+
+	# -----------------------------------------------------------------------
+	# PHASE 2: CogVideoX video generation (ALL videos)
+	# -----------------------------------------------------------------------
+	logger.info("=== Phase 2: CogVideoX (video generation) ===")
+	for instr_idx, (instruction, instr_dir) in enumerate(
+		zip(instruction_list, instr_dirs), start=1
+	):
+		logger.info("Instruction %d/%d -> %s (phase=video)", instr_idx, len(instruction_list), instr_dir)
+
+		for vid in video_ids:
+			logger.info("[%s][%s] Starting (phase=video)", instr_dir, vid)
+			inpainting_mask_meta, video_root = _stage_preprocessed_inputs(
+				data_run_id=data_run_id,
+				data_video_id=vid,
 				inpainting_sample_id=inpainting_sample_id,
-				inpainting_frames=inpainting_frames,
-				down_sample_fps=down_sample_fps,
-				overlap_frames=overlap_frames,
-				prev_clip_weight=prev_clip_weight,
-				strength=strength,
-				video_editing_instruction=instruction,
-				llm_model=llm_model,
-				dilate_size=dilate_size,
-				mask_feather=mask_feather,
-				caption_refine_iters=caption_refine_iters,
-				caption_refine_temperature=caption_refine_temperature,
-				keep_masked_pixels=keep_masked_pixels,
-				seed=seed,
-				preloaded_models=preloaded_models,
 			)
+
+			output_name = f"{vid}_{output_name_suffix}" if output_name_suffix else f"{vid}_vp_edit.mp4"
+			output_path = os.path.join(staged_output_dir, instr_dir, vid, output_name)
+
+			_reset_torch_cuda_peaks()
+			gen_start = time.perf_counter()
+			_run_edit_bench(**_make_edit_bench_kwargs(
+				output_path=output_path,
+				inpainting_mask_meta=inpainting_mask_meta,
+				video_root=video_root,
+				instruction=instruction,
+				phase="video",
+			))
 			gen_s = time.perf_counter() - gen_start
 			device, gpu_name, gpu_cc, peak_alloc_mb, peak_reserved_mb = _get_torch_cuda_metrics()
 			rss_mb = _get_rss_mb()
@@ -1328,8 +1330,6 @@ def run_videopainter_edit_many(
 			upload_s = time.perf_counter() - upload_start
 			logger.info("[%s][%s] Uploaded: %s", instr_dir, vid, ", ".join(uploaded))
 
-			# Collect info for deferred evaluation (run after all generation completes
-			# to avoid CUDA OOM from loading CLIP alongside generation models).
 			deferred_evals.append({
 				"instr_dir": instr_dir,
 				"vid": vid,
@@ -1337,9 +1337,8 @@ def run_videopainter_edit_many(
 				"inpainting_mask_meta": inpainting_mask_meta,
 				"instruction": instruction,
 			})
-			logger.info("[%s][%s] Generation done (evaluation deferred)", instr_dir, vid)
 
-			per_video_metrics.append(
+			per_instr_metrics[instr_dir].append(
 				VPVideoMetrics(
 					video_id=vid,
 					output_name=os.path.join(instr_dir, vid, output_name),
@@ -1354,7 +1353,11 @@ def run_videopainter_edit_many(
 				)
 			)
 
-		# Write report inside the instruction folder.
+	# Write per-instruction reports.
+	for instr_dir in instr_dirs:
+		per_video_metrics = per_instr_metrics[instr_dir]
+		if not per_video_metrics:
+			continue
 		try:
 			report_local = os.path.join(staged_output_dir, instr_dir, f"{effective_output_run_id}.txt")
 			_write_videopainter_run_report(
