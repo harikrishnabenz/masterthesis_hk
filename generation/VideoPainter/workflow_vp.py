@@ -1282,65 +1282,121 @@ def run_videopainter_edit_many(
 	# By deferring evaluation until after *all* generation is complete we can
 	# free the generation models first and avoid CUDA OOM.
 	# ---------------------------------------------------------------------------
+	# ---------------------------------------------------------------------------
+	# Evaluation timeout (seconds). If a single video's evaluation takes longer
+	# than this, we skip it and move on. Default: 30 minutes.
+	# ---------------------------------------------------------------------------
+	EVAL_TIMEOUT_S = int(os.environ.get("VP_EVAL_TIMEOUT_S", "1800"))
+
 	if deferred_evals:
 		logger.info("Freeing GPU memory before evaluation pass (%d videos)...", len(deferred_evals))
 		import gc
+		import signal
 		if torch.cuda.is_available():
 			torch.cuda.empty_cache()
 		gc.collect()
 		if torch.cuda.is_available():
 			torch.cuda.empty_cache()
 
-		for eval_info in deferred_evals:
-			e_instr_dir = eval_info["instr_dir"]
-			e_vid = eval_info["vid"]
-			logger.info("[EVAL][%s][%s] Running deferred evaluation", e_instr_dir, e_vid)
-			eval_start = time.perf_counter()
+		# Pre-check: try importing MetricsCalculator once before looping.
+		# If it hangs or fails, skip all evaluations immediately.
+		_metrics_available = False
+		try:
+			logger.info("[EVAL] Pre-checking MetricsCalculator import...")
+			sys.path.insert(0, os.path.join(BASE_WORKDIR, "evaluate"))
+
+			class _EvalImportTimeout(Exception):
+				pass
+
+			def _import_alarm_handler(signum, frame):
+				raise _EvalImportTimeout("MetricsCalculator import timed out after 120s")
+
+			old_handler = signal.signal(signal.SIGALRM, _import_alarm_handler)
+			signal.alarm(120)  # 2-minute timeout for import
 			try:
-				_, raw_root = _resolve_preprocessed_video_paths(
-					data_run_id=data_run_id,
-					data_video_id=e_vid,
-				)
-				video_base_name = _video_base_name_from_meta(
-					meta_csv_path=eval_info["inpainting_mask_meta"],
-					inpainting_sample_id=inpainting_sample_id,
-				)
+				from metrics import MetricsCalculator  # noqa: F811
+				_metrics_available = True
+				logger.info("[EVAL] MetricsCalculator imported successfully")
+			except _EvalImportTimeout:
+				logger.warning("[EVAL] MetricsCalculator import timed out — skipping all evaluations")
+			except ImportError as imp_err:
+				logger.warning("[EVAL] MetricsCalculator import failed (%s) — skipping all evaluations", imp_err)
+			finally:
+				signal.alarm(0)
+				signal.signal(signal.SIGALRM, old_handler)
+		except Exception as e:
+			logger.warning("[EVAL] Pre-check failed (%s) — skipping all evaluations", e)
 
-				expected_filename = f"{video_base_name}.0.mp4"
-				original_video_path = _select_video_file_under_root(
-					raw_root=raw_root,
-					video_base_name=video_base_name,
-					data_video_id=e_vid,
-					expected_filename=expected_filename,
-				)
+		if _metrics_available:
+			for eval_info in deferred_evals:
+				e_instr_dir = eval_info["instr_dir"]
+				e_vid = eval_info["vid"]
+				logger.info("[EVAL][%s][%s] Running deferred evaluation (timeout=%ds)", e_instr_dir, e_vid, EVAL_TIMEOUT_S)
+				eval_start = time.perf_counter()
+				try:
+					_, raw_root = _resolve_preprocessed_video_paths(
+						data_run_id=data_run_id,
+						data_video_id=e_vid,
+					)
+					video_base_name = _video_base_name_from_meta(
+						meta_csv_path=eval_info["inpainting_mask_meta"],
+						inpainting_sample_id=inpainting_sample_id,
+					)
 
-				mounted_video_dir = os.path.join(VP_DATA_FUSE_MOUNT_ROOT, data_run_id, e_vid)
-				mounted_masks_preferred = os.path.join(mounted_video_dir, "masks", e_vid, "all_masks.npz")
-				mounted_masks_legacy = os.path.join(mounted_video_dir, "mask_root", e_vid, "all_masks.npz")
-				mask_path = mounted_masks_preferred if os.path.exists(mounted_masks_preferred) else mounted_masks_legacy
+					expected_filename = f"{video_base_name}.0.mp4"
+					original_video_path = _select_video_file_under_root(
+						raw_root=raw_root,
+						video_base_name=video_base_name,
+						data_video_id=e_vid,
+						expected_filename=expected_filename,
+					)
 
-				eval_output_dir = os.path.join(staged_output_dir, e_instr_dir, e_vid)
-				eval_result = _evaluate_video(
-					original_path=original_video_path,
-					generated_path=eval_info["output_path"],
-					mask_path=mask_path,
-					caption=eval_info["instruction"],
-					output_dir=eval_output_dir,
-					video_id=e_vid,
-				)
+					mounted_video_dir = os.path.join(VP_DATA_FUSE_MOUNT_ROOT, data_run_id, e_vid)
+					mounted_masks_preferred = os.path.join(mounted_video_dir, "masks", e_vid, "all_masks.npz")
+					mounted_masks_legacy = os.path.join(mounted_video_dir, "mask_root", e_vid, "all_masks.npz")
+					mask_path = mounted_masks_preferred if os.path.exists(mounted_masks_preferred) else mounted_masks_legacy
 
-				if "error" not in eval_result:
-					eval_remote_path = os.path.join(gcs_save_path, e_instr_dir, e_vid, f"eval_{e_vid}.txt")
-					upload_file_to_gcs(eval_result["output_path"], eval_remote_path)
-					logger.info("[EVAL][%s][%s] Uploaded: %s", e_instr_dir, e_vid, eval_remote_path)
-				else:
-					logger.warning("[EVAL][%s][%s] Failed: %s", e_instr_dir, e_vid, eval_result["error"])
+					eval_output_dir = os.path.join(staged_output_dir, e_instr_dir, e_vid)
 
-			except Exception as e:
-				logger.warning("[EVAL][%s][%s] Failed: %s", e_instr_dir, e_vid, e)
+					# Run evaluation with a timeout using SIGALRM
+					class _EvalTimeout(Exception):
+						pass
 
-			eval_s = time.perf_counter() - eval_start
-			logger.info("[EVAL][%s][%s] Evaluation time: %.2fs", e_instr_dir, e_vid, eval_s)
+					def _eval_alarm_handler(signum, frame):
+						raise _EvalTimeout(f"Evaluation timed out after {EVAL_TIMEOUT_S}s")
+
+					old_handler = signal.signal(signal.SIGALRM, _eval_alarm_handler)
+					signal.alarm(EVAL_TIMEOUT_S)
+					try:
+						eval_result = _evaluate_video(
+							original_path=original_video_path,
+							generated_path=eval_info["output_path"],
+							mask_path=mask_path,
+							caption=eval_info["instruction"],
+							output_dir=eval_output_dir,
+							video_id=e_vid,
+						)
+					except _EvalTimeout:
+						logger.warning("[EVAL][%s][%s] TIMED OUT after %ds — skipping", e_instr_dir, e_vid, EVAL_TIMEOUT_S)
+						eval_result = {'error': f'Timed out after {EVAL_TIMEOUT_S}s'}
+					finally:
+						signal.alarm(0)
+						signal.signal(signal.SIGALRM, old_handler)
+
+					if "error" not in eval_result:
+						eval_remote_path = os.path.join(gcs_save_path, e_instr_dir, e_vid, f"eval_{e_vid}.txt")
+						upload_file_to_gcs(eval_result["output_path"], eval_remote_path)
+						logger.info("[EVAL][%s][%s] Uploaded: %s", e_instr_dir, e_vid, eval_remote_path)
+					else:
+						logger.warning("[EVAL][%s][%s] Failed: %s", e_instr_dir, e_vid, eval_result["error"])
+
+				except Exception as e:
+					logger.warning("[EVAL][%s][%s] Failed: %s", e_instr_dir, e_vid, e)
+
+				eval_s = time.perf_counter() - eval_start
+				logger.info("[EVAL][%s][%s] Evaluation time: %.2fs", e_instr_dir, e_vid, eval_s)
+		else:
+			logger.info("[EVAL] Skipped evaluation for all %d videos (MetricsCalculator unavailable)", len(deferred_evals))
 
 	logger.info("All videos completed. Outputs saved under: %s", gcs_save_path)
 
