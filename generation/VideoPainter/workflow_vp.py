@@ -544,8 +544,14 @@ def _evaluate_video(
 	caption: str,
 	output_dir: str,
 	video_id: str,
+	metrics_calculator=None,
 ) -> dict:
-	"""Evaluate generated video against original using numerical metrics."""
+	"""Evaluate generated video against original using numerical metrics.
+
+	If *metrics_calculator* is provided it will be reused (avoids reloading
+	CLIP / LPIPS weights for every video).  When ``None`` a fresh instance is
+	created internally (backwards-compatible fallback).
+	"""
 	try:
 		device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 		
@@ -581,7 +587,10 @@ def _evaluate_video(
 		mask_tensor = torch.from_numpy(masks).float().to(device) / 255.0
 		mask_tensor = mask_tensor.unsqueeze(1)
 		
-		metrics_calculator = MetricsCalculator(device)
+		# Reuse the caller-provided calculator or create a fresh one.
+		if metrics_calculator is None:
+			logger.info("[EVAL][%s] Creating new MetricsCalculator (no shared instance provided)", video_id)
+			metrics_calculator = MetricsCalculator(device)
 		
 		# Full-frame metrics (single-pass, all on GPU)
 		logger.info("[EVAL][%s] Calculating full-frame metrics", video_id)
@@ -1450,6 +1459,14 @@ def run_videopainter_edit_many(
 			logger.warning("[EVAL] Pre-check failed (%s) — skipping all evaluations", e)
 
 		if _metrics_available:
+			# Create MetricsCalculator ONCE and reuse across all videos.
+			# This avoids reloading CLIP ViT-L/14 + LPIPS weights for every
+			# video, saving several seconds of I/O + GPU transfer per eval.
+			_eval_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+			logger.info("[EVAL] Creating shared MetricsCalculator on %s (loaded once for %d videos)", _eval_device, len(deferred_evals))
+			_shared_metrics_calculator = MetricsCalculator(_eval_device)
+			logger.info("[EVAL] Shared MetricsCalculator ready (CLIP, LPIPS, etc. loaded)")
+
 			for eval_info in deferred_evals:
 				e_instr_dir = eval_info["instr_dir"]
 				e_vid = eval_info["vid"]
@@ -1497,6 +1514,7 @@ def run_videopainter_edit_many(
 							caption=eval_info["instruction"],
 							output_dir=eval_output_dir,
 							video_id=e_vid,
+							metrics_calculator=_shared_metrics_calculator,
 						)
 					except _EvalTimeout:
 						logger.warning("[EVAL][%s][%s] TIMED OUT after %ds — skipping", e_instr_dir, e_vid, EVAL_TIMEOUT_S)
@@ -1517,6 +1535,11 @@ def run_videopainter_edit_many(
 
 				eval_s = time.perf_counter() - eval_start
 				logger.info("[EVAL][%s][%s] Evaluation time: %.2fs", e_instr_dir, e_vid, eval_s)
+			# Clean up the shared calculator after all evaluations are done.
+			logger.info("[EVAL] All %d evaluations processed — releasing shared MetricsCalculator", len(deferred_evals))
+			del _shared_metrics_calculator
+			if torch.cuda.is_available():
+				torch.cuda.empty_cache()
 		else:
 			logger.info("[EVAL] Skipped evaluation for all %d videos (MetricsCalculator unavailable)", len(deferred_evals))
 
