@@ -43,17 +43,17 @@ cd "${REPO_ROOT}"
 GCS_BUCKET="mbadas-sandbox-research-9bb9c7f"
 
 RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-RUN_ID="${RUN_ID:-003}"
+RUN_ID="${RUN_ID:-005}"
 MASTER_RUN_ID="${RUN_ID}_${RUN_TIMESTAMP}"
 
 # Skip docker builds (reuse previously pushed images)
 SKIP_BUILD="${SKIP_BUILD:-0}"
 
 # Start from a specific stage (1=SAM2, 2=VP, 3=Alpamayo)
-START_STAGE="${START_STAGE:-2}"
+START_STAGE="${START_STAGE:-1}"
 
 # When START_STAGE>=2, provide the SAM2 run_id whose preprocessed data to reuse
-SAM2_DATA_RUN_ID="${SAM2_DATA_RUN_ID:-003_20260217_162441}"
+SAM2_DATA_RUN_ID="${SAM2_DATA_RUN_ID:-}"
 
 # When START_STAGE>=3, provide the VP output GCS path to reuse
 VP_OUTPUT_GCS_PATH="${VP_OUTPUT_GCS_PATH:-}"
@@ -68,8 +68,8 @@ SAM2_MAX_FRAMES="${SAM2_MAX_FRAMES:-150}"
 
 # Chunk-based input selection
 SAM2_CHUNK_START="${SAM2_CHUNK_START:-0}"
-SAM2_CHUNK_END="${SAM2_CHUNK_END:-19}"
-SAM2_FILES_PER_CHUNK="${SAM2_FILES_PER_CHUNK:-5}"
+SAM2_CHUNK_END="${SAM2_CHUNK_END:-0}"
+SAM2_FILES_PER_CHUNK="${SAM2_FILES_PER_CHUNK:-1}"
 
 SAM2_VIDEO_URIS="${SAM2_VIDEO_URIS:-chunks://${SAM2_INPUT_BASE#gs://}?start=${SAM2_CHUNK_START}&end=${SAM2_CHUNK_END}&per_chunk=${SAM2_FILES_PER_CHUNK}}"
 
@@ -97,12 +97,14 @@ VP_LLM_MODEL="${VP_LLM_MODEL:-/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Ins
 
 # Editing instructions (newline-separated; use || to delimit in env vars)
 # Must match the 5 standard lane-line variations used by the standalone VP build script.
-VIDEO_EDITING_INSTRUCTIONS="${VIDEO_EDITING_INSTRUCTIONS:-$(printf '%s\n%s\n%s\n%s\n%s' \
-  'Single solid white continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged' \
-  'Double solid white continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged' \
-  'Single solid yellow continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged' \
-  'Double solid yellow continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged' \
-  'Single dashed white intermitted line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged')}"
+# VIDEO_EDITING_INSTRUCTIONS="${VIDEO_EDITING_INSTRUCTIONS:-$(printf '%s\n%s\n%s\n%s\n%s' \
+#   'Single solid white continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged' \
+#   'Double solid white continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged' \
+#   'Single solid yellow continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged' \
+#   'Double solid yellow continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged' \
+#   'Single dashed white intermitted line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged')}"
+
+VIDEO_EDITING_INSTRUCTIONS="${VIDEO_EDITING_INSTRUCTIONS:-Single solid white continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged}"
 
 # VP inference parameters
 VP_NUM_INFERENCE_STEPS="${VP_NUM_INFERENCE_STEPS:-70}"
