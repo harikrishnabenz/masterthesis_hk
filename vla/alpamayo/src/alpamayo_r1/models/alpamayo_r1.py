@@ -119,10 +119,11 @@ class AlpamayoR1(ReasoningVLA):
             self.action_in_proj = self.action_in_proj.to(dtype=expert_dtype)
             self.action_out_proj = self.action_out_proj.to(dtype=expert_dtype)
 
-        # Compile the expert model for faster inference (numerically identical)
-        self.expert = torch.compile(self.expert, mode="reduce-overhead")
-
         self.post_init()
+
+        # Compile the expert model for faster inference (numerically identical)
+        # NOTE: must be AFTER post_init() so checkpoint keys match (avoids _orig_mod prefix mismatch)
+        self.expert = torch.compile(self.expert, mode="reduce-overhead")
 
     def sample_trajectories_from_data_with_vlm_rollout(
         self,
@@ -261,18 +262,23 @@ class AlpamayoR1(ReasoningVLA):
         # fixed-size buffer that has room for exactly n_diffusion_tokens more.
         from transformers.cache_utils import StaticCache
         expert_cfg = self.expert.config
+        # In transformers >=4.57, DynamicCache uses .layers[i].keys/.values
+        # instead of the old .key_cache/.value_cache attributes.
+        cache_dtype = prompt_cache.layers[0].keys.dtype
         static_cache = StaticCache(
             config=expert_cfg,
             batch_size=b_star,
             max_cache_len=prefill_seq_len + n_diffusion_tokens,
             device=device,
-            dtype=prompt_cache.key_cache[0].dtype,
+            dtype=cache_dtype,
         )
         # Copy the prompt KV into the static cache
-        for layer_idx in range(len(prompt_cache.key_cache)):
-            seq_len = prompt_cache.key_cache[layer_idx].shape[2]
-            static_cache.key_cache[layer_idx][:, :, :seq_len, :] = prompt_cache.key_cache[layer_idx]
-            static_cache.value_cache[layer_idx][:, :, :seq_len, :] = prompt_cache.value_cache[layer_idx]
+        for layer_idx in range(len(prompt_cache.layers)):
+            src_keys = prompt_cache.layers[layer_idx].keys
+            src_vals = prompt_cache.layers[layer_idx].values
+            seq_len = src_keys.shape[2]
+            static_cache.layers[layer_idx].keys[:, :, :seq_len, :] = src_keys
+            static_cache.layers[layer_idx].values[:, :, :seq_len, :] = src_vals
 
         # Track the original cache length for resetting after each step
         static_cache_seen = prefill_seq_len
