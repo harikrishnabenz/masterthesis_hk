@@ -73,12 +73,12 @@ MASTER_RUN_ID="${RUN_ID}_${RUN_TIMESTAMP}"
 # ==============================================================================
 
 # ── Stage selection (1=SAM2, 2=VP, 3=Alpamayo; combine: 12, 23, 123) ─────────
-STAGES="${STAGES:-23}"
+STAGES="${STAGES:-1}"
 
 # ── Stage 1 (SAM2) inputs ────────────────────────────────────────────────────
-SAM2_CHUNK_START="${SAM2_CHUNK_START:-}"
-SAM2_CHUNK_END="${SAM2_CHUNK_END:-}"
-SAM2_FILES_PER_CHUNK="${SAM2_FILES_PER_CHUNK:-}"
+SAM2_CHUNK_START="${SAM2_CHUNK_START:-0}"
+SAM2_CHUNK_END="${SAM2_CHUNK_END:-19}"
+SAM2_FILES_PER_CHUNK="${SAM2_FILES_PER_CHUNK:-5}"
 
 # ── Stage 2 (VP) input — required when running VP without SAM2 (STAGES=2,23) ─
 SAM2_DATA_RUN_ID="${SAM2_DATA_RUN_ID:-}"
