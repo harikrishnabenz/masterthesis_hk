@@ -669,13 +669,14 @@ def render_comparison_video(
         raise RuntimeError(f"No frames decoded from {generated_video_path}")
 
     # ── Reconstruct original camera frames from npz ──────────────────
-    orig_cam_frames_raw = vis.get("orig_camera_frames")  # (T, H, W, 3) or None
+    orig_cam_frames_raw = vis.get("orig_camera_frames")  # (T, H, W, 3) RGB from dataset
     if orig_cam_frames_raw is not None:
         # Duplicate the last frame to match the generated video length
+        # Convert RGB→BGR to match the generated frames (decoded as bgr24 above)
         orig_frames = []
         for i in range(len(gen_frames)):
             idx = min(i, len(orig_cam_frames_raw) - 1)
-            orig_frames.append(orig_cam_frames_raw[idx].copy())
+            orig_frames.append(cv2.cvtColor(orig_cam_frames_raw[idx], cv2.COLOR_RGB2BGR))
     else:
         # Fallback: use the generated frames with a "NO ORIGINAL" label
         logger.warning("Original camera frames not found in npz; using generated frames as placeholder")
