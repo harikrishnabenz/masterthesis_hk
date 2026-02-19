@@ -277,7 +277,7 @@ VP_MASK_FEATHER="${VP_MASK_FEATHER:-4}"
 VP_BORDER_AWARE_MASKING="${VP_BORDER_AWARE_MASKING:-true}"
 # Method for border handling: inpaint (best), blur (fast), interpolate (experimental)
 VP_BORDER_METHOD="${VP_BORDER_METHOD:-inpaint}"
-VP_KEEP_MASKED_PIXELS="${VP_KEEP_MASKED_PIXELS:-True}"
+VP_KEEP_MASKED_PIXELS="${VP_KEEP_MASKED_PIXELS:-False}"
 VP_IMG_INPAINTING_LORA_SCALE="${VP_IMG_INPAINTING_LORA_SCALE:-0.0}"
 VP_SEED="${VP_SEED:-42}"
 
@@ -488,12 +488,13 @@ VP_COMMON_ARGS=(
     --vp_caption_refine_temperature "${VP_CAPTION_REFINE_TEMPERATURE}"
     --vp_dilate_size "${VP_DILATE_SIZE}"
     --vp_mask_feather "${VP_MASK_FEATHER}"
-    --vp_border_aware_masking "${VP_BORDER_AWARE_MASKING}"
-    --vp_border_method "${VP_BORDER_METHOD}"
-    --vp_keep_masked_pixels
     --vp_img_inpainting_lora_scale "${VP_IMG_INPAINTING_LORA_SCALE}"
     --vp_seed "${VP_SEED}"
 )
+# Only add the boolean flag when True (omitting it = False for HLX bool params)
+if [[ "${VP_KEEP_MASKED_PIXELS}" =~ ^[Tt]rue$ ]]; then
+    VP_COMMON_ARGS+=(--vp_keep_masked_pixels)
+fi
 
 # ── Helper: common Alpamayo arguments ───────────────────────────────────────
 ALP_COMMON_ARGS=(

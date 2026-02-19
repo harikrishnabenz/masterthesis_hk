@@ -196,6 +196,9 @@ def sam2_stage(
         "VP_UNLOAD_QWEN_AFTER_USE": "1",
         "TRAINED_FLUXFILL_GCS_PATH": TRAINED_FLUXFILL_GCS_PREFIX,
         "VP_OUTPUT_BASE": VP_OUTPUT_BASE,
+        # Border-aware masking to prevent black artifacts during camera movement
+        "VP_BORDER_AWARE_MASKING": "true",
+        "VP_BORDER_METHOD": "inpaint",
     },
     mounts=[
         FuseBucket(bucket=GCS_BUCKET, name=VP_FUSE_NAME,          prefix=VP_BUCKET_PREFIX),
@@ -215,8 +218,8 @@ def vp_stage(
     strength: float = 1.0,
     caption_refine_iters: int = 10,
     caption_refine_temperature: float = 0.1,
-    dilate_size: int = 24,
-    mask_feather: int = 8,
+    dilate_size: int = 8,
+    mask_feather: int = 4,
     keep_masked_pixels: bool = True,
     img_inpainting_lora_scale: float = 0.0,
     seed: int = 42,
@@ -378,8 +381,6 @@ def master_pipeline_wf(
     vp_caption_refine_temperature: float = 0.1,
     vp_dilate_size: int = 8,  # Reduced to minimize border artifacts
     vp_mask_feather: int = 4,  # Reduced for more precise masking
-    vp_border_aware_masking: bool = True,  # Enable content-aware masking
-    vp_border_method: str = "inpaint",  # Method for border handling
     vp_keep_masked_pixels: bool = True,
     vp_img_inpainting_lora_scale: float = 0.0,
     vp_seed: int = 42,
@@ -478,8 +479,8 @@ def vp_alpamayo_wf(
     vp_strength: float = 1.0,
     vp_caption_refine_iters: int = 10,
     vp_caption_refine_temperature: float = 0.1,
-    vp_dilate_size: int = 24,
-    vp_mask_feather: int = 8,
+    vp_dilate_size: int = 8,
+    vp_mask_feather: int = 4,
     vp_keep_masked_pixels: bool = True,
     vp_img_inpainting_lora_scale: float = 0.0,
     vp_seed: int = 42,
@@ -581,8 +582,8 @@ def sam2_vp_wf(
     vp_strength: float = 1.0,
     vp_caption_refine_iters: int = 10,
     vp_caption_refine_temperature: float = 0.1,
-    vp_dilate_size: int = 24,
-    vp_mask_feather: int = 8,
+    vp_dilate_size: int = 8,
+    vp_mask_feather: int = 4,
     vp_keep_masked_pixels: bool = True,
     vp_img_inpainting_lora_scale: float = 0.0,
     vp_seed: int = 42,
@@ -648,8 +649,8 @@ def vp_only_wf(
     vp_strength: float = 1.0,
     vp_caption_refine_iters: int = 10,
     vp_caption_refine_temperature: float = 0.1,
-    vp_dilate_size: int = 24,
-    vp_mask_feather: int = 8,
+    vp_dilate_size: int = 8,
+    vp_mask_feather: int = 4,
     vp_keep_masked_pixels: bool = True,
     vp_img_inpainting_lora_scale: float = 0.0,
     vp_seed: int = 42,
