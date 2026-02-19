@@ -933,13 +933,17 @@ def process_all_videos(video_uris: List[str]):
             del _ram_buf
             
             # Segment road (returns processed masks for reuse)
+            # Use FRAMES_PER_SECOND (not source_fps) because extract_frames()
+            # temporally subsamples to that rate — writing the output video at
+            # the *source* fps would compress real-time duration by
+            # source_fps / FRAMES_PER_SECOND (e.g. 30/8 ≈ 4×).
             processed_masks = segment_road_in_video(
                 predictor,
                 frames_dir,
                 OUTPUT_DIR,
                 video_name,
                 timed_frames=SEGMENT_TIMED_FRAMES,
-                output_fps=source_fps,
+                output_fps=float(FRAMES_PER_SECOND),
                 timings=vt,
             )
             
