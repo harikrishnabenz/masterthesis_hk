@@ -81,7 +81,7 @@ SAM2_CHUNK_END="${SAM2_CHUNK_END:-}"
 SAM2_FILES_PER_CHUNK="${SAM2_FILES_PER_CHUNK:-}"
 
 # ── Stage 2 (VP) input — required when running VP without SAM2 (STAGES=2,23) ─
-SAM2_DATA_RUN_ID="${SAM2_DATA_RUN_ID:-005_20260219_131823}"
+SAM2_DATA_RUN_ID="${SAM2_DATA_RUN_ID:-006_20260219_135038}"
 
 # ── Stage 3 (Alpamayo) input — required when running Alp without VP (STAGES=3)
 VP_DATA_RUN_ID="${VP_DATA_RUN_ID:-}"
@@ -524,7 +524,7 @@ case "${STAGES}" in
         hlx wf run \
           --team-space research \
           --domain prod \
-          --execution-name "vp-${MASTER_RUN_ID//_/-}" \
+          --execution-name "vp-p${PROMPT_IDS}-${MASTER_RUN_ID//_/-}" \
           workflow_master.vp_only_wf \
           --run_id "${MASTER_RUN_ID}" \
           --sam2_data_run_id "${SAM2_DATA_RUN_ID}" \
@@ -551,7 +551,7 @@ case "${STAGES}" in
         hlx wf run \
           --team-space research \
           --domain prod \
-          --execution-name "sam2-vp-${MASTER_RUN_ID//_/-}" \
+          --execution-name "sam2-vp-p${PROMPT_IDS}-${MASTER_RUN_ID//_/-}" \
           workflow_master.sam2_vp_wf \
           --run_id "${MASTER_RUN_ID}" \
           --sam2_video_uris "${SAM2_VIDEO_URIS}" \
@@ -566,7 +566,7 @@ case "${STAGES}" in
         hlx wf run \
           --team-space research \
           --domain prod \
-          --execution-name "vp-alp-${MASTER_RUN_ID//_/-}" \
+          --execution-name "vp-alp-p${PROMPT_IDS}-${MASTER_RUN_ID//_/-}" \
           workflow_master.vp_alpamayo_wf \
           --run_id "${MASTER_RUN_ID}" \
           --sam2_data_run_id "${SAM2_DATA_RUN_ID}" \
@@ -580,7 +580,7 @@ case "${STAGES}" in
         hlx wf run \
           --team-space research \
           --domain prod \
-          --execution-name "master-${MASTER_RUN_ID//_/-}" \
+          --execution-name "master-p${PROMPT_IDS}-${MASTER_RUN_ID//_/-}" \
           workflow_master.master_pipeline_wf \
           --run_id "${MASTER_RUN_ID}" \
           --sam2_video_uris "${SAM2_VIDEO_URIS}" \
