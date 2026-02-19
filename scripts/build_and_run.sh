@@ -73,7 +73,7 @@ MASTER_RUN_ID="${RUN_ID}_${RUN_TIMESTAMP}"
 # ==============================================================================
 
 # ── Stage selection (1=SAM2, 2=VP, 3=Alpamayo; combine: 12, 23, 123) ─────────
-STAGES="${STAGES:-123}"
+STAGES="${STAGES:-1}"
 
 # ── Stage 1 (SAM2) inputs ────────────────────────────────────────────────────
 SAM2_CHUNK_START="${SAM2_CHUNK_START:-0}"
