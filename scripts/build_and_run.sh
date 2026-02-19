@@ -22,14 +22,13 @@
 # Usage — select stages with STAGES=<digits>:
 #   STAGES=1   bash scripts/build_and_run.sh   # SAM2 only (needs chunk config)
 #   STAGES=2   SAM2_DATA_RUN_ID=003_…  bash scripts/build_and_run.sh  # VP only
-#   STAGES=3   VP_OUTPUT_GCS_PATH=gs://…  bash scripts/build_and_run.sh  # Alp only
+#   STAGES=3   VP_DATA_RUN_ID=003_…  bash scripts/build_and_run.sh  # Alp only
 #   STAGES=12  bash scripts/build_and_run.sh   # SAM2 → VP (needs chunk config)
 #   STAGES=23  SAM2_DATA_RUN_ID=003_…  bash scripts/build_and_run.sh  # VP → Alp
 #   STAGES=123 bash scripts/build_and_run.sh   # Full pipeline (needs chunk config)
 #
 # Other options:
 #   RUN_ID=002 bash scripts/build_and_run.sh   # custom run id
-#   SKIP_BUILD=1 bash scripts/build_and_run.sh # reuse previously pushed images
 # ==================================================================================
 
 set -euo pipefail
@@ -48,13 +47,73 @@ RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 RUN_ID="${RUN_ID:-003}"
 MASTER_RUN_ID="${RUN_ID}_${RUN_TIMESTAMP}"
 
-# Skip docker builds (reuse previously pushed images)
-SKIP_BUILD="${SKIP_BUILD:-0}"
 
-# ── Stage selection ───────────────────────────────────────────────────────────
-# STAGES is a string of digits: 1, 2, 3, 12, 23, 123
-# Each digit selects which stages to run in order.
-STAGES="${STAGES:-2}"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ==============================================================================
+# INPUT CONFIGURATION — set these before running
+# ==============================================================================
+
+# ── Stage selection (1=SAM2, 2=VP, 3=Alpamayo; combine: 12, 23, 123) ─────────
+STAGES="${STAGES:-3}"
+
+# ── Stage 1 (SAM2) inputs ────────────────────────────────────────────────────
+SAM2_CHUNK_START="${SAM2_CHUNK_START:-0}"
+SAM2_CHUNK_END="${SAM2_CHUNK_END:-5}"
+SAM2_FILES_PER_CHUNK="${SAM2_FILES_PER_CHUNK:-2}"
+
+# ── Stage 2 (VP) input — required when running VP without SAM2 (STAGES=2,23) ─
+SAM2_DATA_RUN_ID="${SAM2_DATA_RUN_ID:-}"
+
+# ── Stage 3 (Alpamayo) input — required when running Alp without VP (STAGES=3)
+VP_DATA_RUN_ID="${VP_DATA_RUN_ID:-003_20260217_184302}"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 # Parse which stages are active
 RUN_SAM2=0; RUN_VP=0; RUN_ALP=0
@@ -68,22 +127,18 @@ if [[ ! "${STAGES}" =~ ^[123]+$ ]]; then
     exit 1
 fi
 
-# ── Input folder dependencies ─────────────────────────────────────────────────
-# When VP runs without SAM2 (STAGES=2 or 23): need SAM2_DATA_RUN_ID
-SAM2_DATA_RUN_ID="${SAM2_DATA_RUN_ID:-}"
+# ── Input folder dependency checks ───────────────────────────────────────────
 if [[ ${RUN_VP} -eq 1 && ${RUN_SAM2} -eq 0 && -z "${SAM2_DATA_RUN_ID}" ]]; then
     echo "ERROR: STAGES=${STAGES} includes VP (2) without SAM2 (1)."
-    echo "       You must provide SAM2_DATA_RUN_ID (the SAM2 output folder name)."
+    echo "       You must set SAM2_DATA_RUN_ID (the SAM2 output folder name)."
     echo "       Example: SAM2_DATA_RUN_ID=003_20260217_162441 STAGES=${STAGES} bash scripts/build_and_run.sh"
     exit 1
 fi
 
-# When Alpamayo runs without VP (STAGES=3): need VP_OUTPUT_GCS_PATH
-VP_OUTPUT_GCS_PATH="${VP_OUTPUT_GCS_PATH:-}"
-if [[ ${RUN_ALP} -eq 1 && ${RUN_VP} -eq 0 && -z "${VP_OUTPUT_GCS_PATH}" ]]; then
+if [[ ${RUN_ALP} -eq 1 && ${RUN_VP} -eq 0 && -z "${VP_DATA_RUN_ID}" ]]; then
     echo "ERROR: STAGES=${STAGES} includes Alpamayo (3) without VP (2)."
-    echo "       You must provide VP_OUTPUT_GCS_PATH (the VP output GCS path)."
-    echo "       Example: VP_OUTPUT_GCS_PATH=gs://…/outputs/vp/003_…/ STAGES=${STAGES} bash scripts/build_and_run.sh"
+    echo "       You must set VP_DATA_RUN_ID (the VP output folder name)."
+    echo "       Example: VP_DATA_RUN_ID=003_20260217_162441 STAGES=${STAGES} bash scripts/build_and_run.sh"
     exit 1
 fi
 
@@ -94,11 +149,6 @@ SAM2_INPUT_PARENT="${SAM2_INPUT_PARENT:-gs://${GCS_BUCKET}/workspace/user/hbaska
 SAM2_CAMERA_SUBFOLDER="${SAM2_CAMERA_SUBFOLDER:-camera_front_tele_30fov}"
 SAM2_INPUT_BASE="${SAM2_INPUT_BASE:-${SAM2_INPUT_PARENT}/${SAM2_CAMERA_SUBFOLDER}}"
 SAM2_MAX_FRAMES="${SAM2_MAX_FRAMES:-150}"
-
-# Chunk-based input selection
-SAM2_CHUNK_START="${SAM2_CHUNK_START:-0}"
-SAM2_CHUNK_END="${SAM2_CHUNK_END:-0}"
-SAM2_FILES_PER_CHUNK="${SAM2_FILES_PER_CHUNK:-1}"
 
 SAM2_VIDEO_URIS="${SAM2_VIDEO_URIS:-chunks://${SAM2_INPUT_BASE#gs://}?start=${SAM2_CHUNK_START}&end=${SAM2_CHUNK_END}&per_chunk=${SAM2_FILES_PER_CHUNK}}"
 
@@ -124,6 +174,34 @@ VP_RUN_SUFFIX="${VP_RUN_SUFFIX:-withoutlora_${NUM_PROMPTS}prompt_${CHECKPOINT_TI
 # LLM model path inside VP container
 VP_LLM_MODEL="${VP_LLM_MODEL:-/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct}"
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # ----------------------------------------------------------------------------------
 # PROMPT SELECTION
 # ----------------------------------------------------------------------------------
@@ -133,6 +211,35 @@ VP_LLM_MODEL="${VP_LLM_MODEL:-/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Ins
 #   PROMPT_IDS=15       → prompts 1 and 5
 #   PROMPT_IDS=12345    → all five (default)
 PROMPT_IDS="${PROMPT_IDS:-12345}"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 declare -A PROMPTS
 PROMPTS[1]='Single solid white continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged'
@@ -227,7 +334,7 @@ if [[ ${RUN_VP} -eq 1 && ${RUN_SAM2} -eq 0 ]]; then
     echo "  SAM2_DATA_RUN_ID:   ${SAM2_DATA_RUN_ID}  (reusing SAM2 output)"
 fi
 if [[ ${RUN_ALP} -eq 1 && ${RUN_VP} -eq 0 ]]; then
-    echo "  VP_OUTPUT_GCS_PATH: ${VP_OUTPUT_GCS_PATH}  (reusing VP output)"
+    echo "  VP_DATA_RUN_ID:     ${VP_DATA_RUN_ID}  (reusing VP output)"
 fi
 echo ""
 
@@ -264,7 +371,7 @@ if [[ ${RUN_ALP} -eq 1 ]]; then
     if [[ ${RUN_VP} -eq 1 ]]; then
         echo "  Input (from VP):    ${VP_OUTPUT_BASE}/${MASTER_RUN_ID}/  (auto from Stage 2)"
     else
-        echo "  Input (VP data):    ${VP_OUTPUT_GCS_PATH}"
+        echo "  Input (VP data):    ${VP_OUTPUT_BASE}/${VP_DATA_RUN_ID}/"
     fi
     echo "  Output:             gs://${GCS_BUCKET}/${ALPAMAYO_OUTPUT_BASE}/${MASTER_RUN_ID}/"
     echo "  Model:              ${ALPAMAYO_MODEL_ID}"
@@ -279,69 +386,63 @@ echo "==========================================================================
 # ==============================================================================
 # BUILD & PUSH DOCKER IMAGES
 # ==============================================================================
-if [[ "${SKIP_BUILD}" == "1" ]]; then
-    echo ""
-    echo "SKIP_BUILD=1 — reusing previously pushed images."
-    echo ""
-else
-    echo ""
-    echo "Building and pushing Docker images …"
-    echo ""
+echo ""
+echo "Building and pushing Docker images …"
+echo ""
 
-    # ── Stage 1: SAM2 ─────────────────────────────────────────────────────────
-    if [[ ${RUN_SAM2} -eq 1 ]]; then
-        echo "▸ Building SAM2 image …"
-        pushd segmentation/sam2 > /dev/null
-        docker compose build
-        docker tag "${SAM2_LOCAL_IMAGE}" "${SAM2_TAGGED}"
-        docker tag "${SAM2_LOCAL_IMAGE}" "${SAM2_REMOTE_IMAGE}:latest"
-        docker push "${SAM2_TAGGED}"
-        docker push "${SAM2_REMOTE_IMAGE}:latest"
-        popd > /dev/null
-        echo "  ✓ SAM2 image pushed: ${SAM2_TAGGED}"
-    else
-        echo "  ⏭ SAM2 build skipped (not in STAGES=${STAGES})"
-    fi
-
-    # ── Stage 2: VideoPainter ─────────────────────────────────────────────────
-    if [[ ${RUN_VP} -eq 1 ]]; then
-        echo "▸ Building VideoPainter image …"
-        pushd generation/VideoPainter > /dev/null
-        docker compose build
-        docker tag "${VP_LOCAL_IMAGE}" "${VP_TAGGED}"
-        docker tag "${VP_LOCAL_IMAGE}" "${VP_REMOTE_IMAGE}:latest"
-        docker push "${VP_TAGGED}"
-        docker push "${VP_REMOTE_IMAGE}:latest"
-        popd > /dev/null
-        echo "  ✓ VP image pushed: ${VP_TAGGED}"
-    else
-        echo "  ⏭ VP build skipped (not in STAGES=${STAGES})"
-    fi
-
-    # ── Stage 3: Alpamayo ─────────────────────────────────────────────────────
-    if [[ ${RUN_ALP} -eq 1 ]]; then
-        echo "▸ Building Alpamayo image …"
-        pushd vla/alpamayo > /dev/null
-        docker compose build
-        docker tag "${ALP_LOCAL_IMAGE}" "${ALP_TAGGED}"
-        docker tag "${ALP_LOCAL_IMAGE}" "${ALP_REMOTE_IMAGE}:latest"
-        docker push "${ALP_TAGGED}"
-        docker push "${ALP_REMOTE_IMAGE}:latest"
-        popd > /dev/null
-        echo "  ✓ Alpamayo image pushed: ${ALP_TAGGED}"
-    else
-        echo "  ⏭ Alpamayo build skipped (not in STAGES=${STAGES})"
-    fi
-
-    # ── Master orchestrator ───────────────────────────────────────────────────
-    echo "▸ Building Master orchestrator image …"
+# ── Stage 1: SAM2 ─────────────────────────────────────────────────────────
+if [[ ${RUN_SAM2} -eq 1 ]]; then
+    echo "▸ Building SAM2 image …"
+    pushd segmentation/sam2 > /dev/null
     docker compose build
-    docker tag "${MASTER_LOCAL_IMAGE}" "${MASTER_TAGGED}"
-    docker tag "${MASTER_LOCAL_IMAGE}" "${MASTER_REMOTE_IMAGE}:latest"
-    docker push "${MASTER_TAGGED}"
-    docker push "${MASTER_REMOTE_IMAGE}:latest"
-    echo "  ✓ Master image pushed: ${MASTER_TAGGED}"
+    docker tag "${SAM2_LOCAL_IMAGE}" "${SAM2_TAGGED}"
+    docker tag "${SAM2_LOCAL_IMAGE}" "${SAM2_REMOTE_IMAGE}:latest"
+    docker push "${SAM2_TAGGED}"
+    docker push "${SAM2_REMOTE_IMAGE}:latest"
+    popd > /dev/null
+    echo "  ✓ SAM2 image pushed: ${SAM2_TAGGED}"
+else
+    echo "  ⏭ SAM2 build skipped (not in STAGES=${STAGES})"
 fi
+
+# ── Stage 2: VideoPainter ─────────────────────────────────────────────────
+if [[ ${RUN_VP} -eq 1 ]]; then
+    echo "▸ Building VideoPainter image …"
+    pushd generation/VideoPainter > /dev/null
+    docker compose build
+    docker tag "${VP_LOCAL_IMAGE}" "${VP_TAGGED}"
+    docker tag "${VP_LOCAL_IMAGE}" "${VP_REMOTE_IMAGE}:latest"
+    docker push "${VP_TAGGED}"
+    docker push "${VP_REMOTE_IMAGE}:latest"
+    popd > /dev/null
+    echo "  ✓ VP image pushed: ${VP_TAGGED}"
+else
+    echo "  ⏭ VP build skipped (not in STAGES=${STAGES})"
+fi
+
+# ── Stage 3: Alpamayo ─────────────────────────────────────────────────────
+if [[ ${RUN_ALP} -eq 1 ]]; then
+    echo "▸ Building Alpamayo image …"
+    pushd vla/alpamayo > /dev/null
+    docker compose build
+    docker tag "${ALP_LOCAL_IMAGE}" "${ALP_TAGGED}"
+    docker tag "${ALP_LOCAL_IMAGE}" "${ALP_REMOTE_IMAGE}:latest"
+    docker push "${ALP_TAGGED}"
+    docker push "${ALP_REMOTE_IMAGE}:latest"
+    popd > /dev/null
+    echo "  ✓ Alpamayo image pushed: ${ALP_TAGGED}"
+else
+    echo "  ⏭ Alpamayo build skipped (not in STAGES=${STAGES})"
+fi
+
+# ── Master orchestrator ───────────────────────────────────────────────────
+echo "▸ Building Master orchestrator image …"
+docker compose build
+docker tag "${MASTER_LOCAL_IMAGE}" "${MASTER_TAGGED}"
+docker tag "${MASTER_LOCAL_IMAGE}" "${MASTER_REMOTE_IMAGE}:latest"
+docker push "${MASTER_TAGGED}"
+docker push "${MASTER_REMOTE_IMAGE}:latest"
+echo "  ✓ Master image pushed: ${MASTER_TAGGED}"
 
 # ==============================================================================
 # EXPORT ENV VARS FOR WORKFLOW SERIALISATION
@@ -420,14 +521,14 @@ case "${STAGES}" in
     3)
         # ── Alpamayo only ───────────────────────────────────────────────────
         echo "Submitting Alpamayo-only pipeline …"
-        echo "  Using VP output: ${VP_OUTPUT_GCS_PATH}"
+        echo "  Using VP data run: ${VP_DATA_RUN_ID}"
         hlx wf run \
           --team-space research \
           --domain prod \
           --execution-name "alp-${MASTER_RUN_ID//_/-}" \
           workflow_master.alpamayo_only_wf \
           --run_id "${MASTER_RUN_ID}" \
-          --vp_output_gcs_path "${VP_OUTPUT_GCS_PATH}" \
+          --vp_data_run_id "${VP_DATA_RUN_ID}" \
           "${ALP_COMMON_ARGS[@]}"
         ;;
 
