@@ -167,9 +167,8 @@ VP_OUTPUT_BASE="${VP_OUTPUT_BASE:-gs://${GCS_BUCKET}/workspace/user/hbaskar/outp
 # Trained FluxFill LoRA checkpoint in GCS
 TRAINED_FLUXFILL_GCS_PATH="${TRAINED_FLUXFILL_GCS_PATH:-workspace/user/hbaskar/Video_inpainting/videopainter/training/trained_checkpoint/fluxfill_single_white_solid_clearroad_20260212_151908}"
 
-# VP run suffix (used in Docker image naming)
+# VP run suffix (used in Docker image naming) — set after NUM_PROMPTS is computed below
 CHECKPOINT_TIMESTAMP=$(basename "$TRAINED_FLUXFILL_GCS_PATH" | grep -oE '[0-9]{8}_[0-9]{6}' | head -1 || true)
-VP_RUN_SUFFIX="${VP_RUN_SUFFIX:-withoutlora_${NUM_PROMPTS}prompt_${CHECKPOINT_TIMESTAMP}}"
 
 # LLM model path inside VP container
 VP_LLM_MODEL="${VP_LLM_MODEL:-/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct}"
@@ -210,7 +209,7 @@ VP_LLM_MODEL="${VP_LLM_MODEL:-/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Ins
 #   PROMPT_IDS=123      → prompts 1, 2, 3
 #   PROMPT_IDS=15       → prompts 1 and 5
 #   PROMPT_IDS=12345    → all five (default)
-PROMPT_IDS="${PROMPT_IDS:-12345}"
+PROMPT_IDS="${PROMPT_IDS:-4}"
 
 
 
@@ -262,6 +261,7 @@ for (( i=0; i<${#PROMPT_IDS}; i++ )); do
   VIDEO_EDITING_INSTRUCTIONS+="${PROMPTS[$pid]}"
 done
 NUM_PROMPTS=${#PROMPT_IDS}
+VP_RUN_SUFFIX="${VP_RUN_SUFFIX:-withoutlora_${NUM_PROMPTS}prompt_${CHECKPOINT_TIMESTAMP}}"
 
 # VP inference parameters
 VP_NUM_INFERENCE_STEPS="${VP_NUM_INFERENCE_STEPS:-50}"
