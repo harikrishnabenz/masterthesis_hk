@@ -799,18 +799,40 @@ def read_video_with_mask(
         
     masked_video = []
     binary_masks = []
+    
+    # Enable improved border handling to prevent black artifacts during camera movement
+    use_border_aware_masking = os.environ.get("VP_BORDER_AWARE_MASKING", "true").lower() in ("true", "1", "yes")
+    border_method = os.environ.get("VP_BORDER_METHOD", "inpaint")  # Options: inpaint, blur, interpolate
+    
     for frame, frame_mask in zip(video, mask):
         frame_array = np.array(frame)
-        
-        black_frame = np.zeros_like(frame_array)
-        
         binary_mask = (frame_mask == mask_id)
         
-        binary_mask_expanded = np.repeat(binary_mask[:, :, np.newaxis], 3, axis=2)
+        if use_border_aware_masking and border_method == "inpaint":
+            # Use content-aware inpainting to avoid black borders during camera movement
+            mask_uint8 = binary_mask.astype(np.uint8) * 255
+            # Dilate mask slightly for better inpainting
+            kernel = np.ones((3, 3), np.uint8)
+            mask_dilated = cv2.dilate(mask_uint8, kernel, iterations=1)
+            try:
+                masked_frame_array = cv2.inpaint(frame_array, mask_dilated, 3, cv2.INPAINT_TELEA)
+            except:
+                # Fallback to blur if inpainting fails
+                blurred_frame = cv2.GaussianBlur(frame_array, (15, 15), 0)
+                binary_mask_expanded = np.repeat(binary_mask[:, :, np.newaxis], 3, axis=2)
+                masked_frame_array = np.where(binary_mask_expanded, blurred_frame, frame_array)
+        elif use_border_aware_masking and border_method == "blur":
+            # Use Gaussian blur of surrounding regions
+            blurred_frame = cv2.GaussianBlur(frame_array, (15, 15), 0)
+            binary_mask_expanded = np.repeat(binary_mask[:, :, np.newaxis], 3, axis=2)
+            masked_frame_array = np.where(binary_mask_expanded, blurred_frame, frame_array)
+        else:
+            # Original method - pure black fill (can cause border artifacts)
+            black_frame = np.zeros_like(frame_array)
+            binary_mask_expanded = np.repeat(binary_mask[:, :, np.newaxis], 3, axis=2)
+            masked_frame_array = np.where(binary_mask_expanded, black_frame, frame_array)
         
-        masked_frame = np.where(binary_mask_expanded, black_frame, frame_array)
-        
-        masked_video.append(Image.fromarray(masked_frame.astype(np.uint8)).convert("RGB"))
+        masked_video.append(Image.fromarray(masked_frame_array.astype(np.uint8)).convert("RGB"))
         
         if mask_background:
             binary_mask_image = np.where(binary_mask, 0, 255).astype(np.uint8)

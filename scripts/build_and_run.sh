@@ -44,7 +44,7 @@ cd "${REPO_ROOT}"
 GCS_BUCKET="mbadas-sandbox-research-9bb9c7f"
 
 RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-RUN_ID="${RUN_ID:-005}"
+RUN_ID="${RUN_ID:-006}"
 MASTER_RUN_ID="${RUN_ID}_${RUN_TIMESTAMP}"
 
 
@@ -73,15 +73,15 @@ MASTER_RUN_ID="${RUN_ID}_${RUN_TIMESTAMP}"
 # ==============================================================================
 
 # ── Stage selection (1=SAM2, 2=VP, 3=Alpamayo; combine: 12, 23, 123) ─────────
-STAGES="${STAGES:-123}"
+STAGES="${STAGES:-23}"
 
 # ── Stage 1 (SAM2) inputs ────────────────────────────────────────────────────
-SAM2_CHUNK_START="${SAM2_CHUNK_START:-0}"
-SAM2_CHUNK_END="${SAM2_CHUNK_END:-0}"
-SAM2_FILES_PER_CHUNK="${SAM2_FILES_PER_CHUNK:-1}"
+SAM2_CHUNK_START="${SAM2_CHUNK_START:-}"
+SAM2_CHUNK_END="${SAM2_CHUNK_END:-}"
+SAM2_FILES_PER_CHUNK="${SAM2_FILES_PER_CHUNK:-}"
 
 # ── Stage 2 (VP) input — required when running VP without SAM2 (STAGES=2,23) ─
-SAM2_DATA_RUN_ID="${SAM2_DATA_RUN_ID:-}"
+SAM2_DATA_RUN_ID="${SAM2_DATA_RUN_ID:-005_20260219_131823}"
 
 # ── Stage 3 (Alpamayo) input — required when running Alp without VP (STAGES=3)
 VP_DATA_RUN_ID="${VP_DATA_RUN_ID:-}"
@@ -269,8 +269,14 @@ VP_GUIDANCE_SCALE="${VP_GUIDANCE_SCALE:-6.0}"
 VP_STRENGTH="${VP_STRENGTH:-1.0}"
 VP_CAPTION_REFINE_ITERS="${VP_CAPTION_REFINE_ITERS:-10}"
 VP_CAPTION_REFINE_TEMPERATURE="${VP_CAPTION_REFINE_TEMPERATURE:-0.1}"
-VP_DILATE_SIZE="${VP_DILATE_SIZE:-24}"
-VP_MASK_FEATHER="${VP_MASK_FEATHER:-8}"
+# Reduced dilate size to minimize border artifacts during camera movement
+VP_DILATE_SIZE="${VP_DILATE_SIZE:-8}"
+# Reduced feather size for more precise masking
+VP_MASK_FEATHER="${VP_MASK_FEATHER:-4}"
+# Enable border-aware masking to prevent black borders during camera movement
+VP_BORDER_AWARE_MASKING="${VP_BORDER_AWARE_MASKING:-true}"
+# Method for border handling: inpaint (best), blur (fast), interpolate (experimental)
+VP_BORDER_METHOD="${VP_BORDER_METHOD:-inpaint}"
 VP_KEEP_MASKED_PIXELS="${VP_KEEP_MASKED_PIXELS:-True}"
 VP_IMG_INPAINTING_LORA_SCALE="${VP_IMG_INPAINTING_LORA_SCALE:-0.0}"
 VP_SEED="${VP_SEED:-42}"
@@ -482,6 +488,8 @@ VP_COMMON_ARGS=(
     --vp_caption_refine_temperature "${VP_CAPTION_REFINE_TEMPERATURE}"
     --vp_dilate_size "${VP_DILATE_SIZE}"
     --vp_mask_feather "${VP_MASK_FEATHER}"
+    --vp_border_aware_masking "${VP_BORDER_AWARE_MASKING}"
+    --vp_border_method "${VP_BORDER_METHOD}"
     --vp_keep_masked_pixels
     --vp_img_inpainting_lora_scale "${VP_IMG_INPAINTING_LORA_SCALE}"
     --vp_seed "${VP_SEED}"

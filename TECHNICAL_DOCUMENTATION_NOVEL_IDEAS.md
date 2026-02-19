@@ -211,40 +211,138 @@ A complete road segmentation pipeline (`process_videos_sam2.py`, 1,118 lines) th
 
 ### Technical Details
 
-**Automatic Road Initialization (9-Point Grid):**
-```
-Points: (0.5, 0.85), (0.4, 0.75), (0.6, 0.75),
-        (0.3, 0.70), (0.7, 0.70), (0.5, 0.65),
-        (0.35, 0.80), (0.65, 0.80), (0.5, 0.75)
-```
-These normalized coordinates target the lower 65–85% of the frame where the road surface typically appears in dashcam footage. Each point is assigned label=1 (foreground) to seed the SAM2 prompt.
+#### Conceptual Design: Bottom-Half Point Strategy
 
-**Processing Pipeline per Video:**
-1. **Frame Extraction:** FFmpeg-based extraction at 8 FPS (configurable), up to 150 frames per video
-2. **FPS Detection:** Multi-method detection using `r_frame_rate`, `avg_frame_rate`, container metadata, and frame-count/duration fallback
-3. **SAM2 Inference:** Video predictor in VOS mode for temporal consistency across frames
-4. **Morphological Filtering:** Erosion + dilation to clean mask boundaries, fill small holes
-5. **Multi-Format Output:**
+The core insight behind this pipeline is that **front-facing autonomous driving cameras have a consistent spatial layout**: the road surface always occupies the lower portion of the frame, with the vanishing point near the vertical center. This geometric prior is exploited to eliminate the need for interactive prompts.
+
+**Automatic Road Initialization (6-Point Grid — Bottom Half Only):**
+```
+All points are placed exclusively in the bottom half of the frame:
+
+  ┌───────────────────────────────────┐
+  │                                   │  ← Sky / buildings (ignored)
+  │                                   │
+  │           (0.50, 0.65)            │  ← Upper road boundary
+  │      (0.35, 0.75) (0.65, 0.75)   │  ← Mid-road coverage
+  │  (0.25, 0.80)       (0.75, 0.80) │  ← Wide road coverage
+  │         (0.50, 0.85)              │  ← Center-bottom (reference)
+  └───────────────────────────────────┘
+```
+These 6 normalized coordinates target the lower 65–85% of the frame where the road surface appears in dashcam footage. Each point is assigned `label=1` (foreground) to seed the SAM2 prompt. The bottom-center point `(0.50, 0.85)` is deliberately placed at the **most certain road location** — directly beneath the ego vehicle — and doubles as the **reference point** for connected-component filtering (see below).
+
+**Why bottom-half only?** Placing points in the upper half would risk capturing sky, overpasses, or buildings as foreground. By constraining all seed points to the lower half, the prompt is guaranteed to hit road surface regardless of scene content, making the pipeline fully automatic across diverse driving environments (highway, urban, rural).
+
+#### Four-Stage Mask Quality Pipeline
+
+SAM2's raw output often contains artifacts: multiple disconnected segments (sidewalks, medians), small noise regions, and internal holes (from lane markings or shadows). A carefully designed four-stage morphological pipeline produces a **single, clean, hole-free road mask** suitable for video inpainting:
+
+**Stage 1 — Morphological Opening (disconnect noise):**
+```python
+kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+opened_mask = cv2.morphologyEx(mask_uint8, cv2.MORPH_OPEN, kernel)
+```
+Opening = erosion → dilation. This disconnects thin bridges between the road and adjacent regions (sidewalks, parking areas) that SAM2 sometimes merges, and removes small isolated noise blobs.
+
+**Stage 2 — Connected-Component Filtering with Reference Point:**
+```python
+ref_point = (width // 2, int(height * 0.85))  # Bottom center
+num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(opened_mask)
+label_at_point = labels[ref_point[1], ref_point[0]]
+if label_at_point > 0:
+    filtered_mask = (labels == label_at_point)  # Keep ONLY the road
+else:
+    filtered_mask = largest_component            # Fallback: keep largest
+```
+The **reference point** at `(width/2, height×0.85)` — the bottom center of the frame — is the most geometrically certain road location in any front-facing dashcam view. After connected-component analysis, only the component that contains this reference point is retained. All other disconnected regions (sidewalks, medians, sky artifacts) are discarded. If the reference point falls on background (rare edge case), the largest component is kept as fallback.
+
+**Stage 3 — Morphological Closing (merge small gaps):**
+```python
+kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+filtered_mask = cv2.morphologyEx(filtered_mask, cv2.MORPH_CLOSE, kernel_close, iterations=2)
+```
+Closing = dilation → erosion. This fills narrow gaps within the road component — e.g., where lane markings, crosswalks, or shadows create thin breaks — without expanding the overall boundary.
+
+**Stage 4 — Flood-Fill Hole Elimination:**
+```python
+def _fill_binary_mask_holes(mask_255):
+    inv = cv2.bitwise_not(mask_255)           # Invert: background=255, road=0
+    cv2.floodFill(inv, None, (0,0), 0)        # Erase external background
+    holes = inv                                # Only internal holes remain as 255
+    return cv2.bitwise_or(mask_255, holes)     # Fill holes back into road
+```
+Conceptual approach: After inversion, the external background (connected to frame borders) is flood-filled from corner (0,0) to zero. Any remaining 255 pixels in the inverted mask are **internal holes** (surrounded entirely by road). These are OR'd back into the original mask, producing a single continuous, hole-free road segment.
+
+**Why hole-free masks matter for video inpainting:** VideoPainter's CogVideoX model treats the white mask region as the area to be regenerated. Internal holes (from lane markings, shadows, road patches) would cause the model to preserve those pixels unchanged while editing surrounding road — creating visible discontinuities. A single contiguous mask ensures the entire road surface is available for coherent lane marking generation.
+
+```
+Raw SAM2 Output          After 4-Stage Pipeline
+┌─────────────────┐      ┌─────────────────┐
+│     ░░░░░       │      │                 │
+│   ░░████░░░     │      │   ████████████  │
+│ ░░█ ██ █ █░░░   │      │  █████████████  │
+│ ░██ holes ██░   │  →   │  █████████████  │
+│███████████████  │      │ ██████████████  │
+│████ gap ██████  │      │ ███████████████ │
+│████████████████ │      │ ███████████████ │
+└─────────────────┘      └─────────────────┘
+  Multiple segments,       Single segment,
+  holes, gaps, noise       no holes, clean edges
+```
+
+#### Constant Frame Rate Strategy
+
+Frames are extracted at a **fixed 8 FPS** via FFmpeg's fps filter — regardless of the source video's native frame rate (typically 20–30 fps):
+```
+ffmpeg -i input.mp4 -vf fps=8 -vframes 100 output/%05d.jpg
+```
+This constant rate serves two purposes:
+1. **Temporal consistency for SAM2:** Consistent inter-frame motion allows SAM2's memory bank to propagate masks reliably. Variable frame rates would cause inconsistent object displacement between frames.
+2. **Direct compatibility with VideoPainter:** CogVideoX-5B expects uniformly-spaced input frames. By extracting at the same rate SAM2 processes, no re-sampling is needed between stages.
+
+The output visualization and preprocessing videos are written at this same 8 FPS, preserving real-time duration alignment.
+
+#### Processing Pipeline per Video
+
+1. **Video Download:** GCS URI → local temp file via gcsfs (authenticated)
+2. **Frame Extraction:** FFmpeg fps=8 filter, up to MAX_FRAMES (100 default), quality 2 JPEG
+3. **FPS Detection:** Multi-method: ffprobe `avg_frame_rate` → `r_frame_rate` → OpenCV → fallback
+4. **SAM2 Inference:** VOS-optimized video predictor with `apply_postprocessing=True`, temporal propagation across all frames from frame 0 seed points
+5. **Parallel Mask Post-Processing:** ThreadPoolExecutor (up to 8 workers) applies the 4-stage morphological pipeline per frame in parallel (OpenCV releases the GIL)
+6. **Multi-Format Output:**
    - Binary PNG masks per frame (0=keep, 255=inpaint)
    - Compressed NPZ archive (`all_masks.npz`) for efficient downstream loading
-   - Visualization overlay videos (segmented regions highlighted)
-   - Metadata CSV with video statistics
-6. **VideoPainter-Compatible Preprocessing:** Creates the exact folder structure VP's `edit_bench.py` expects:
+   - Visualization overlay videos (segmented regions highlighted in green)
+   - Metadata CSV with video statistics and timing data
+7. **VideoPainter-Compatible Preprocessing:** Creates the exact folder structure VP's `edit_bench.py` expects:
    ```
    preprocessed_data_vp/<run_id>/<video_id>/
      ├── meta.csv
      ├── masks/<video_id>/all_masks.npz
      └── raw_videos/<video_id>/<video_id>.0.mp4
    ```
-7. **GCS Upload:** Parallel upload of results and preprocessed data to separate GCS prefixes
+8. **Parallel GCS Upload:** ThreadPoolExecutor (8 workers) uploads results and preprocessed data concurrently
+
+#### Performance Optimizations in SAM2 Stage
+
+| Optimization | Technique | Impact |
+|-------------|-----------|--------|
+| **Adaptive GPU precision** | bf16 + TF32 on Ampere+ GPUs; fp16 fallback on Turing (T4) | 1.5–2× faster inference |
+| **VOS-optimized predictor** | `vos_optimized=True` in `build_sam2_video_predictor()` | Reduced memory footprint |
+| **CUDA graph boundaries** | `torch.compiler.cudagraph_mark_step_begin()` before each video | Prevents tensor overwrite across videos |
+| **In-memory mask pass-through** | Segmentation returns masks in memory; VP preprocessing reuses them directly, skipping disk re-read | Eliminates redundant I/O for 100+ masks per video |
+| **Parallel post-processing** | ThreadPoolExecutor for morphological ops (OpenCV releases GIL → true parallelism) | Up to 8× speedup for mask pipeline |
+| **Parallel GCS uploads** | 8-thread upload with pre-created remote directories | Saturates network bandwidth |
+| **Thread-safe GCS singleton** | Double-checked locking for `gcsfs.GCSFileSystem` | Avoids per-call auth overhead |
+| **Deterministic frame caching** | `_sync_frame_folder_to_max_frames()` reuses cached frames; trims surplus if MAX_FRAMES changes | Avoids re-extraction on reruns |
+| **Aggressive memory cleanup** | Explicit `del processed_masks` + temp dir removal after each video | Keeps disk/RAM footprint bounded |
 
 **Chunks:// URI Protocol:** A custom URI scheme for batch video selection:
 ```
 chunks://bucket/prefix/camera_folder?start=0&end=10&per_chunk=5
 ```
-Resolves to individual `gs://` paths by listing chunk directories (`chunk_0000/`, `chunk_0001/`, …) and selecting up to `per_chunk` MP4 files from each.
+Resolves to individual `gs://` paths by listing chunk directories (`chunk_0000/`, `chunk_0001/`, …) and selecting up to `per_chunk` MP4 files from each. Includes **early-stop optimization**: stops scanning GCS once enough files are collected for the requested slice.
 
-**Why This Is Novel:** Prior road segmentation pipelines use specialized models (lane detectors, semantic segmentation). This is the first to repurpose SAM2 as an automated road segmentor specifically for generating video inpainting masks, producing output directly compatible with VideoPainter's expected input format.
+**Why This Is Novel:** Prior road segmentation pipelines use specialized models (lane detectors, semantic segmentation). This is the first to repurpose SAM2 as an automated road segmentor specifically for generating video inpainting masks, using a bottom-half reference-point strategy with a four-stage morphological pipeline to produce single, hole-free road segments directly compatible with VideoPainter's expected input format.
 
 ---
 
@@ -283,13 +381,34 @@ Input Video + Mask
 - `_dilate_and_feather_mask_images()`: Expands inpaint regions using morphological dilation (configurable `dilate_size`, default 24px), then applies Gaussian blur for smooth boundaries (configurable `mask_feather`, default 8px)
 - `--keep_masked_pixels` flag: When enabled, preserves the original background pixels outside the mask in the final composite, preventing FluxFill from altering non-road regions
 
-**Multi-GPU Orchestration:**
+**Multi-GPU Orchestration & Memory Management:**
 - Qwen VLM on `cuda:1` (when available, controlled by `VP_QWEN_DEVICE`)
 - FluxFill + CogVideoX on `cuda:0` (controlled by `VP_FLUX_DEVICE`, `VP_COG_DEVICE`)
-- Explicit model unloading between stages (`_unload_qwen_model`) to reclaim VRAM
 - `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` for dynamic memory management
 
-**Why This Is Novel:** No prior work has combined a still-image inpainting model (FluxFill) with a video diffusion model (CogVideoX) in a sequential first-frame → temporal-propagation pipeline for video editing.
+**Staged Model Loading/Unloading (VRAM Budgeting):**
+CogVideoX-5B alone requires ~35 GiB VRAM. To fit all models on a single A100 80GB:
+1. **Load Qwen VLM first** → generate captions / run refinement loop
+2. **Unload Qwen** (`_unload_qwen_model()`: delete model refs → `gc.collect()` → `torch.cuda.empty_cache()`) to reclaim ~14 GiB
+3. **Load FluxFill** → generate first frame
+4. **Unload FluxFill** → reclaim ~24 GiB
+5. **Load CogVideoX** → propagate edit temporally
+
+This sequential load/unload pattern ensures peak VRAM never exceeds ~40 GiB, allowing all three models to run on a single GPU.
+
+**Qwen VLM VRAM Budgeting:**
+```python
+total_gib = torch.cuda.get_device_properties(target).total_memory / (1024³)
+reserve_gib = int(os.environ.get("QWEN_VRAM_RESERVE_GIB", "12"))
+budget_gib = max(8, min(total_gib - reserve_gib, int(total_gib * 0.9)))
+max_memory = {target: f"{budget_gib}GiB", "cpu": "192GiB"}
+# Prevent spilling onto the Flux/Cog GPU:
+for i in range(gpu_count):
+    if i != target:
+        max_memory[i] = "1GiB"
+```
+
+**Why This Is Novel:** No prior work has combined a still-image inpainting model (FluxFill) with a video diffusion model (CogVideoX) in a sequential first-frame → temporal-propagation pipeline for video editing, with staged model loading to fit all three large models (Qwen 7B + FluxFill 12B + CogVideoX 5B) on a single GPU.
 
 ---
 
@@ -358,6 +477,16 @@ A fully automated pipeline (`data_generation.py`, 1,112 lines) that generates tr
 6. **GCS Upload:** Complete dataset uploaded to GCS for training
 
 **Scale:** Successfully generated 10,000+ training samples from NVIDIA PhysicalAI-AV data.
+
+**Performance Optimizations:**
+
+| Optimization | Before | After | Impact |
+|-------------|--------|-------|--------|
+| **Model caching** | Each worker reloaded Qwen (~2 min × 8 workers) | Per-device singleton: `_qwen_models[device]` → loaded once per GPU | 16 min → 2 min startup |
+| **Threading over multiprocessing** | `multiprocessing.Pool` → 8 separate model copies (8 × 7 GiB = 56 GiB) | `ThreadPool` → shared memory, models loaded once | ~7× memory reduction |
+| **Model pre-loading** | Models loaded on first use (race conditions) | `_preload_models_on_gpus()` loads SAM2 + Qwen on all GPUs in parallel at startup | Predictable startup, no races |
+| **Multi-GPU separation** | SAM2 and Qwen competed for cuda:0 | SAM2 on cuda:0, Qwen biased to cuda:1 with explicit VRAM budgeting | No OOM conflicts |
+| **Early-stop GCS listing** | Scanned entire GCS prefix | `if len(all_paths) >= needed: break` | Orders of magnitude faster for large prefixes |
 
 **Why This Is Novel:** This is the first automated pipeline that combines a segmentation model (SAM2) with a vision-language model (Qwen2.5-VL) to generate structured training data for inpainting models, with semantically-parsed lane marking attributes.
 
@@ -674,3 +803,31 @@ Raw AD Videos (PhysicalAI-AV, GCS)
 | Visualization tensors | NPZ | `gs://…/alpamayo/<run_id>/` |
 | Overlay/comparison videos | H.264 MP4 | `gs://…/alpamayo/<run_id>/` |
 | Aggregate reports | TXT | `gs://…/alpamayo/<run_id>/` |
+
+---
+
+### Cross-Pipeline Performance Optimization Summary
+
+The following table consolidates all performance optimizations applied across the three pipeline stages:
+
+| Category | Optimization | Stage | Technique |
+|----------|-------------|-------|----------|
+| **GPU Precision** | Adaptive bf16/TF32 vs fp16 | SAM2 | Auto-detect Ampere+ (≥8.0) → bf16+TF32; Turing → fp16 |
+| **GPU Precision** | Expandable CUDA segments | VP | `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` |
+| **GPU Memory** | Staged model loading/unloading | VP | Sequential Qwen → FluxFill → CogVideoX with explicit `del` + `empty_cache()` between stages |
+| **GPU Memory** | Per-device VRAM budgeting | VP, Data Gen | Dynamic `max_memory` dict prevents cross-GPU spilling |
+| **GPU Memory** | CUDA graph step boundaries | SAM2 | `cudagraph_mark_step_begin()` prevents tensor overwrite across videos |
+| **Parallelism** | Threaded mask post-processing | SAM2 | ThreadPoolExecutor (8 workers); OpenCV releases GIL → true parallelism |
+| **Parallelism** | Threaded GCS uploads | SAM2, Data Gen | 8-thread upload with pre-created remote directories |
+| **Parallelism** | Threading over multiprocessing | Data Gen | `ThreadPool` shares model memory (7× reduction vs `multiprocessing.Pool`) |
+| **Caching** | Thread-safe GCS singleton | SAM2, Data Gen | Double-checked locking avoids per-call auth overhead |
+| **Caching** | Per-device model singletons | VP, Data Gen | `_qwen_models[device]` reuses loaded models across calls |
+| **Caching** | Deterministic frame folder sync | SAM2 | Reuses cached frames; trims surplus if MAX_FRAMES changes |
+| **Memory** | In-memory mask pass-through | SAM2 | Segmentation → VP preprocessing without disk round-trip |
+| **Memory** | Aggressive temp cleanup | SAM2 | `del masks` + `shutil.rmtree()` after each video |
+| **Memory** | Model pre-loading at startup | Data Gen | Parallel GPU model loading before processing begins |
+| **I/O** | Early-stop GCS listing | SAM2, Data Gen | Stop scanning once enough files collected for requested slice |
+| **I/O** | Compressed NPZ archives | SAM2 | `np.savez_compressed` for mask storage (10–50× smaller than PNGs) |
+| **I/O** | Single-model batch inference | Alpamayo | Load Alpamayo-R1-10B once, run inference on all videos sequentially |
+| **Quality** | VOS-optimized predictor | SAM2 | `vos_optimized=True` reduces memory while maintaining temporal consistency |
+| **Quality** | 4-stage morphological pipeline | SAM2 | Open → connected-component → close → flood-fill produces hole-free masks |

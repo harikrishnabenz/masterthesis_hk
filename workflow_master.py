@@ -376,8 +376,10 @@ def master_pipeline_wf(
     vp_strength: float = 1.0,
     vp_caption_refine_iters: int = 10,
     vp_caption_refine_temperature: float = 0.1,
-    vp_dilate_size: int = 24,
-    vp_mask_feather: int = 8,
+    vp_dilate_size: int = 8,  # Reduced to minimize border artifacts
+    vp_mask_feather: int = 4,  # Reduced for more precise masking
+    vp_border_aware_masking: bool = True,  # Enable content-aware masking
+    vp_border_method: str = "inpaint",  # Method for border handling
     vp_keep_masked_pixels: bool = True,
     vp_img_inpainting_lora_scale: float = 0.0,
     vp_seed: int = 42,
