@@ -44,7 +44,7 @@ cd "${REPO_ROOT}"
 GCS_BUCKET="mbadas-sandbox-research-9bb9c7f"
 
 RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-RUN_ID="${RUN_ID:-06_p5_100v}"
+RUN_ID="${RUN_ID:-06_p1_100v_vps90}"
 MASTER_RUN_ID="${RUN_ID}_${RUN_TIMESTAMP}"
 
 
@@ -209,7 +209,7 @@ VP_LLM_MODEL="${VP_LLM_MODEL:-/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Ins
 #   PROMPT_IDS=123      → prompts 1, 2, 3
 #   PROMPT_IDS=15       → prompts 1 and 5
 #   PROMPT_IDS=12345    → all five (default)
-PROMPT_IDS="${PROMPT_IDS:-5}"
+PROMPT_IDS="${PROMPT_IDS:-1}"
 
 
 
