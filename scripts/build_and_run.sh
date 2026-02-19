@@ -44,7 +44,7 @@ cd "${REPO_ROOT}"
 GCS_BUCKET="mbadas-sandbox-research-9bb9c7f"
 
 RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-RUN_ID="${RUN_ID:-003}"
+RUN_ID="${RUN_ID:-004}"
 MASTER_RUN_ID="${RUN_ID}_${RUN_TIMESTAMP}"
 
 
@@ -73,18 +73,18 @@ MASTER_RUN_ID="${RUN_ID}_${RUN_TIMESTAMP}"
 # ==============================================================================
 
 # ── Stage selection (1=SAM2, 2=VP, 3=Alpamayo; combine: 12, 23, 123) ─────────
-STAGES="${STAGES:-3}"
+STAGES="${STAGES:-1}"
 
 # ── Stage 1 (SAM2) inputs ────────────────────────────────────────────────────
 SAM2_CHUNK_START="${SAM2_CHUNK_START:-0}"
-SAM2_CHUNK_END="${SAM2_CHUNK_END:-5}"
-SAM2_FILES_PER_CHUNK="${SAM2_FILES_PER_CHUNK:-2}"
+SAM2_CHUNK_END="${SAM2_CHUNK_END:-0}"
+SAM2_FILES_PER_CHUNK="${SAM2_FILES_PER_CHUNK:-1}"
 
 # ── Stage 2 (VP) input — required when running VP without SAM2 (STAGES=2,23) ─
 SAM2_DATA_RUN_ID="${SAM2_DATA_RUN_ID:-}"
 
 # ── Stage 3 (Alpamayo) input — required when running Alp without VP (STAGES=3)
-VP_DATA_RUN_ID="${VP_DATA_RUN_ID:-003_20260217_184302}"
+VP_DATA_RUN_ID="${VP_DATA_RUN_ID:-}"
 
 
 
