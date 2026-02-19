@@ -12,9 +12,12 @@
 # OUTPUT:
 #   VLA trajectory predictions + visualizations:
 #     gs://<bucket>/.../training/output/alpamayo/<run_id>/
-#       ├── <video_id>_inference.json   (trajectory predictions + reasoning)
-#       ├── <video_id>_vis_data.npz     (visualization tensors)
-#       ├── <video_id>_overlay.mp4      (video with trajectory overlay)
+#       ├── <prompt_name>/                (mirrors VP prompt subfolder)
+#       │   └── <video_id>/
+#       │       ├── <video_id>_inference.json   (trajectory predictions + reasoning)
+#       │       ├── <video_id>_vis_data.npz     (visualization tensors)
+#       │       ├── <video_id>_overlay.mp4      (video with trajectory overlay)
+#       │       └── <video_id>_comparison.mp4   (side-by-side comparison)
 #       └── <run_id>_report.txt         (summary report)
 # ==================================================================================
 
@@ -42,7 +45,7 @@ export VP_OUTPUT_BASE
 
 # VP run folder: set explicitly via VP_RUN_FOLDER, or auto-discover from RUN_ID.
 # Override: VP_RUN_FOLDER="001_20260218_082950" bash scripts/build_and_run.sh
-VP_RUN_FOLDER="${VP_RUN_FOLDER:-002_20260218_204616}"
+VP_RUN_FOLDER="${VP_RUN_FOLDER:-003_20260217_184302}"
 
 if [[ -n "${VP_RUN_FOLDER}" ]]; then
   echo "Using explicit VP run folder: ${VP_RUN_FOLDER}"

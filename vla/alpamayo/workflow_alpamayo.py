@@ -157,11 +157,17 @@ def _resolve_fuse_data_path(video_data_gcs_path: str) -> str:
     return os.path.join(VIDEO_DATA_FUSE_MOUNT_ROOT, relative) if relative else VIDEO_DATA_FUSE_MOUNT_ROOT
 
 
-def _stage_video_data(video_gcs_path: str, video_name: str = "auto") -> list[str]:
+def _stage_video_data(video_gcs_path: str, video_name: str = "auto") -> list[tuple[str, str]]:
     """Discover video files via the FuseBucket mount (no gsutil needed).
 
     If *video_name* is not "auto", only videos whose stem matches the
     given name (case-insensitive, without extension) are returned.
+
+    Returns a list of (video_path, prompt_dir) tuples.  *prompt_dir* is the
+    first directory component relative to the VP run folder – which is the
+    sanitised editing-instruction name created by VideoPainter.  If the
+    videos live directly in the root (no prompt subfolder) *prompt_dir* is
+    the empty string.
     """
     fuse_path = _resolve_fuse_data_path(video_gcs_path)
 
@@ -174,7 +180,7 @@ def _stage_video_data(video_gcs_path: str, video_name: str = "auto") -> list[str
     logger.info(f"Scanning video data at FuseBucket path: {fuse_path}")
 
     # Find all video files
-    video_files = []
+    video_files: list[Path] = []
     for ext in [".mp4", ".avi", ".mov", ".mkv"]:
         video_files.extend(list(Path(fuse_path).rglob(f"*{ext}")))
 
@@ -184,29 +190,42 @@ def _stage_video_data(video_gcs_path: str, video_name: str = "auto") -> list[str
         video_files = generated_files
     # else: fall back to all videos if no _generated variants exist
 
-    video_paths = sorted(str(p) for p in video_files)
-    logger.info(f"Found {len(video_paths)} video files (after excluding _generated sidecars)")
+    video_files = sorted(video_files)
+    logger.info(f"Found {len(video_files)} video files (after excluding _generated sidecars)")
+
+    # Build (video_path, prompt_dir) pairs.
+    # VP output layout: <fuse_path>/<prompt_dir>/<video_id>/<file>.mp4
+    # The first relative component is the prompt / instruction directory.
+    fuse_root = Path(fuse_path)
+    video_tuples: list[tuple[str, str]] = []
+    for vf in video_files:
+        try:
+            rel = vf.relative_to(fuse_root)
+        except ValueError:
+            rel = Path(vf.name)
+        prompt_dir = rel.parts[0] if len(rel.parts) > 2 else ""
+        video_tuples.append((str(vf), prompt_dir))
 
     # Log first few discovered paths for debugging
-    for vp in video_paths[:5]:
-        logger.info(f"  Discovered: {vp}")
-    if len(video_paths) > 5:
-        logger.info(f"  ... and {len(video_paths) - 5} more")
+    for vp, pd in video_tuples[:5]:
+        logger.info(f"  Discovered: {vp}  (prompt_dir={pd!r})")
+    if len(video_tuples) > 5:
+        logger.info(f"  ... and {len(video_tuples) - 5} more")
 
     # Optional: filter to a single video by stem name
     if video_name and video_name.lower() != "auto":
-        video_paths = [
-            p for p in video_paths
+        video_tuples = [
+            (p, pd) for p, pd in video_tuples
             if Path(p).stem.lower() == video_name.lower()
             or Path(p).stem.lower().startswith(video_name.lower())
         ]
-        logger.info(f"After video_name filter '{video_name}': {len(video_paths)} video(s)")
-        if not video_paths:
+        logger.info(f"After video_name filter '{video_name}': {len(video_tuples)} video(s)")
+        if not video_tuples:
             raise FileNotFoundError(
                 f"No video matching video_name='{video_name}' found in {fuse_path}"
             )
 
-    return video_paths
+    return video_tuples
 
 
 def _load_model(model_id: str, device: str = "cuda"):
@@ -461,12 +480,12 @@ def run_alpamayo_inference_task(
     ensure_symlink(CKPT_FUSE_MOUNT_ROOT, CKPT_LOCAL_PATH)
     
     # Discover video files via FuseBucket mount
-    video_paths = _stage_video_data(video_data_gcs_path, video_name=video_name)
+    video_tuples = _stage_video_data(video_data_gcs_path, video_name=video_name)
     
-    if not video_paths:
+    if not video_tuples:
         raise ValueError(f"No videos found in {video_data_gcs_path}")
     
-    logger.info(f"Processing {len(video_paths)} videos")
+    logger.info(f"Processing {len(video_tuples)} videos")
     
     # Load model ONCE for all videos
     model, processor, helper_mod, device = _load_model(model_id)
@@ -477,11 +496,15 @@ def run_alpamayo_inference_task(
     
     # Run inference on each video (in-process, reusing loaded model)
     all_metrics = []
-    for i, video_path in enumerate(video_paths, 1):
-        logger.info(f"Processing video {i}/{len(video_paths)}: {video_path}")
+    for i, (video_path, prompt_dir) in enumerate(video_tuples, 1):
+        logger.info(f"Processing video {i}/{len(video_tuples)}: {video_path} (prompt_dir={prompt_dir!r})")
         
-        # Each video gets its own subdirectory: <run_id>/<video_stem>/
-        video_output_dir = os.path.join(local_output_dir, Path(video_path).stem)
+        # Each video gets its own subdirectory:
+        #   <run_id>/<prompt_dir>/<video_stem>/   (mirrors VP output layout)
+        if prompt_dir:
+            video_output_dir = os.path.join(local_output_dir, prompt_dir, Path(video_path).stem)
+        else:
+            video_output_dir = os.path.join(local_output_dir, Path(video_path).stem)
         metrics = _run_alpamayo_inference(
             video_path=video_path,
             output_dir=video_output_dir,
