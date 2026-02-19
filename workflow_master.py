@@ -525,6 +525,157 @@ def vp_alpamayo_wf(
 
 
 @workflow
+def sam2_only_wf(
+    run_id: str,
+    sam2_video_uris: str,
+    sam2_max_frames: int = 150,
+) -> str:
+    """Run SAM2 segmentation only (Stage 1).
+
+    Returns
+    -------
+    str
+        The *run_id* of the SAM2 output.
+    """
+    sam2_run_id = sam2_stage(
+        run_id=run_id,
+        sam2_video_uris=sam2_video_uris,
+        max_frames=sam2_max_frames,
+    )
+    return sam2_run_id
+
+
+@workflow
+def sam2_vp_wf(
+    run_id: str,
+    sam2_video_uris: str,
+    sam2_max_frames: int = 150,
+    # ── Stage 2: VideoPainter ─────────────────────────────────────────────────
+    vp_video_editing_instructions: str = (
+        "Single solid white continuous line, aligned exactly to the original "
+        "lane positions and perspective; keep road texture, lighting, and "
+        "shadows unchanged\n"
+        "Double solid white continuous line, aligned exactly to the original "
+        "lane positions and perspective; keep road texture, lighting, and "
+        "shadows unchanged\n"
+        "Single solid yellow continuous line, aligned exactly to the original "
+        "lane positions and perspective; keep road texture, lighting, and "
+        "shadows unchanged\n"
+        "Double solid yellow continuous line, aligned exactly to the original "
+        "lane positions and perspective; keep road texture, lighting, and "
+        "shadows unchanged\n"
+        "Single dashed white intermitted line, aligned exactly to the original "
+        "lane positions and perspective; keep road texture, lighting, and "
+        "shadows unchanged"
+    ),
+    vp_llm_model: str = "/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct",
+    vp_num_inference_steps: int = 70,
+    vp_guidance_scale: float = 6.0,
+    vp_strength: float = 1.0,
+    vp_caption_refine_iters: int = 10,
+    vp_caption_refine_temperature: float = 0.1,
+    vp_dilate_size: int = 24,
+    vp_mask_feather: int = 8,
+    vp_keep_masked_pixels: bool = True,
+    vp_img_inpainting_lora_scale: float = 0.0,
+    vp_seed: int = 42,
+) -> str:
+    """Run SAM2 → VideoPainter (Stages 1+2, skip Alpamayo).
+
+    Returns
+    -------
+    str
+        GCS path to the VP edited videos.
+    """
+    sam2_run_id = sam2_stage(
+        run_id=run_id,
+        sam2_video_uris=sam2_video_uris,
+        max_frames=sam2_max_frames,
+    )
+
+    vp_output_path = vp_stage(
+        data_run_id=sam2_run_id,
+        output_run_id=run_id,
+        video_editing_instructions=vp_video_editing_instructions,
+        llm_model=vp_llm_model,
+        num_inference_steps=vp_num_inference_steps,
+        guidance_scale=vp_guidance_scale,
+        strength=vp_strength,
+        caption_refine_iters=vp_caption_refine_iters,
+        caption_refine_temperature=vp_caption_refine_temperature,
+        dilate_size=vp_dilate_size,
+        mask_feather=vp_mask_feather,
+        keep_masked_pixels=vp_keep_masked_pixels,
+        img_inpainting_lora_scale=vp_img_inpainting_lora_scale,
+        seed=vp_seed,
+    )
+
+    return vp_output_path
+
+
+@workflow
+def vp_only_wf(
+    run_id: str,
+    sam2_data_run_id: str = "",
+    # ── Stage 2: VideoPainter ─────────────────────────────────────────────────
+    vp_video_editing_instructions: str = (
+        "Single solid white continuous line, aligned exactly to the original "
+        "lane positions and perspective; keep road texture, lighting, and "
+        "shadows unchanged\n"
+        "Double solid white continuous line, aligned exactly to the original "
+        "lane positions and perspective; keep road texture, lighting, and "
+        "shadows unchanged\n"
+        "Single solid yellow continuous line, aligned exactly to the original "
+        "lane positions and perspective; keep road texture, lighting, and "
+        "shadows unchanged\n"
+        "Double solid yellow continuous line, aligned exactly to the original "
+        "lane positions and perspective; keep road texture, lighting, and "
+        "shadows unchanged\n"
+        "Single dashed white intermitted line, aligned exactly to the original "
+        "lane positions and perspective; keep road texture, lighting, and "
+        "shadows unchanged"
+    ),
+    vp_llm_model: str = "/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct",
+    vp_num_inference_steps: int = 70,
+    vp_guidance_scale: float = 6.0,
+    vp_strength: float = 1.0,
+    vp_caption_refine_iters: int = 10,
+    vp_caption_refine_temperature: float = 0.1,
+    vp_dilate_size: int = 24,
+    vp_mask_feather: int = 8,
+    vp_keep_masked_pixels: bool = True,
+    vp_img_inpainting_lora_scale: float = 0.0,
+    vp_seed: int = 42,
+) -> str:
+    """Run VideoPainter only (Stage 2, skip SAM2 + Alpamayo).
+
+    Parameters
+    ----------
+    sam2_data_run_id
+        The run_id of a previous SAM2 execution whose preprocessed data
+        is at ``gs://…/outputs/preprocessed_data_vp/<sam2_data_run_id>/``.
+    """
+    vp_output_path = vp_stage(
+        data_run_id=sam2_data_run_id,
+        output_run_id=run_id,
+        video_editing_instructions=vp_video_editing_instructions,
+        llm_model=vp_llm_model,
+        num_inference_steps=vp_num_inference_steps,
+        guidance_scale=vp_guidance_scale,
+        strength=vp_strength,
+        caption_refine_iters=vp_caption_refine_iters,
+        caption_refine_temperature=vp_caption_refine_temperature,
+        dilate_size=vp_dilate_size,
+        mask_feather=vp_mask_feather,
+        keep_masked_pixels=vp_keep_masked_pixels,
+        img_inpainting_lora_scale=vp_img_inpainting_lora_scale,
+        seed=vp_seed,
+    )
+
+    return vp_output_path
+
+
+@workflow
 def alpamayo_only_wf(
     run_id: str,
     vp_output_gcs_path: str = "",

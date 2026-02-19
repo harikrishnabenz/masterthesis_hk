@@ -86,8 +86,8 @@ echo "Auto-detected SAM2 data folder: ${VP_DATA_RUN_ID}"
 #   PROMPT_IDS=12345    → all five (default)
 
 
-#1 done 2 running 4 running 
-PROMPT_IDS="${PROMPT_IDS:-4}"
+#1 done 2 3 4 5 runnning 
+PROMPT_IDS="${PROMPT_IDS:-5}"
 
 declare -A PROMPTS
 PROMPTS[1]='Single solid white continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged'
