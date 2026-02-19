@@ -435,14 +435,18 @@ else
     echo "  ⏭ Alpamayo build skipped (not in STAGES=${STAGES})"
 fi
 
-# ── Master orchestrator ───────────────────────────────────────────────────
-echo "▸ Building Master orchestrator image …"
-docker compose build
-docker tag "${MASTER_LOCAL_IMAGE}" "${MASTER_TAGGED}"
-docker tag "${MASTER_LOCAL_IMAGE}" "${MASTER_REMOTE_IMAGE}:latest"
-docker push "${MASTER_TAGGED}"
-docker push "${MASTER_REMOTE_IMAGE}:latest"
-echo "  ✓ Master image pushed: ${MASTER_TAGGED}"
+# ── Master orchestrator (only needed for multi-stage pipelines) ───────────
+if [[ ${#STAGES} -gt 1 ]]; then
+    echo "▸ Building Master orchestrator image …"
+    docker compose build
+    docker tag "${MASTER_LOCAL_IMAGE}" "${MASTER_TAGGED}"
+    docker tag "${MASTER_LOCAL_IMAGE}" "${MASTER_REMOTE_IMAGE}:latest"
+    docker push "${MASTER_TAGGED}"
+    docker push "${MASTER_REMOTE_IMAGE}:latest"
+    echo "  ✓ Master image pushed: ${MASTER_TAGGED}"
+else
+    echo "  ⏭ Master orchestrator build skipped (single-stage STAGES=${STAGES})"
+fi
 
 # ==============================================================================
 # EXPORT ENV VARS FOR WORKFLOW SERIALISATION
