@@ -338,7 +338,9 @@ def run_filter(
     Supports local paths and GCS prefixes. Returns the resolved output_dir.
     """
 
-    if not (input_dir or "").strip():
+    # Support comma-separated input dirs (merge multiple sources into one output)
+    input_dirs = [d.strip() for d in (input_dir or "").split(",") if d.strip()]
+    if not input_dirs:
         raise ValueError("Missing input_dir")
 
     wanted_count = _norm_choice(count, "count")
@@ -349,9 +351,12 @@ def run_filter(
     if not sfx:
         sfx = _derive_suffix(wanted_count, wanted_color, wanted_pattern)
 
-    output_dir_str = (output_dir or "").strip() or _auto_output_dir(input_dir, sfx)
+    output_dir_str = (output_dir or "").strip() or _auto_output_dir(input_dirs[0], sfx)
 
-    input_is_gcs = _is_gcs_path(input_dir)
+    gcs_flags = [_is_gcs_path(d) for d in input_dirs]
+    if len(set(gcs_flags)) > 1:
+        raise ValueError("All input dirs must be the same type (all local or all GCS)")
+    input_is_gcs = gcs_flags[0]
     output_is_gcs = _is_gcs_path(output_dir_str)
     if input_is_gcs != output_is_gcs:
         raise ValueError("input_dir and output_dir must both be local OR both be GCS paths")
@@ -360,10 +365,7 @@ def run_filter(
         raise ValueError("For GCS paths, copy_mode must be 'copy'")
 
     if input_is_gcs:
-        bucket_in, key_in = _split_gcs_uri(input_dir)
         bucket_out, key_out = _split_gcs_uri(output_dir_str)
-        if bucket_in != bucket_out:
-            raise ValueError("Cross-bucket copy is not supported by this script")
 
         try:
             import gcsfs
@@ -371,59 +373,74 @@ def run_filter(
             raise ImportError("gcsfs is required for GCS input/output") from e
 
         fs = gcsfs.GCSFileSystem(token="google_default")
-        in_csv = _join_gcs(bucket_in, key_in, "train.csv")
-        if not fs.exists(in_csv):
-            raise FileNotFoundError(f"Missing gs://{in_csv}")
 
         rows: list[dict[str, str]] = []
         skipped_bad_prompt = 0
         skipped_missing_files = 0
 
-        with fs.open(in_csv, "r") as f:
-            reader = csv.DictReader(f)
-            required = {"image", "mask", "prompt"}
-            if not required.issubset(set(reader.fieldnames or [])):
-                raise ValueError(f"train.csv must have columns {sorted(required)}; got {reader.fieldnames}")
-
-            for row in reader:
-                image_rel = (row.get("image") or "").strip()
-                mask_rel = (row.get("mask") or "").strip()
-                prompt = (row.get("prompt") or "").strip()
-                prompt_2 = (row.get("prompt_2") or "").strip() or prompt
-
-                attrs = _parse_lane_attrs(prompt)
-                if attrs is None:
-                    skipped_bad_prompt += 1
-                    continue
-
-                if require_clear_road and not _attrs_are_clear(attrs):
-                    skipped_bad_prompt += 1
-                    continue
-
-                if wanted_count is not None and attrs.count != wanted_count:
-                    continue
-                if wanted_color is not None and attrs.color != wanted_color:
-                    continue
-                if wanted_pattern is not None and attrs.pattern != wanted_pattern:
-                    continue
-
-                src_img = _join_gcs(bucket_in, key_in, image_rel)
-                src_msk = _join_gcs(bucket_in, key_in, mask_rel)
-                if not fs.exists(src_img) or not fs.exists(src_msk):
-                    skipped_missing_files += 1
-                    continue
-
-                rows.append(
-                    {
-                        "image": image_rel,
-                        "mask": mask_rel,
-                        "prompt": prompt,
-                        "prompt_2": prompt_2,
-                    }
+        for inp_dir in input_dirs:
+            bucket_in, key_in = _split_gcs_uri(inp_dir)
+            if bucket_in != bucket_out:
+                raise ValueError(
+                    f"Cross-bucket copy is not supported: {inp_dir} vs output bucket {bucket_out}"
                 )
 
-                if limit and len(rows) >= int(limit):
-                    break
+            in_csv = _join_gcs(bucket_in, key_in, "train.csv")
+            if not fs.exists(in_csv):
+                raise FileNotFoundError(f"Missing gs://{in_csv}")
+
+            with fs.open(in_csv, "r") as f:
+                reader = csv.DictReader(f)
+                required = {"image", "mask", "prompt"}
+                if not required.issubset(set(reader.fieldnames or [])):
+                    raise ValueError(
+                        f"train.csv must have columns {sorted(required)}; got {reader.fieldnames}"
+                    )
+
+                for row in reader:
+                    image_rel = (row.get("image") or "").strip()
+                    mask_rel = (row.get("mask") or "").strip()
+                    prompt = (row.get("prompt") or "").strip()
+                    prompt_2 = (row.get("prompt_2") or "").strip() or prompt
+
+                    attrs = _parse_lane_attrs(prompt)
+                    if attrs is None:
+                        skipped_bad_prompt += 1
+                        continue
+
+                    if require_clear_road and not _attrs_are_clear(attrs):
+                        skipped_bad_prompt += 1
+                        continue
+
+                    if wanted_count is not None and attrs.count != wanted_count:
+                        continue
+                    if wanted_color is not None and attrs.color != wanted_color:
+                        continue
+                    if wanted_pattern is not None and attrs.pattern != wanted_pattern:
+                        continue
+
+                    src_img = _join_gcs(bucket_in, key_in, image_rel)
+                    src_msk = _join_gcs(bucket_in, key_in, mask_rel)
+                    if not fs.exists(src_img) or not fs.exists(src_msk):
+                        skipped_missing_files += 1
+                        continue
+
+                    rows.append(
+                        {
+                            "image": image_rel,
+                            "mask": mask_rel,
+                            "prompt": prompt,
+                            "prompt_2": prompt_2,
+                            "_bucket": bucket_in,
+                            "_key": key_in,
+                        }
+                    )
+
+                    if limit and len(rows) >= int(limit):
+                        break
+
+            if limit and len(rows) >= int(limit):
+                break
 
         if sort == "prompt":
             rows.sort(key=lambda r: (r.get("prompt", ""), r.get("image", "")))
@@ -445,8 +462,10 @@ def run_filter(
                     skipped_missing_files += 1
                     continue
 
-                src_img = _join_gcs(bucket_in, key_in, img_rel)
-                src_msk = _join_gcs(bucket_in, key_in, msk_rel)
+                r_bucket = r.pop("_bucket", bucket_out)
+                r_key = r.pop("_key", "")
+                src_img = _join_gcs(r_bucket, r_key, img_rel)
+                src_msk = _join_gcs(r_bucket, r_key, msk_rel)
 
                 dst_img = stage_images / Path(img_rel).name
                 dst_msk = stage_masks / Path(msk_rel).name
@@ -482,10 +501,11 @@ def run_filter(
             _upload_directory_to_gcs(fs=fs, local_dir=stage_root, gcs_prefix=out_prefix)
 
         if verbose:
+            input_summary = ", ".join(d for d in input_dirs)
             print(
                 "\n".join(
                     [
-                        f"Input: gs://{bucket_in}/{key_in}",
+                        f"Input(s): {input_summary}",
                         f"Output: gs://{bucket_out}/{key_out}",
                         f"Wrote: gs://{bucket_out}/{key_out}/train.csv",
                         f"Rows kept: {len(staged_rows)}",
@@ -497,65 +517,70 @@ def run_filter(
         return output_dir_str
 
     # Local filesystem mode
-    input_path = Path(input_dir).expanduser().resolve()
     output_path = Path(output_dir_str).expanduser().resolve()
 
     if clean_output and output_path.exists():
         shutil.rmtree(output_path)
 
-    in_csv = input_path / "train.csv"
-    if not in_csv.exists():
-        raise FileNotFoundError(f"Missing {in_csv}")
-
     rows: list[dict[str, str]] = []
     skipped_bad_prompt = 0
     skipped_missing_files = 0
 
-    with in_csv.open("r", newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        required = {"image", "mask", "prompt"}
-        if not required.issubset(set(reader.fieldnames or [])):
-            raise ValueError(f"train.csv must have columns {sorted(required)}; got {reader.fieldnames}")
+    for inp_dir in input_dirs:
+        input_path = Path(inp_dir).expanduser().resolve()
+        in_csv = input_path / "train.csv"
+        if not in_csv.exists():
+            raise FileNotFoundError(f"Missing {in_csv}")
 
-        for row in reader:
-            image_rel = (row.get("image") or "").strip()
-            mask_rel = (row.get("mask") or "").strip()
-            prompt = (row.get("prompt") or "").strip()
-            prompt_2 = (row.get("prompt_2") or "").strip() or prompt
+        with in_csv.open("r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            required = {"image", "mask", "prompt"}
+            if not required.issubset(set(reader.fieldnames or [])):
+                raise ValueError(f"train.csv must have columns {sorted(required)}; got {reader.fieldnames}")
 
-            attrs = _parse_lane_attrs(prompt)
-            if attrs is None:
-                skipped_bad_prompt += 1
-                continue
+            for row in reader:
+                image_rel = (row.get("image") or "").strip()
+                mask_rel = (row.get("mask") or "").strip()
+                prompt = (row.get("prompt") or "").strip()
+                prompt_2 = (row.get("prompt_2") or "").strip() or prompt
 
-            if require_clear_road and not _attrs_are_clear(attrs):
-                skipped_bad_prompt += 1
-                continue
+                attrs = _parse_lane_attrs(prompt)
+                if attrs is None:
+                    skipped_bad_prompt += 1
+                    continue
 
-            if wanted_count is not None and attrs.count != wanted_count:
-                continue
-            if wanted_color is not None and attrs.color != wanted_color:
-                continue
-            if wanted_pattern is not None and attrs.pattern != wanted_pattern:
-                continue
+                if require_clear_road and not _attrs_are_clear(attrs):
+                    skipped_bad_prompt += 1
+                    continue
 
-            src_img = (input_path / image_rel).resolve()
-            src_msk = (input_path / mask_rel).resolve()
-            if not src_img.exists() or not src_msk.exists():
-                skipped_missing_files += 1
-                continue
+                if wanted_count is not None and attrs.count != wanted_count:
+                    continue
+                if wanted_color is not None and attrs.color != wanted_color:
+                    continue
+                if wanted_pattern is not None and attrs.pattern != wanted_pattern:
+                    continue
 
-            rows.append(
-                {
-                    "image": image_rel,
-                    "mask": mask_rel,
-                    "prompt": prompt,
-                    "prompt_2": prompt_2,
-                }
-            )
+                src_img = (input_path / image_rel).resolve()
+                src_msk = (input_path / mask_rel).resolve()
+                if not src_img.exists() or not src_msk.exists():
+                    skipped_missing_files += 1
+                    continue
 
-            if limit and len(rows) >= int(limit):
-                break
+                rows.append(
+                    {
+                        "image": image_rel,
+                        "mask": mask_rel,
+                        "prompt": prompt,
+                        "prompt_2": prompt_2,
+                        "_input_path": str(input_path),
+                    }
+                )
+
+                if limit and len(rows) >= int(limit):
+                    break
+
+        if limit and len(rows) >= int(limit):
+            break
 
     if sort == "prompt":
         rows.sort(key=lambda r: (r.get("prompt", ""), r.get("image", "")))
@@ -573,8 +598,9 @@ def run_filter(
         mask_rel = (r.get("mask") or "").strip()
         if not image_rel or not mask_rel:
             continue
-        src_img = (input_path / image_rel).resolve()
-        src_msk = (input_path / mask_rel).resolve()
+        r_input = Path(r.pop("_input_path", str(input_dirs[0])))
+        src_img = (r_input / image_rel).resolve()
+        src_msk = (r_input / mask_rel).resolve()
         if not src_img.exists() or not src_msk.exists():
             skipped_missing_files += 1
             continue

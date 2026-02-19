@@ -44,7 +44,7 @@ cd "${REPO_ROOT}"
 GCS_BUCKET="mbadas-sandbox-research-9bb9c7f"
 
 RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-RUN_ID="${RUN_ID:-06_100_p5}"
+RUN_ID="${RUN_ID:-06_p5_100v}"
 MASTER_RUN_ID="${RUN_ID}_${RUN_TIMESTAMP}"
 
 
@@ -278,7 +278,7 @@ VP_BORDER_AWARE_MASKING="${VP_BORDER_AWARE_MASKING:-true}"
 # Method for border handling: inpaint (best), blur (fast), interpolate (experimental)
 VP_BORDER_METHOD="${VP_BORDER_METHOD:-inpaint}"
 VP_KEEP_MASKED_PIXELS="${VP_KEEP_MASKED_PIXELS:-False}"
-VP_IMG_INPAINTING_LORA_SCALE="${VP_IMG_INPAINTING_LORA_SCALE:-0.0}"
+VP_IMG_INPAINTING_LORA_SCALE="${VP_IMG_INPAINTING_LORA_SCALE:-1.0}"
 VP_SEED="${VP_SEED:-42}"
 
 # ==============================================================================
