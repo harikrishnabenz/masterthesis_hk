@@ -44,7 +44,7 @@ export SAM2_INPUT_PARENT
 export SAM2_CAMERA_SUBFOLDER
 
 # ── Max frames per video ─────────────────────────────────────────────────────
-SAM2_MAX_FRAMES="${SAM2_MAX_FRAMES:-150}"
+SAM2_MAX_FRAMES="${SAM2_MAX_FRAMES:-100}"
 
 # ── Chunk-based input selection ──────────────────────────────────────────────
 #

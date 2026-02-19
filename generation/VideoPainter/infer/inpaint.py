@@ -465,7 +465,9 @@ def generate_video(
     if generate_type == "i2v_inpainting":
         frames = inpainting_frames
         down_sample_fps = fps if down_sample_fps == 0 else down_sample_fps
-        video, masked_video, binary_masks = video[::int(fps//down_sample_fps)], masked_video[::int(fps//down_sample_fps)], binary_masks[::int(fps//down_sample_fps)]
+        _stride = int(fps // down_sample_fps)
+        content_fps = fps / _stride if _stride > 0 else fps
+        video, masked_video, binary_masks = video[::_stride], masked_video[::_stride], binary_masks[::_stride]
         if not long_video:
             video, masked_video, binary_masks = video[:frames], masked_video[:frames], binary_masks[:frames]
         
@@ -502,7 +504,8 @@ def generate_video(
         binary_masks[0] = gt_mask_first_frame
         video[0] = gt_video_first_frame
         round_video = _visualize_video(pipe, mask_background, video[:len(video_generate)], video_generate, binary_masks[:len(video_generate)])
-        export_to_video(round_video, output_path.replace(".mp4", f"_fps{down_sample_fps}.mp4"), fps=8)
+        _out_fps = int(round(content_fps)) if content_fps > 0 else fps
+        export_to_video(round_video, output_path.replace(".mp4", f"_fps{down_sample_fps}.mp4"), fps=_out_fps)
 
     else:
         raise NotImplementedError

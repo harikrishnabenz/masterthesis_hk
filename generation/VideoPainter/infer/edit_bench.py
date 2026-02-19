@@ -1437,11 +1437,13 @@ def generate_video(
         down_sample_fps = fps if down_sample_fps == 0 else down_sample_fps
         print(f"Before downsample: {len(video)}, fps: {fps}, down_sample_fps: {down_sample_fps}, int(fps//down_sample_fps): {int(fps//down_sample_fps)}")
         stride = int(fps // down_sample_fps)
+        # Actual content rate after downsampling (e.g. 30fps/stride3 = 10 fps)
+        content_fps = fps / stride if stride > 0 else fps
         video = video[::stride]
         masked_video_for_pipe = masked_video_for_pipe[::stride]
         masked_video_black = masked_video_black[::stride]
         binary_masks = binary_masks[::stride]
-        print(f"After downsample: {len(video)}")
+        print(f"After downsample: {len(video)}, content_fps: {content_fps}")
         if not long_video:
             video = video[:frames]
             masked_video_for_pipe = masked_video_for_pipe[:frames]
@@ -1502,11 +1504,15 @@ def generate_video(
         )
 
         # Save both outputs:
+        # Use the actual content fps (not hardcoded 8) so playback speed
+        # matches real time.  Falls back to fps from meta.csv when stride=1.
+        output_fps = int(round(content_fps)) if content_fps > 0 else fps
+        print(f"Encoding output video at {output_fps} fps (content_fps={content_fps})")
         # 1) comparison video (original/masked/mask/generated)
-        export_to_video(round_video, output_path, fps=8)
+        export_to_video(round_video, output_path, fps=output_fps)
         # 2) generated-only video
         generated_only_path = output_path.replace(".mp4", "_generated.mp4")
-        export_to_video(video_generate, generated_only_path, fps=8)
+        export_to_video(video_generate, generated_only_path, fps=output_fps)
        
         print(f"{inpainting_sample_id} generate completed! Total frames: {len(round_video)}")
         print(f"Saved comparison mp4: {output_path}")

@@ -59,10 +59,10 @@ OUTPUT_DIR = BASE_DATA_DIR / f"output_{TIMESTAMP}"
 FRAMES_DIR = BASE_DATA_DIR / f"frames_{TIMESTAMP}"
 
 # Segmentation parameters
-MAX_FRAMES = 150
+MAX_FRAMES = 100
 
 # Frame extraction parameters
-FRAMES_PER_SECOND = 8  # Optimized for VideoPainter (8 fps works best)
+FRAMES_PER_SECOND = 8  # Target content rate for VP (8 fps works best for VideoPainter)
 
 # VideoPainter preprocessing FPS (controls the fps written into raw_videos/*.mp4 and meta.csv)
 # Can be overridden per-run without editing code:
@@ -433,7 +433,15 @@ def download_video(uri: str, output_path: Path) -> Path:
 
 
 def extract_frames(video_path: Path, frames_dir: Path, max_frames: int | None = None) -> List[Path]:
-    """Extract high-quality JPEG frames from video.
+    """Extract high-quality JPEG frames from video at FRAMES_PER_SECOND rate.
+
+    Uses ffmpeg's fps filter to temporally subsample the source video so
+    that each extracted frame represents exactly 1/FRAMES_PER_SECOND seconds
+    of real time.  This ensures downstream consumers (SAM2 segmentation,
+    VideoPainter) work with correctly-spaced frames.
+
+    For example, a 20 s source at 30 fps yields 160 frames at 8 fps
+    (capped to *max_frames* if set).
 
     Args:
         video_path: Input video path.
@@ -446,21 +454,22 @@ def extract_frames(video_path: Path, frames_dir: Path, max_frames: int | None = 
     if max_frames is None:
         max_frames = int(MAX_FRAMES)
     
-    # Use ffmpeg for high-quality extraction.
-    if int(max_frames) > 0:
-        cmd = f'ffmpeg -i "{video_path}" -vframes {int(max_frames)} -q:v 2 -start_number 0 "{frames_dir}/%05d.jpg" -y'
-        print(f"Extracting first {int(max_frames)} frames: {cmd}")
-    else:
-        cmd = f'ffmpeg -i "{video_path}" -q:v 2 -start_number 0 "{frames_dir}/%05d.jpg" -y'
-        print(f"Extracting ALL frames (no limit): {cmd}")
+    target_fps = int(FRAMES_PER_SECOND)
+    # Use ffmpeg fps filter to extract at the target content rate.
+    vframes_flag = f'-vframes {int(max_frames)}' if int(max_frames) > 0 else ''
+    cmd = (
+        f'ffmpeg -i "{video_path}" '
+        f'-vf fps={target_fps} '
+        f'{vframes_flag} '
+        f'-q:v 2 -start_number 0 "{frames_dir}/%05d.jpg" -y'
+    )
+    print(f"Extracting frames at {target_fps} fps (max {max_frames}): {cmd}")
     os.system(cmd)
     
     # Get frame paths
     frame_paths = sorted(frames_dir.glob("*.jpg"))
-    if int(max_frames) > 0:
-        print(f"Extracted {len(frame_paths)} frames (limited to {int(max_frames)})")
-    else:
-        print(f"Extracted {len(frame_paths)} frames")
+    duration_s = len(frame_paths) / target_fps if target_fps > 0 else 0
+    print(f"Extracted {len(frame_paths)} frames at {target_fps} fps = {duration_s:.1f}s of content")
     return frame_paths
 
 
@@ -685,6 +694,10 @@ def preprocess_and_upload_video(
 ) -> None:
     """Preprocess a video into VideoPainter format and upload to GCS.
 
+    Frames in *frames_dir* are assumed to already be at the target content
+    rate (FRAMES_PER_SECOND) because extract_frames() uses the ffmpeg fps
+    filter.  No additional temporal subsampling is performed here.
+
     Args:
         in_memory_masks: If provided, skip re-reading masks from disk.
             Each element is a uint8 mask with values {0, 255}.
@@ -746,10 +759,9 @@ def preprocess_and_upload_video(
             return
         
         build_start = time.perf_counter()
-        masks_array = np.stack(masks, axis=0)
 
-        # Resolve preprocessing FPS (used by VideoPainter as the input fps).
-        preprocess_fps = int(FRAMES_PER_SECOND)
+        # Resolve target content FPS for VideoPainter output.
+        preprocess_fps = int(FRAMES_PER_SECOND)      # default = 8 fps
         if VP_PREPROCESS_FPS:
             try:
                 preprocess_fps = int(float(VP_PREPROCESS_FPS))
@@ -757,7 +769,14 @@ def preprocess_and_upload_video(
                 preprocess_fps = int(FRAMES_PER_SECOND)
         if preprocess_fps <= 0:
             preprocess_fps = int(FRAMES_PER_SECOND)
-        
+
+        # Frames were already extracted at FRAMES_PER_SECOND rate by
+        # extract_frames() (ffmpeg fps filter), so no temporal
+        # subsampling is needed here — each frame already represents
+        # 1/preprocess_fps seconds of real time.
+
+        masks_array = np.stack(masks, axis=0)
+
         # Create video
         prefix = video_name[:-3] if len(video_name) > 3 else video_name
         video_filename = f"{video_name}.0.mp4"
@@ -771,7 +790,7 @@ def preprocess_and_upload_video(
             writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
         writer.release()
         
-        # Save masks
+        # Save masks (subsampled to match frames)
         mask_out_dir = mask_root / video_name
         mask_out_dir.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(str(mask_out_dir / "all_masks.npz"), masks_array)
@@ -791,6 +810,10 @@ def preprocess_and_upload_video(
                     "Front camera video of an autonomous driving car on the road."
                 )
             })
+        print(
+            f"  VP data: {len(frames)} frames, meta.csv fps={preprocess_fps}, "
+            f"duration={len(frames)/preprocess_fps:.1f}s"
+        )
 
         if timings is not None:
             timings.vp_build_artifacts_s = _elapsed_s(build_start)

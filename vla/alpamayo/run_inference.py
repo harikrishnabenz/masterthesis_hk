@@ -46,15 +46,13 @@ CAMERA_NAME_TO_INDEX = {
 }
 
 # The Alpamayo model and physical_ai_av dataset both operate at 10 Hz.
-# VideoPainter downsamples source clips (typically 30 fps) with
-#   stride = source_fps // down_sample_fps = 30 // 8 = 3
-# giving an effective content rate of 30/3 = 10 fps.
-# However, VP encodes its output at 8 fps (hardcoded), so playing the
-# VP video at face value yields 20-25 % slow motion.
-# We always use the true content rate (0.1 s = 10 Hz) for both the
-# dataset ego-trajectory alignment AND the output video frame rate.
-CONTENT_TIME_STEP = 0.1      # seconds  (10 Hz — dataset / model native rate)
-CONTENT_FPS = 1.0 / CONTENT_TIME_STEP  # 10.0 fps
+# SAM2 preprocessing now extracts source clips at 8 fps (via ffmpeg fps
+# filter), so each VP frame represents exactly 1/8 s = 0.125 s of real
+# time.  VP encodes its output at 8 fps, giving correct-speed playback.
+# We use the VP content rate (0.125 s = 8 Hz) for temporal alignment
+# with the dataset and for output video frame rate.
+CONTENT_TIME_STEP = 0.125    # seconds  (8 Hz — VP content rate)
+CONTENT_FPS = 1.0 / CONTENT_TIME_STEP  # 8.0 fps
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
