@@ -1224,10 +1224,9 @@ def generate_video(
             fps=fps,
         )
 
-        # Most inpainting pipelines accept (original video, mask) without needing the
-        # masked region to be blacked out. When the mask covers the whole road, using
-        # the blacked-out input removes the lane geometry, making it hard to place
-        # new lanes exactly where the originals were.
+        # With border-aware masking (VP_BORDER_AWARE_MASKING), masked_video_black
+        # contains cv2.inpaint / blur fill (not black).  keep_masked_pixels=True
+        # passes the original frames; False passes the generated fill.
         masked_video_for_pipe = video if keep_masked_pixels else masked_video_black
 
         pipe = preloaded_models["cog_pipe"] if preloaded_models else None
@@ -1583,10 +1582,13 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--keep_masked_pixels",
-        action="store_true",
+        type=float,
+        default=0.0,
         help=(
-            "Keep original pixels inside the masked region as conditioning for the video inpaint pipeline. "
-            "Useful when the mask covers a large area (e.g., the full road) and you need edits aligned to existing lane positions."
+            "Fraction of original pixels to keep inside the masked region (0.0–1.0). "
+            "0.0 = use fully generated/inpainted fill (default), 1.0 = keep fully original pixels, "
+            "intermediate values blend original and generated fill as conditioning for the pipeline. "
+            "Note: with VP_BORDER_AWARE_MASKING=true the masked fill uses cv2.inpaint, not black."
         ),
     )
     parser.add_argument(
