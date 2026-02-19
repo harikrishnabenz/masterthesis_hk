@@ -153,10 +153,11 @@ def sam2_stage(
     sys.path.insert(0, "/workspace/sam2")
     os.chdir("/workspace/sam2")
 
-    # Import the SAM2 task function from the container's baked-in workflow module.
-    # Calling a @task-decorated function directly (outside a @workflow context)
-    # executes the raw Python function — no Flyte magic.
-    from workflow_sam2 import run_sam2_segmentation  # type: ignore[import-not-found]
+    # Import the SAM2 task and unwrap the @task decorator to get the raw
+    # Python function.  Calling a @task-decorated function from inside another
+    # @task is forbidden by Flytekit ("nested task" error).
+    from workflow_sam2 import run_sam2_segmentation as _sam2_task  # type: ignore[import-not-found]
+    _sam2_fn = getattr(_sam2_task, "task_function", _sam2_task)
 
     logger.info("=" * 80)
     logger.info("MASTER PIPELINE — STAGE 1: SAM2 SEGMENTATION")
@@ -165,7 +166,7 @@ def sam2_stage(
     logger.info("  max_frames        = %d", max_frames)
     logger.info("=" * 80)
 
-    result = run_sam2_segmentation(
+    result = _sam2_fn(
         run_id=run_id,
         sam2_video_uris=sam2_video_uris,
         max_frames=max_frames,
@@ -234,7 +235,9 @@ def vp_stage(
     sys.path.insert(0, "/workspace/VideoPainter")
     os.chdir("/workspace/VideoPainter")
 
-    from workflow_vp import run_videopainter_edit_many  # type: ignore[import-not-found]
+    # Unwrap the @task decorator to avoid Flytekit "nested task" error.
+    from workflow_vp import run_videopainter_edit_many as _vp_task  # type: ignore[import-not-found]
+    _vp_fn = getattr(_vp_task, "task_function", _vp_task)
 
     logger.info("=" * 80)
     logger.info("MASTER PIPELINE — STAGE 2: VIDEOPAINTER EDITING")
@@ -243,7 +246,7 @@ def vp_stage(
     logger.info("  instructions      = %s", video_editing_instructions[:200])
     logger.info("=" * 80)
 
-    gcs_output_path = run_videopainter_edit_many(
+    gcs_output_path = _vp_fn(
         data_run_id=data_run_id,
         output_run_id=output_run_id,
         data_video_ids="auto",
@@ -315,7 +318,9 @@ def alpamayo_stage(
     sys.path.insert(0, "/workspace/alpamayo")
     os.chdir("/workspace/alpamayo")
 
-    from workflow_alpamayo import run_alpamayo_inference_task  # type: ignore[import-not-found]
+    # Unwrap the @task decorator to avoid Flytekit "nested task" error.
+    from workflow_alpamayo import run_alpamayo_inference_task as _alp_task  # type: ignore[import-not-found]
+    _alp_fn = getattr(_alp_task, "task_function", _alp_task)
 
     logger.info("=" * 80)
     logger.info("MASTER PIPELINE — STAGE 3: ALPAMAYO VLA INFERENCE")
@@ -325,7 +330,7 @@ def alpamayo_stage(
     logger.info("  video_name          = %s", video_name)
     logger.info("=" * 80)
 
-    result = run_alpamayo_inference_task(
+    result = _alp_fn(
         video_data_gcs_path=video_data_gcs_path,
         output_run_id=output_run_id,
         model_id=model_id,
