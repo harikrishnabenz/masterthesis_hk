@@ -119,21 +119,42 @@ TRAINED_FLUXFILL_GCS_PATH="${TRAINED_FLUXFILL_GCS_PATH:-workspace/user/hbaskar/V
 
 # VP run suffix (used in Docker image naming)
 CHECKPOINT_TIMESTAMP=$(basename "$TRAINED_FLUXFILL_GCS_PATH" | grep -oE '[0-9]{8}_[0-9]{6}' | head -1 || true)
-VP_RUN_SUFFIX="${VP_RUN_SUFFIX:-withoutlora_5prompt_${CHECKPOINT_TIMESTAMP}}"
+VP_RUN_SUFFIX="${VP_RUN_SUFFIX:-withoutlora_${NUM_PROMPTS}prompt_${CHECKPOINT_TIMESTAMP}}"
 
 # LLM model path inside VP container
 VP_LLM_MODEL="${VP_LLM_MODEL:-/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct}"
 
-# Editing instructions (newline-separated; use || to delimit in env vars)
-# Must match the 5 standard lane-line variations used by the standalone VP build script.
-VIDEO_EDITING_INSTRUCTIONS="${VIDEO_EDITING_INSTRUCTIONS:-$(printf '%s\n%s\n%s\n%s\n%s' \
-   'Single solid white continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged' \
-   'Double solid white continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged' \
-   'Single solid yellow continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged' \
-   'Double solid yellow continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged' \
-   'Single dashed white intermitted line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged')}"
+# ----------------------------------------------------------------------------------
+# PROMPT SELECTION
+# ----------------------------------------------------------------------------------
+# Pass PROMPT_IDS to choose which editing prompts to run.  Examples:
+#   PROMPT_IDS=1        → prompt 1 only
+#   PROMPT_IDS=123      → prompts 1, 2, 3
+#   PROMPT_IDS=15       → prompts 1 and 5
+#   PROMPT_IDS=12345    → all five (default)
+PROMPT_IDS="${PROMPT_IDS:-12345}"
 
-#VIDEO_EDITING_INSTRUCTIONS="${VIDEO_EDITING_INSTRUCTIONS:-Single solid white continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged}"
+declare -A PROMPTS
+PROMPTS[1]='Single solid white continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged'
+PROMPTS[2]='Double solid white continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged'
+PROMPTS[3]='Single solid yellow continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged'
+PROMPTS[4]='Double solid yellow continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged'
+PROMPTS[5]='Single dashed white intermitted line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged'
+
+# Build VIDEO_EDITING_INSTRUCTIONS from selected prompt IDs
+VIDEO_EDITING_INSTRUCTIONS=""
+for (( i=0; i<${#PROMPT_IDS}; i++ )); do
+  pid="${PROMPT_IDS:$i:1}"
+  if [[ -z "${PROMPTS[$pid]+x}" ]]; then
+    echo "ERROR: Invalid prompt ID '${pid}'. Valid IDs are 1-5."
+    exit 1
+  fi
+  if [[ -n "${VIDEO_EDITING_INSTRUCTIONS}" ]]; then
+    VIDEO_EDITING_INSTRUCTIONS+=$'\n'
+  fi
+  VIDEO_EDITING_INSTRUCTIONS+="${PROMPTS[$pid]}"
+done
+NUM_PROMPTS=${#PROMPT_IDS}
 
 # VP inference parameters
 VP_NUM_INFERENCE_STEPS="${VP_NUM_INFERENCE_STEPS:-50}"
