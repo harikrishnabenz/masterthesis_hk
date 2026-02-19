@@ -76,10 +76,44 @@ if [[ -z "${VP_DATA_RUN_ID}" ]]; then
 fi
 echo "Auto-detected SAM2 data folder: ${VP_DATA_RUN_ID}"
 
+# ----------------------------------------------------------------------------------
+# PROMPT SELECTION
+# ----------------------------------------------------------------------------------
+# Pass PROMPT_IDS to choose which prompts to run.  Examples:
+#   PROMPT_IDS=1        → prompt 1 only
+#   PROMPT_IDS=123      → prompts 1, 2, 3
+#   PROMPT_IDS=15       → prompts 1 and 5
+#   PROMPT_IDS=12345    → all five (default)
+PROMPT_IDS="${PROMPT_IDS:-2}"
+
+declare -A PROMPTS
+PROMPTS[1]='Single solid white continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged'
+PROMPTS[2]='Double solid white continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged'
+PROMPTS[3]='Single solid yellow continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged'
+PROMPTS[4]='Double solid yellow continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged'
+PROMPTS[5]='Single dashed white intermitted line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged'
+
+# Build VIDEO_EDITING_INSTRUCTIONS from selected prompt IDs
+VIDEO_EDITING_INSTRUCTIONS=""
+for (( i=0; i<${#PROMPT_IDS}; i++ )); do
+  pid="${PROMPT_IDS:$i:1}"
+  if [[ -z "${PROMPTS[$pid]+x}" ]]; then
+    echo "ERROR: Invalid prompt ID '${pid}'. Valid IDs are 1-5."
+    exit 1
+  fi
+  if [[ -n "${VIDEO_EDITING_INSTRUCTIONS}" ]]; then
+    VIDEO_EDITING_INSTRUCTIONS+=$'\n'
+  fi
+  VIDEO_EDITING_INSTRUCTIONS+="${PROMPTS[$pid]}"
+done
+
+NUM_PROMPTS=${#PROMPT_IDS}
+
 echo "================================================================================"
 echo "VIDEOPAINTER EDITING - BUILD AND RUN"
 echo "================================================================================"
 echo "  RUN_TAG:                   ${RUN_TAG}"
+echo "  PROMPT_IDS:                ${PROMPT_IDS}  (${NUM_PROMPTS} prompt(s))"
 echo "  INPUT (SAM2 preprocessed): ${VP_INPUT_BASE}/${VP_DATA_RUN_ID}/"
 echo "  OUTPUT (edited videos):    ${VP_OUTPUT_BASE}/${RUN_TAG}/"
 echo "  TRAINED_FLUXFILL_GCS_PATH: ${TRAINED_FLUXFILL_GCS_PATH}"
@@ -88,7 +122,7 @@ echo "==========================================================================
 # Declare a run suffix used by both this script and workflow_vp.py
 # Extract timestamp from the trained checkpoint folder name
 CHECKPOINT_TIMESTAMP=$(basename "$TRAINED_FLUXFILL_GCS_PATH" | grep -oE '[0-9]{8}_[0-9]{6}' | head -1)
-X="withoutlora_5prompt_${CHECKPOINT_TIMESTAMP}"
+X="withoutlora_${NUM_PROMPTS}prompt_${CHECKPOINT_TIMESTAMP}"
 export VP_RUN_SUFFIX="${X}"
 
 docker compose build
@@ -102,8 +136,6 @@ docker push "${REMOTE_IMAGE}:latest"
 
 export VP_CONTAINER_IMAGE="${REMOTE_IMAGE_TAGGED}"
 
-# Video editing instructions (newline-separated; core change first, constraints after ';')
-VIDEO_EDITING_INSTRUCTIONS=$'Single solid white continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged\nDouble solid white continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged\nSingle solid yellow continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged\nDouble solid yellow continuous line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged\nSingle dashed white intermitted line, aligned exactly to the original lane positions and perspective; keep road texture, lighting, and shadows unchanged'
 CAPTION_REFINE_ITERS="${CAPTION_REFINE_ITERS:-10}"
 CAPTION_REFINE_TEMPERATURE="${CAPTION_REFINE_TEMPERATURE:-0.1}"
 VP_STRENGTH="${VP_STRENGTH:-1.0}"
