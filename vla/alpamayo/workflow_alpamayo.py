@@ -536,7 +536,7 @@ def run_alpamayo_inference_task(
     return {
         "output_gcs_path": gcs_output_path,
         "report_path": f"{gcs_output_path}/{output_run_id}_report.txt",
-        "num_videos": len(video_paths),
+        "num_videos": len(video_tuples),
         "num_successful": sum(1 for m in all_metrics if m.success),
         "num_failed": sum(1 for m in all_metrics if not m.success),
     }
