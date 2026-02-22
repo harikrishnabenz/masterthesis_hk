@@ -2,6 +2,9 @@
 /segmentation/sam2/checkpoints/
 /generation/VideoPainter/ckpt/
 
+# Exclude results (downloaded outputs, not source code)
+/results/
+
 # Ignore local wheel artifact
 /generation/VideoPainter/hlx_wf-2.4.2.dev9-py3-none-any.whl
 /segmentation/sam2/hlx_wf-2.4.2.dev9-py3-none-any.whl

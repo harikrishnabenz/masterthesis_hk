@@ -28,12 +28,12 @@ import csv
 import hashlib
 import json
 import logging
+import multiprocessing
 import os
 import shutil
 import subprocess
 import tempfile
 from datetime import datetime
-from multiprocessing import Pool
 from multiprocessing.pool import ThreadPool
 from pathlib import Path
 from typing import Iterable, Optional
@@ -64,7 +64,7 @@ CONTAINER_IMAGE = os.environ.get("FLUXFILL_DATA_CONTAINER_IMAGE", CONTAINER_IMAG
 # --------------------------------------------------------------------------------------
 BUCKET = "mbadas-sandbox-research-9bb9c7f"
 
-SOURCE_GCS_PREFIX = "workspace/user/hbaskar/Video_inpainting/videopainter/training/data_physical_ai/camera_front_tele_30fov"
+SOURCE_GCS_PREFIX = "workspace/user/hbaskar/Input/data_physical_ai/camera_front_tele_30fov"
 DEST_GCS_PREFIX_BASE = "workspace/user/hbaskar/Video_inpainting/videopainter/training/data"
 
 QWEN_MODEL_GCS_PREFIX = "workspace/user/hbaskar/Video_inpainting/videopainter/ckpt/vlm/Qwen2.5-VL-7B-Instruct"
@@ -117,6 +117,53 @@ def _extract_frame_ffmpeg(video_path: str, *, frame_number: int, out_png_path: s
     except subprocess.CalledProcessError as e:
         err = (e.stderr or "").strip()
         raise RuntimeError(f"ffmpeg failed for {video_path}: {err}")
+
+
+def _extract_frames_ffmpeg_batch(
+    video_path: str,
+    *,
+    frame_numbers: list[int],
+    out_png_paths: list[str],
+) -> None:
+    """Extract multiple frames in a single ffmpeg invocation.
+
+    Builds a select filter like  select='eq(n,0)+eq(n,249)+eq(n,499)'
+    and outputs each selected frame to a sequentially-numbered file,
+    then renames them to the desired paths.
+    """
+    if not frame_numbers or len(frame_numbers) != len(out_png_paths):
+        raise ValueError("frame_numbers and out_png_paths must have equal non-zero length")
+
+    # Build a single select expression for all requested frames
+    selects = "+".join(f"eq(n\\,{int(fn) - 1})" for fn in frame_numbers)
+
+    # ffmpeg will output frame_001.png, frame_002.png, … in order of appearance
+    out_dir = os.path.dirname(out_png_paths[0]) or "."
+    tmp_pattern = os.path.join(out_dir, f"_tmp_{_stable_id(video_path)}_%03d.png")
+
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        "-i", video_path,
+        "-vf", f"select='{selects}'",
+        "-vsync", "vfr",
+        tmp_pattern,
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except FileNotFoundError as e:
+        raise RuntimeError("ffmpeg is not available in this environment") from e
+    except subprocess.CalledProcessError as e:
+        err = (e.stderr or "").strip()
+        raise RuntimeError(f"ffmpeg batch extract failed for {video_path}: {err}")
+
+    # Rename sequential outputs to the requested paths
+    for i, dest in enumerate(out_png_paths):
+        src = tmp_pattern % (i + 1)
+        if os.path.exists(src):
+            os.rename(src, dest)
+        else:
+            # Fallback: frame may not exist (e.g. video shorter than requested)
+            logger.warning("Frame %d not extracted from %s (video too short?)", frame_numbers[i], video_path)
 
 
 def _parse_frame_numbers_csv(frame_numbers: str | None) -> list[int]:
@@ -495,6 +542,7 @@ def _lane_prompt_from_qwen_output(text: str) -> str:
 # --------------------------------------------------------------------------------------
 # Store SAM2 models per device
 _sam2_predictors = {}  # device -> (predictor, key)
+_sam2_predictors_lock = __import__("threading").Lock()
 
 
 def _get_sam2_image_predictor(*, ckpt_path: str, config_name: str, device: str):
@@ -502,11 +550,12 @@ def _get_sam2_image_predictor(*, ckpt_path: str, config_name: str, device: str):
     
     key = f"{ckpt_path}|{config_name}|{device}"
     
-    # Check if predictor already loaded for this device
-    if device in _sam2_predictors:
-        cached_predictor, cached_key = _sam2_predictors[device]
-        if cached_key == key:
-            return cached_predictor
+    with _sam2_predictors_lock:
+        # Check if predictor already loaded for this device
+        if device in _sam2_predictors:
+            cached_predictor, cached_key = _sam2_predictors[device]
+            if cached_key == key:
+                return cached_predictor
 
     from sam2.build_sam import build_sam2
     from sam2.sam2_image_predictor import SAM2ImagePredictor
@@ -520,9 +569,18 @@ def _get_sam2_image_predictor(*, ckpt_path: str, config_name: str, device: str):
     sam2_predictor = SAM2ImagePredictor(sam2_model)
     
     # Cache for this device
-    _sam2_predictors[device] = (sam2_predictor, key)
+    with _sam2_predictors_lock:
+        _sam2_predictors[device] = (sam2_predictor, key)
     
     return sam2_predictor
+
+
+def _reinit_sam2_predictor(*, ckpt_path: str, config_name: str, device: str):
+    """Force-recreate the SAM2 predictor on a device after CUDA error."""
+    global _sam2_predictors
+    with _sam2_predictors_lock:
+        _sam2_predictors.pop(device, None)
+    return _get_sam2_image_predictor(ckpt_path=ckpt_path, config_name=config_name, device=device)
 
 
 def _fill_binary_mask_holes(mask_255):
@@ -599,38 +657,45 @@ def _postprocess_road_mask(mask_01, *, width: int, height: int):
 
 
 def _sam2_road_mask(image_rgb: Image.Image, *, ckpt_path: str, config_name: str, device: str) -> Image.Image:
+    import torch
     import numpy as np
 
     predictor = _get_sam2_image_predictor(ckpt_path=ckpt_path, config_name=config_name, device=device)
-    predictor.set_image(image_rgb)
-    w, h = image_rgb.size
 
-    points = np.array(
-        [
-            [w * 0.25, h * 0.80],
-            [w * 0.50, h * 0.85],
-            [w * 0.75, h * 0.80],
-            [w * 0.50, h * 0.65],
-            [w * 0.35, h * 0.75],
-            [w * 0.65, h * 0.75],
-        ],
-        dtype=np.float32,
-    )
-    labels = np.ones((points.shape[0],), dtype=np.int32)
+    with torch.inference_mode():
+        predictor.set_image(image_rgb)
+        w, h = image_rgb.size
 
-    masks, ious, _low_res = predictor.predict(
-        point_coords=points,
-        point_labels=labels,
-        multimask_output=True,
-        return_logits=False,
-        normalize_coords=True,
-    )
+        points = np.array(
+            [
+                [w * 0.25, h * 0.80],
+                [w * 0.50, h * 0.85],
+                [w * 0.75, h * 0.80],
+                [w * 0.50, h * 0.65],
+                [w * 0.35, h * 0.75],
+                [w * 0.65, h * 0.75],
+            ],
+            dtype=np.float32,
+        )
+        labels = np.ones((points.shape[0],), dtype=np.int32)
+
+        masks, ious, _low_res = predictor.predict(
+            point_coords=points,
+            point_labels=labels,
+            multimask_output=True,
+            return_logits=False,
+            normalize_coords=True,
+        )
 
     if ious is not None and len(ious) > 0:
         best = int(np.argmax(ious))
     else:
         best = 0
     m = masks[best]
+
+    # Explicitly release predictor state (GPU feature tensors) to avoid
+    # gradual VRAM fragmentation over thousands of invocations.
+    predictor.reset_predictor()
 
     # Post-process to match `process_videos_sam2.py` behavior more closely.
     # `m` may be bool or float; treat non-zero as foreground.
@@ -665,148 +730,185 @@ def _focus_image_to_mask(image_rgb: Image.Image, mask_l: Image.Image) -> Image.I
     return Image.fromarray(out, mode="RGB")
 
 
-def _process_single_video(
-    args: tuple,
-) -> list[dict]:
-    """Process a single video: extract frames, generate masks and captions.
-    
-    This function is designed to be called by multiprocessing workers.
-    Each worker operates on a dedicated GPU to avoid conflicts.
-    Returns a list of rows for the CSV.
-    """
-    (
-        global_index,
-        uri,
-        mp4_path,
-        frames,
-        images_dir,
-        masks_dir,
-        sam2_checkpoint_path,
-        sam2_config_name,
-        sam2_device,
-        qwen_model_path,
-        qwen_device,
-        system_prompt,
-        user_prompt,
-        chunk_num,
-    ) = args
-    
-    # Each worker gets its own logger
-    logger = logging.getLogger(f"{__name__}.worker.{sam2_device}")
-    rows = []
-    sid = _stable_id(uri)
-    
-    logger.info("Worker on %s processing %s (chunk_%04d)", sam2_device, os.path.basename(mp4_path), chunk_num)
-    
-    for frame_idx, frame_number in enumerate(frames, 1):
-        try:
-            out_base = f"{global_index:06d}_f{int(frame_number):04d}_{sid}.png"
-            out_img = os.path.join(images_dir, out_base)
-            out_mask = os.path.join(masks_dir, out_base)
-            
-            # Extract frame
-            _extract_frame_ffmpeg(mp4_path, frame_number=int(frame_number), out_png_path=out_img)
-            
-            # Load and process image
-            pil_img = Image.open(out_img).convert("RGB")
-            
-            # Generate mask
-            mask = _sam2_road_mask(
-                pil_img,
-                ckpt_path=sam2_checkpoint_path,
-                config_name=sam2_config_name,
-                device=sam2_device,
-            )
-            mask.save(out_mask)
-            
-            # Generate caption
-            focus_img = _focus_image_to_mask(pil_img, mask)
-            prompt_raw = _caption_qwen(
-                focus_img,
-                model_path=qwen_model_path,
-                qwen_device=qwen_device,
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                max_new_tokens=64,
-            )
-            prompt = _lane_prompt_from_qwen_output(prompt_raw)
-            
-            row = {
-                "image": f"images/{os.path.basename(out_img)}",
-                "mask": f"masks/{os.path.basename(out_mask)}",
-                "prompt": prompt,
-                "prompt_2": prompt,
-            }
-            rows.append(row)
-            
-        except Exception as e:
-            logger.error("[%s] Failed to process frame %d of %s: %s", sam2_device, frame_number, uri, e)
-            # Clean up partial files
-            try:
-                if os.path.exists(out_img):
-                    os.remove(out_img)
-                if os.path.exists(out_mask):
-                    os.remove(out_mask)
-            except Exception:
-                pass
-            continue
-    
-    logger.info("Worker on %s completed %s: %d frames processed", sam2_device, os.path.basename(mp4_path), len(rows))
-    return rows
+def _is_cuda_error(exc: BaseException) -> bool:
+    """Return True if the exception is (or wraps) a CUDA error."""
+    msg = str(exc).lower()
+    return "cuda error" in msg or "illegal memory access" in msg or "device-side assert" in msg
 
 
-def _preload_models_on_gpus(
-    *,
+# ---------------------------------------------------------------------------
+# GPU WORKER (runs in its own subprocess with isolated CUDA context)
+# ---------------------------------------------------------------------------
+
+# Sentinel value workers put on result_queue to signal a fatal CUDA error.
+_CUDA_FATAL_SENTINEL = "__CUDA_FATAL__"
+
+
+def _gpu_worker(
+    physical_gpu_id: int,
+    task_queue: multiprocessing.Queue,
+    result_queue: multiprocessing.Queue,
     sam2_checkpoint_path: str,
     sam2_config_name: str,
     qwen_model_path: str,
-    num_gpus: int = 8,
-) -> None:
-    """Pre-load models on each GPU to avoid repeated loading during multiprocessing.
-    
-    This loads one model instance per GPU and stores them in global variables.
-    Using threading instead of multiprocessing allows all threads to share these models.
+    system_prompt: str,
+    user_prompt: str,
+):
+    """Run in a dedicated subprocess.  Owns exactly one GPU.
+
+    - ``CUDA_VISIBLE_DEVICES`` is set *before* importing torch so that
+      ``cuda:0`` inside this process maps to the assigned physical GPU.
+    - If a CUDA fatal error occurs the subprocess signals the parent via
+      ``_CUDA_FATAL_SENTINEL`` on the result queue and exits immediately.
+      The parent will then abort the entire job.
     """
-    import threading
-    
-    def _load_on_gpu(gpu_id: int):
-        device = f"cuda:{gpu_id}"
-        logger.info("Pre-loading models on %s...", device)
-        
-        # Pre-load SAM2
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(physical_gpu_id)
+
+    import gc
+    import torch
+
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        level=logging.INFO,
+    )
+    _logger = logging.getLogger(f"{__name__}.gpu{physical_gpu_id}")
+    _logger.info("GPU worker started — physical GPU %d (CUDA_VISIBLE_DEVICES=%s)",
+                 physical_gpu_id, os.environ["CUDA_VISIBLE_DEVICES"])
+
+    # Device is always cuda:0 inside this process
+    device = "cuda:0"
+
+    # Load models once
+    try:
+        _logger.info("Loading SAM2 on %s (physical GPU %d) …", device, physical_gpu_id)
+        _get_sam2_image_predictor(
+            ckpt_path=sam2_checkpoint_path,
+            config_name=sam2_config_name,
+            device=device,
+        )
+        _logger.info("Loading Qwen on %s (physical GPU %d) …", device, physical_gpu_id)
+        _get_qwen_model(qwen_model_path, qwen_device=device)
+        _logger.info("Models loaded on physical GPU %d", physical_gpu_id)
+    except Exception as e:
+        _logger.error("Failed to load models on GPU %d: %s", physical_gpu_id, e)
+        result_queue.put((physical_gpu_id, _CUDA_FATAL_SENTINEL))
+        return
+
+    while True:
         try:
-            _ = _get_sam2_image_predictor(
-                ckpt_path=sam2_checkpoint_path,
-                config_name=sam2_config_name,
-                device=device,
-            )
-            logger.info("SAM2 loaded on %s", device)
-        except Exception as e:
-            logger.warning("Failed to pre-load SAM2 on %s: %s", device, e)
-        
-        # Pre-load Qwen
+            item = task_queue.get(timeout=5)
+        except Exception:
+            # Queue empty or timed out — check if sentinel was missed
+            continue
+        if item is None:
+            # Sentinel: no more work
+            _logger.info("GPU %d worker received shutdown sentinel", physical_gpu_id)
+            break
+
+        (
+            global_index, uri, mp4_path, frames,
+            images_dir, masks_dir,
+            chunk_num,
+        ) = item
+
+        rows = []
+        sid = _stable_id(uri)
+
+        _logger.info("[GPU %d] Processing %s (chunk_%04d, %d frames)",
+                     physical_gpu_id, os.path.basename(mp4_path), chunk_num, len(frames))
+
+        # --- Step 1: Batch-extract ALL frames (CPU only — ffmpeg) ---
+        chunk_tag = f"chunk_{chunk_num:04d}"
+        chunk_images_dir = os.path.join(images_dir, chunk_tag)
+        chunk_masks_dir = os.path.join(masks_dir, chunk_tag)
+        Path(chunk_images_dir).mkdir(parents=True, exist_ok=True)
+        Path(chunk_masks_dir).mkdir(parents=True, exist_ok=True)
+
+        out_bases = [f"{global_index:06d}_f{int(fn):04d}_{sid}.png" for fn in frames]
+        out_imgs = [os.path.join(chunk_images_dir, b) for b in out_bases]
+        out_masks = [os.path.join(chunk_masks_dir, b) for b in out_bases]
+
         try:
-            _ = _get_qwen_model(qwen_model_path, qwen_device=device)
-            logger.info("Qwen loaded on %s", device)
+            _extract_frames_ffmpeg_batch(mp4_path, frame_numbers=frames, out_png_paths=out_imgs)
         except Exception as e:
-            logger.warning("Failed to pre-load Qwen on %s: %s", device, e)
-    
-    # Load models in parallel on all GPUs
-    threads = []
-    for gpu_id in range(num_gpus):
-        t = threading.Thread(target=_load_on_gpu, args=(gpu_id,))
-        t.start()
-        threads.append(t)
-    
-    for t in threads:
-        t.join()
-    
-    logger.info("All models pre-loaded on %d GPUs", num_gpus)
+            _logger.error("[GPU %d] ffmpeg failed for %s: %s", physical_gpu_id, uri, e)
+            result_queue.put((physical_gpu_id, rows))
+            continue
+
+        # --- Step 2: For each extracted frame, mask + caption (GPU) ---
+        for frame_number, out_img, out_mask in zip(frames, out_imgs, out_masks):
+            if not os.path.exists(out_img):
+                _logger.warning("[GPU %d] Frame %d not extracted from %s",
+                                physical_gpu_id, frame_number, uri)
+                continue
+
+            try:
+                pil_img = Image.open(out_img).convert("RGB")
+
+                mask = _sam2_road_mask(
+                    pil_img,
+                    ckpt_path=sam2_checkpoint_path,
+                    config_name=sam2_config_name,
+                    device=device,
+                )
+                mask.save(out_mask)
+
+                focus_img = _focus_image_to_mask(pil_img, mask)
+                prompt_raw = _caption_qwen(
+                    focus_img,
+                    model_path=qwen_model_path,
+                    qwen_device=device,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    max_new_tokens=64,
+                )
+                prompt = _lane_prompt_from_qwen_output(prompt_raw)
+
+                rows.append({
+                    "image": f"{chunk_tag}/images/{os.path.basename(out_img)}",
+                    "mask": f"{chunk_tag}/masks/{os.path.basename(out_mask)}",
+                    "prompt": prompt,
+                    "prompt_2": prompt,
+                })
+
+            except Exception as e:
+                _logger.error("[GPU %d] Failed frame %d of %s: %s",
+                              physical_gpu_id, frame_number, uri, e)
+                for p in (out_img, out_mask):
+                    try:
+                        if os.path.exists(p):
+                            os.remove(p)
+                    except Exception:
+                        pass
+                if _is_cuda_error(e):
+                    _logger.error("[GPU %d] FATAL CUDA error — aborting worker",
+                                  physical_gpu_id)
+                    result_queue.put((physical_gpu_id, _CUDA_FATAL_SENTINEL))
+                    return  # exit subprocess immediately
+                continue
+
+        # Periodic housekeeping
+        gc.collect()
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+        _logger.info("[GPU %d] Completed %s: %d/%d frames OK",
+                     physical_gpu_id, os.path.basename(mp4_path), len(rows), len(frames))
+        result_queue.put((physical_gpu_id, rows))
+
+
+# _preload_models_on_gpus is no longer needed — each subprocess loads its own
+# models inside _gpu_worker.  Kept as a no-op stub in case anything references it.
+def _preload_models_on_gpus(**_kwargs) -> None:
+    pass
 
 
 @task(
     compute=DedicatedNode(
-        node=Node.L4_8GPU,
+        node=Node.A100_80GB_4GPU,
         ephemeral_storage="max",
         max_duration="3d",
     ),
@@ -814,6 +916,7 @@ def _preload_models_on_gpus(
     environment={
         "PYTHONUNBUFFERED": "1",
         "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+        "CUDA_LAUNCH_BLOCKING": "0",
     },
     mounts=[
         FuseBucket(bucket=BUCKET, name=QWEN_MODEL_FUSE_NAME, prefix=QWEN_MODEL_GCS_PREFIX),
@@ -838,9 +941,10 @@ def generate_fluxfill_training_data(
     download_batch_size: int = 100,
     frame_numbers: str = "1,100,200,300,400,500",
     chunk_start: int = 0,
-    chunk_end: int = 200,
+    chunk_end: int = 0,
     output_run_id: Optional[str] = None,
-    num_workers: int = 8,
+    num_gpus: int = 4,
+    num_workers: int = 4,
 ) -> str:
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -848,8 +952,9 @@ def generate_fluxfill_training_data(
         level=logging.INFO,
     )
 
+    # num_videos <= 0 means "process everything found".
     if num_videos <= 0:
-        raise ValueError("num_videos must be > 0")
+        num_videos = float("inf")
     if start_index < 0:
         raise ValueError("start_index must be >= 0")
     if int(download_batch_size) <= 0:
@@ -902,8 +1007,6 @@ def generate_fluxfill_training_data(
     )
 
     dest_prefix = f"gs://{BUCKET}/{DEST_GCS_PREFIX_BASE}/{run_id}".rstrip("/")
-    remote_images_prefix = f"{dest_prefix}/images"
-    remote_masks_prefix = f"{dest_prefix}/masks"
     remote_csv_uri = f"{dest_prefix}/train.csv"
 
     fs = gcsfs.GCSFileSystem(token="google_default")
@@ -914,12 +1017,13 @@ def generate_fluxfill_training_data(
         wri.writeheader()
 
     # List + download only the requested slice of mp4s.
+    num_videos_display = "ALL" if num_videos == float("inf") else int(num_videos)
     logger.info(
-        "Listing mp4s in gs://%s/%s (start_index=%d, num_videos=%d, chunk_start=%d, chunk_end=%d)",
+        "Listing mp4s in gs://%s/%s (start_index=%d, num_videos=%s, chunk_start=%d, chunk_end=%d)",
         BUCKET,
         source_gcs_prefix,
         int(start_index),
-        int(num_videos),
+        num_videos_display,
         int(chunk_start),
         int(chunk_end),
     )
@@ -930,13 +1034,135 @@ def generate_fluxfill_training_data(
     
     total_processed = 0
     start_idx = int(start_index)
-    limit = int(num_videos)
-    
-    for chunk_num in range(int(chunk_start), int(chunk_end) + 1):
-        if total_processed >= limit:
-            logger.info("Reached video limit (%d), stopping chunk iteration", limit)
+    limit = int(num_videos) if num_videos != float("inf") else float("inf")
+
+    # ---- Spawn one subprocess per GPU.  Each subprocess has its own CUDA
+    #      context, its own copy of SAM2 + Qwen, and is fully isolated.
+    #      If one GPU hits a fatal CUDA error the other 3 continue. ----
+    mp_ctx = multiprocessing.get_context("spawn")  # fork is unsafe with CUDA
+    task_queue = mp_ctx.Queue()       # parent → workers: video tasks
+    result_queue = mp_ctx.Queue()     # workers → parent: per-video rows
+
+    workers: list[multiprocessing.Process] = []
+    for gpu_id in range(num_gpus):
+        p = mp_ctx.Process(
+            target=_gpu_worker,
+            args=(
+                gpu_id,
+                task_queue,
+                result_queue,
+                sam2_checkpoint_path,
+                sam2_config_name,
+                QWEN_MODEL_FUSE_ROOT,
+                system_prompt,
+                user_prompt,
+            ),
+            name=f"gpu-worker-{gpu_id}",
+            daemon=True,
+        )
+        p.start()
+        workers.append(p)
+    logger.info("Spawned %d GPU worker subprocesses", len(workers))
+
+    # Separate I/O thread pool for parallel uploads (doesn't touch GPUs)
+    upload_pool = ThreadPool(processes=8)
+
+    def _upload_one(args_tuple):
+        """Upload a single image+mask pair to GCS. Called by upload_pool."""
+        _fs, img_path, mask_path, remote_img, remote_mask = args_tuple
+        uploaded = 0
+        if os.path.exists(img_path):
+            _upload_file_to_gcs(_fs, img_path, remote_img, log_upload=False)
+            os.remove(img_path)
+            uploaded += 1
+        if os.path.exists(mask_path):
+            _upload_file_to_gcs(_fs, mask_path, remote_mask, log_upload=False)
+            os.remove(mask_path)
+            uploaded += 1
+        return uploaded
+
+    def _build_upload_args_for_chunk(chunk_rows, chunk_num):
+        """Build upload args with per-chunk GCS paths."""
+        chunk_tag = f"chunk_{chunk_num:04d}"
+        remote_chunk_prefix = f"{dest_prefix}/{chunk_tag}"
+        args = []
+        for row in chunk_rows:
+            img_bn = os.path.basename(row["image"])
+            mask_bn = os.path.basename(row["mask"])
+            args.append((
+                fs,
+                os.path.join(images_dir, chunk_tag, img_bn),
+                os.path.join(masks_dir, chunk_tag, mask_bn),
+                f"{remote_chunk_prefix}/images/{img_bn}",
+                f"{remote_chunk_prefix}/masks/{mask_bn}",
+            ))
+        return args
+
+    def _download_chunk_videos(
+        _fs, chunk_mp4_uris, chunk_dir, base_index
+    ) -> list[tuple[int, str, str]]:
+        """Download all videos for a chunk."""
+        Path(chunk_dir).mkdir(parents=True, exist_ok=True)
+        local_vids = []
+        for j, uri in enumerate(chunk_mp4_uris):
+            global_idx = base_index + j
+            remote = uri[len("gs://"):] if uri.startswith("gs://") else uri
+            local_mp4 = os.path.join(chunk_dir, _local_mp4_name_for_uri(uri, global_idx))
+            _fs.get(remote, local_mp4)
+            local_vids.append((global_idx, uri, local_mp4))
+        return local_vids
+
+    def _collect_results(expected_count: int) -> list[dict]:
+        """Drain result_queue for *expected_count* video results.
+
+        Raises RuntimeError immediately if any worker signals a fatal CUDA error.
+        """
+        all_rows: list[dict] = []
+        collected = 0
+        while collected < expected_count:
+            try:
+                _gpu_id, rows = result_queue.get(timeout=120)
+            except Exception:
+                alive = sum(1 for w in workers if w.is_alive())
+                if alive < num_gpus:
+                    raise RuntimeError(
+                        f"GPU worker died (only {alive}/{num_gpus} alive). "
+                        "Aborting job — all GPUs must be healthy."
+                    )
+                logger.warning("Timeout waiting for result (%d/%d collected)",
+                               collected, expected_count)
+                collected += 1
+                continue
+
+            # Check for fatal CUDA signal
+            if rows is _CUDA_FATAL_SENTINEL:
+                raise RuntimeError(
+                    f"GPU {_gpu_id} hit a fatal CUDA error. "
+                    "Aborting entire job — all GPUs must be healthy."
+                )
+
+            all_rows.extend(rows)
+            collected += 1
+        return all_rows
+
+    # Track pending upload futures so we can overlap upload(N) with process(N+1)
+    pending_upload_result = None
+    pending_upload_chunk_num = None
+
+    try:
+      for chunk_num in range(int(chunk_start), int(chunk_end) + 1):
+        if limit != float("inf") and total_processed >= limit:
+            logger.info("Reached video limit (%s), stopping chunk iteration", limit)
             break
-            
+
+        # Abort if ANY worker is dead — do not continue with degraded GPU count
+        alive_workers = sum(1 for w in workers if w.is_alive())
+        if alive_workers < num_gpus:
+            raise RuntimeError(
+                f"Only {alive_workers}/{num_gpus} GPU workers alive. "
+                "Aborting job — all GPUs must be healthy."
+            )
+
         chunk_folder = f"{root}/chunk_{chunk_num:04d}"
         logger.info("=" * 80)
         logger.info("Processing chunk: %s (chunk %d/%d)", chunk_folder, chunk_num - chunk_start + 1, chunk_end - chunk_start + 1)
@@ -951,10 +1177,12 @@ def generate_fluxfill_training_data(
                 logger.warning("No mp4s in chunk_%04d, skipping", chunk_num)
                 continue
                 
-            # Apply start_index and limit within this chunk
-            remaining = limit - total_processed
-            chunk_to_process = chunk_mp4s[start_idx:start_idx + remaining] if start_idx > 0 else chunk_mp4s[:remaining]
-            start_idx = max(0, start_idx - len(chunk_mp4s))  # Decrement for next chunk
+            if limit == float("inf"):
+                chunk_to_process = chunk_mp4s[start_idx:] if start_idx > 0 else chunk_mp4s
+            else:
+                remaining = int(limit) - total_processed
+                chunk_to_process = chunk_mp4s[start_idx:start_idx + remaining] if start_idx > 0 else chunk_mp4s[:remaining]
+            start_idx = max(0, start_idx - len(chunk_mp4s))
             
             if not chunk_to_process:
                 logger.info("No videos to process from chunk_%04d after applying start_index/limit", chunk_num)
@@ -964,105 +1192,84 @@ def generate_fluxfill_training_data(
             logger.warning("Chunk folder not found: %s", chunk_folder)
             continue
         
-        # Download this chunk's videos
+        # ---- Download this chunk's videos ----
         chunk_dir = os.path.join(videos_dir, f"chunk_{chunk_num:04d}")
-        Path(chunk_dir).mkdir(parents=True, exist_ok=True)
+        logger.info("Downloading %d videos from chunk_%04d …", len(chunk_to_process), chunk_num)
+        local_videos = _download_chunk_videos(fs, chunk_to_process, chunk_dir, total_processed)
         
-        logger.info("Downloading %d videos from chunk_%04d to %s", len(chunk_to_process), chunk_num, chunk_dir)
+        logger.info("Processing %d videos from chunk_%04d (frames: %s) — %d GPU workers",
+                     len(local_videos), chunk_num,
+                     ",".join(str(f) for f in frames),
+                     num_gpus)
         
-        local_videos: list[tuple[int, str, str]] = []
-        for j, uri in enumerate(chunk_to_process):
-            global_index = total_processed + j
-            remote = uri[len("gs://"):] if uri.startswith("gs://") else uri
-            local_mp4 = os.path.join(chunk_dir, _local_mp4_name_for_uri(uri, global_index))
-            fs.get(remote, local_mp4)
-            local_videos.append((global_index, uri, local_mp4))
-        
-        logger.info("Processing %d videos from chunk_%04d (frames: %s) using %d workers across 8 GPUs", len(local_videos), chunk_num, ",".join(str(f) for f in frames), num_workers)
-        
-        # Prepare arguments for parallel processing
-        # Distribute videos across 8 GPUs in round-robin fashion
-        process_args = []
+        # Enqueue each video as a task for the GPU workers
         for vid_idx, (global_index, uri, mp4_path) in enumerate(local_videos):
-            gpu_id = vid_idx % 8  # Round-robin across 8 GPUs
-            worker_qwen_device = f"cuda:{gpu_id}"
-            worker_sam2_device = f"cuda:{gpu_id}"
-            
-            process_args.append((
-                global_index,
-                uri,
-                mp4_path,
-                frames,
-                images_dir,
-                masks_dir,
-                sam2_checkpoint_path,
-                sam2_config_name,
-                worker_sam2_device,
-                QWEN_MODEL_FUSE_ROOT,
-                worker_qwen_device,
-                system_prompt,
-                user_prompt,
+            task_queue.put((
+                global_index, uri, mp4_path, frames,
+                images_dir, masks_dir,
                 chunk_num,
             ))
         
-        # Process videos in parallel using multiprocessing (isolated processes per GPU)
-        # Each process loads models on first use; global caching prevents reloads within process
-        chunk_rows = []
-        logger.info("Starting parallel processing with %d workers (8 GPUs) using multiprocessing...", num_workers)
-        with Pool(processes=num_workers) as pool:
-            results = pool.map(_process_single_video, process_args)
+        # ---- Collect results for all videos in this chunk ----
+        chunk_rows = _collect_results(len(local_videos))
+        logger.info("chunk_%04d: %d image/mask pairs generated", chunk_num, len(chunk_rows))
         
-        # Flatten results
-        for video_rows in results:
-            chunk_rows.extend(video_rows)
-        
-        logger.info("Completed processing %d videos from chunk_%04d, generated %d image/mask pairs", len(local_videos), chunk_num, len(chunk_rows))
-        
-        # Delete downloaded video files
+        # Delete downloaded mp4s immediately (free disk for next chunk)
         for _, _, mp4_path in local_videos:
             try:
                 os.remove(mp4_path)
             except Exception:
                 pass
+        shutil.rmtree(chunk_dir, ignore_errors=True)
         
-        # Batch upload all images and masks for this chunk
-        logger.info("Uploading %d images and masks for chunk_%04d...", len(chunk_rows), chunk_num)
-        upload_count = 0
-        for idx, row in enumerate(chunk_rows):
-            img_basename = row["image"].split("/")[-1]
-            mask_basename = row["mask"].split("/")[-1]
-            local_img = os.path.join(images_dir, img_basename)
-            local_mask = os.path.join(masks_dir, mask_basename)
-            
-            if os.path.exists(local_img):
-                _upload_file_to_gcs(fs, local_img, f"{remote_images_prefix}/{img_basename}", log_upload=False)
-                os.remove(local_img)
-                upload_count += 1
-            if os.path.exists(local_mask):
-                _upload_file_to_gcs(fs, local_mask, f"{remote_masks_prefix}/{mask_basename}", log_upload=False)
-                os.remove(local_mask)
-                upload_count += 1
-            
-            # Log progress every 10 files
-            if (idx + 1) % 10 == 0 or (idx + 1) == len(chunk_rows):
-                logger.info("Upload progress: %d/%d pairs (%d files)", idx + 1, len(chunk_rows), upload_count)
+        # ---- Wait for previous chunk's upload to finish before starting ours ----
+        if pending_upload_result is not None:
+            upload_counts = pending_upload_result.get()  # blocks until done
+            logger.info("Previous chunk_%04d upload finished (%d files)",
+                        pending_upload_chunk_num, sum(upload_counts))
+            pending_upload_result = None
         
-        # Append all rows to CSV and upload once per chunk
+        # ---- Kick off parallel upload for THIS chunk (non-blocking) ----
+        upload_args = _build_upload_args_for_chunk(chunk_rows, chunk_num)
+        pending_upload_result = upload_pool.map_async(_upload_one, upload_args)
+        pending_upload_chunk_num = chunk_num
+        logger.info("chunk_%04d: upload dispatched (%d pairs) — processing next chunk …",
+                     chunk_num, len(upload_args))
+        
+        # Append rows to CSV and upload it (small file, fast)
         with open(csv_path, "a", newline="", encoding="utf-8") as f:
             wri = csv.DictWriter(f, fieldnames=["image", "mask", "prompt", "prompt_2"])
             for row in chunk_rows:
                 wri.writerow(row)
-        
         _upload_file_to_gcs(fs, csv_path, remote_csv_uri)
-        logger.info("Uploaded CSV for chunk_%04d (%d total rows)", chunk_num, len(chunk_rows))
-
-        # Delete the whole chunk directory (should already be empty, but robust).
-        shutil.rmtree(chunk_dir, ignore_errors=True)
         
         total_processed += len(chunk_to_process)
-        logger.info("Finished chunk_%04d: processed %d videos (%d total so far)", chunk_num, len(chunk_to_process), total_processed)
+        logger.info("Finished chunk_%04d: %d videos (%d total so far)",
+                     chunk_num, len(chunk_to_process), total_processed)
 
-    # If we processed at least one file, ensure train.csv is present remotely.
+      # ---- Wait for last chunk's upload ----
+      if pending_upload_result is not None:
+          upload_counts = pending_upload_result.get()
+          logger.info("Final chunk_%04d upload finished (%d files)",
+                      pending_upload_chunk_num, sum(upload_counts))
+
+    finally:
+        # Send shutdown sentinels to all workers
+        for _ in workers:
+            try:
+                task_queue.put(None)
+            except Exception:
+                pass
+        # Wait for workers to exit (with timeout)
+        for w in workers:
+            w.join(timeout=30)
+            if w.is_alive():
+                logger.warning("Worker %s did not exit cleanly, terminating", w.name)
+                w.terminate()
+        upload_pool.close()
+        upload_pool.join()
+        logger.info("All workers and pools shut down")
+
     if total_processed > 0:
         _upload_file_to_gcs(fs, csv_path, remote_csv_uri)
         logger.info("Upload complete (incremental): %s (processed %d videos)", dest_prefix, total_processed)
@@ -1087,9 +1294,10 @@ def fluxfill_data_generation_wf(
     download_batch_size: int = 100,
     frame_numbers: str = "1,100,200,300,400,500",
     chunk_start: int = 0,
-    chunk_end: int = 200,
+    chunk_end: int = 0,
     output_run_id: Optional[str] = None,
-    num_workers: int = 8,
+    num_gpus: int = 4,
+    num_workers: int = 4,
 ) -> str:
     return generate_fluxfill_training_data(
         num_videos=num_videos,
@@ -1107,5 +1315,6 @@ def fluxfill_data_generation_wf(
         chunk_start=chunk_start,
         chunk_end=chunk_end,
         output_run_id=output_run_id,
+        num_gpus=num_gpus,
         num_workers=num_workers,
     )

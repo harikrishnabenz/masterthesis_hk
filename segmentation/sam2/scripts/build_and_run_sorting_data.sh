@@ -5,7 +5,7 @@ set -euo pipefail
 # FluxFill dataset filtering/sorting – runs 5 filter combinations in sequence.
 # Builds the Docker image once, then submits one HLX workflow per combination.
 
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 REMOTE_IMAGE="europe-west4-docker.pkg.dev/mb-adas-2015-p-a4db/research/harimt_sam2:${TIMESTAMP}"
 TEAM_SPACE="research"
 DOMAIN="prod"
