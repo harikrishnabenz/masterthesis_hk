@@ -290,29 +290,18 @@ def train_fluxfill_lora_task(
 
 	logger.info("Training command: %s", " ".join(cmd))
 	
-	# Run training and capture output
-	# Set TOKENIZERS_PARALLELISM to suppress warnings
+	# Run training with real-time output streaming (stdout/stderr go directly to container logs)
 	env = os.environ.copy()
 	env["TOKENIZERS_PARALLELISM"] = "false"
 	result = subprocess.run(
 		cmd,
 		cwd=BASE_WORKDIR,
-		capture_output=True,
-		text=True,
 		env=env,
 	)
 	
-	# Log stdout and stderr
-	if result.stdout:
-		logger.info("Training stdout:\\n%s", result.stdout)
-	if result.stderr:
-		logger.warning("Training stderr:\\n%s", result.stderr)
-	
 	if result.returncode != 0:
 		raise RuntimeError(
-			f"Training failed with exit code {result.returncode}.\\n"
-			f"Stderr: {result.stderr}\\n"
-			f"Stdout: {result.stdout}"
+			f"Training failed with exit code {result.returncode}."
 		)
 
 	# Upload to output_checkpoint_dir/<run_id>/...
