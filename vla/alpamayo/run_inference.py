@@ -219,12 +219,18 @@ def run_inference_on_video(
     output_dir: str,
     num_traj_samples: int = 1,
     device: str = "cuda",
+    black_non_target_cameras: bool = True,
 ) -> dict:
     """Run Alpamayo inference on one VideoPainter-edited video.
 
     Runs inference **twice** — once on the original (unmodified) dataset
     frames and once on the VP-modified frames — so that the two predictions
     can be compared side-by-side.
+
+    If *black_non_target_cameras* is True, all cameras **except** the
+    target (VP-edited) camera are replaced with black (zero) frames before
+    the generated-inference pass.  This isolates the model's prediction to
+    depend only on the generated front-camera video.
     """
     from alpamayo_r1.load_physical_aiavdataset import load_physical_aiavdataset
 
@@ -339,6 +345,20 @@ def run_inference_on_video(
             data["image_frames"][pos] = vp_frames  # replaces last-4 slice
             logger.info(f"  Replaced camera {camera_name} frames with VideoPainter output")
 
+        # ── 4b-ii. Optionally black-out all non-target cameras ───────
+        if black_non_target_cameras:
+            n_cameras = data["image_frames"].shape[0]
+            target_pos = positions[0].item() if len(positions) > 0 else -1
+            blacked_count = 0
+            for cam_i in range(n_cameras):
+                if cam_i != target_pos:
+                    data["image_frames"][cam_i] = 0  # black frames
+                    blacked_count += 1
+            logger.info(
+                f"  Blacked out {blacked_count}/{n_cameras} non-target cameras "
+                f"(kept camera {camera_name} at position {target_pos})"
+            )
+
         # ── 4c. GENERATED inference (after VP replacement) ───────────
         logger.info("  ── Running inference on GENERATED (VP) frames ──")
         reset_gpu_memory_stats()
@@ -376,6 +396,7 @@ def run_inference_on_video(
             "num_trajectories": num_traj_samples,
             "min_ade_meters": min_ade,
             "original_min_ade_meters": orig_min_ade,
+            "black_non_target_cameras": black_non_target_cameras,
             "reasoning_traces": cot_flat,
             "original_reasoning_traces": orig_cot_flat,
             "temporal_config": {
@@ -529,6 +550,13 @@ def main():
     )
     parser.add_argument("--num_traj_samples", type=int, default=1)
     parser.add_argument("--device", type=str, default="auto")
+    parser.add_argument(
+        "--black_non_target_cameras",
+        action="store_true",
+        default=False,
+        help="Replace all non-target camera frames with black (zero) frames "
+             "so the model prediction is influenced only by the generated front camera.",
+    )
     args = parser.parse_args()
 
     logger.info("=" * 80)
@@ -539,6 +567,7 @@ def main():
     logger.info(f"Output: {args.output_dir}")
     logger.info(f"Num trajectory samples: {args.num_traj_samples}")
     logger.info(f"Device: {args.device}")
+    logger.info(f"Black non-target cameras: {args.black_non_target_cameras}")
 
     # ── Load model ────────────────────────────────────────────────────
     logger.info("Loading model …")
@@ -589,6 +618,7 @@ def main():
             output_dir=video_output_dir,
             num_traj_samples=args.num_traj_samples,
             device=device,
+            black_non_target_cameras=args.black_non_target_cameras,
         )
         all_results.append(result)
 

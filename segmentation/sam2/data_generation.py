@@ -291,26 +291,31 @@ def _download_gcs_files(
     *,
     uris: list[str],
     out_dir: str,
+    parallel: int = 16,
 ) -> list[str]:
-    """Download gs:// URIs to out_dir and return local paths."""
+    """Download gs:// URIs to out_dir and return local paths (parallel)."""
     fs = gcsfs.GCSFileSystem(token="google_default")
     Path(out_dir).mkdir(parents=True, exist_ok=True)
 
-    local_paths: list[str] = []
-    for i, uri in enumerate(uris):
+    local_paths: list[str] = [None] * len(uris)
+
+    def _dl(args):
+        i, uri = args
         if not uri.startswith("gs://"):
             raise ValueError(f"Expected gs:// URI, got: {uri}")
-
-        # Convert gs://bucket/key -> bucket/key for gcsfs
-        remote = uri[len("gs://") :]
+        remote = uri[len("gs://"):]
         base = os.path.basename(remote)
         if not base:
             base = f"video_{i:06d}.mp4"
         local = os.path.join(out_dir, base)
         fs.get(remote, local)
-        local_paths.append(local)
+        return i, local
 
-    return local_paths
+    with ThreadPool(processes=min(parallel, len(uris))) as pool:
+        for i, local in pool.imap_unordered(_dl, enumerate(uris)):
+            local_paths[i] = local
+
+    return [p for p in local_paths if p is not None]
 
 
 def _list_mp4s_in_chunks(
@@ -438,33 +443,77 @@ def _caption_qwen(
     user_prompt: str,
     max_new_tokens: int = 96,
 ) -> str:
+    results = _caption_qwen_batch(
+        [image],
+        model_path=model_path,
+        qwen_device=qwen_device,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        max_new_tokens=max_new_tokens,
+    )
+    return results[0]
+
+
+def _caption_qwen_batch(
+    images: list[Image.Image],
+    *,
+    model_path: str,
+    qwen_device: str,
+    system_prompt: str,
+    user_prompt: str,
+    max_new_tokens: int = 96,
+) -> list[str]:
+    """Caption multiple images in one batched forward pass for higher throughput."""
     global _process_vision_info
+
+    if not images:
+        return []
 
     qwen_model, qwen_processor = _get_qwen_model(model_path, qwen_device=qwen_device)
 
     if _process_vision_info is None:
         import importlib
-
         _process_vision_info = importlib.import_module("qwen_vl_utils").process_vision_info
 
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": [{"type": "image", "image": image}, {"type": "text", "text": user_prompt}]},
-    ]
-    text = qwen_processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    image_inputs, video_inputs = _process_vision_info(messages)
-    inputs = qwen_processor(text=[text], images=image_inputs, videos=video_inputs, padding=True, return_tensors="pt")
-    inputs = inputs.to(qwen_model.device)
-
     import torch
+
+    # Build per-image messages and tokenize
+    all_texts = []
+    all_image_inputs = []
+    all_video_inputs = []
+    for img in images:
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": [{"type": "image", "image": img}, {"type": "text", "text": user_prompt}]},
+        ]
+        text = qwen_processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        img_inp, vid_inp = _process_vision_info(messages)
+        all_texts.append(text)
+        if img_inp:
+            all_image_inputs.extend(img_inp)
+        if vid_inp:
+            all_video_inputs.extend(vid_inp)
+
+    inputs = qwen_processor(
+        text=all_texts,
+        images=all_image_inputs if all_image_inputs else None,
+        videos=all_video_inputs if all_video_inputs else None,
+        padding=True,
+        return_tensors="pt",
+    )
+    inputs = inputs.to(qwen_model.device)
+    input_ids = inputs.input_ids  # (batch, seq_len)
 
     with torch.inference_mode():
         generated_ids = qwen_model.generate(**inputs, max_new_tokens=int(max_new_tokens))
 
-    out_ids = generated_ids[0]
-    in_ids = inputs.input_ids[0]
-    trimmed = out_ids[len(in_ids) :]
-    return qwen_processor.decode(trimmed, skip_special_tokens=True).strip()
+    results: list[str] = []
+    for i in range(len(images)):
+        in_len = input_ids[i].shape[0]
+        trimmed = generated_ids[i][in_len:]
+        results.append(qwen_processor.decode(trimmed, skip_special_tokens=True).strip())
+
+    return results
 
 
 def _lane_prompt_from_qwen_output(text: str) -> str:
@@ -836,7 +885,10 @@ def _gpu_worker(
             result_queue.put((physical_gpu_id, rows))
             continue
 
-        # --- Step 2: For each extracted frame, mask + caption (GPU) ---
+        # --- Step 2: SAM2 mask all frames first, then batch-caption via Qwen ---
+        valid_frames: list[tuple[int, str, str]] = []  # (frame_number, out_img, out_mask)
+        focus_images: list[Image.Image] = []
+
         for frame_number, out_img, out_mask in zip(frames, out_imgs, out_masks):
             if not os.path.exists(out_img):
                 _logger.warning("[GPU %d] Frame %d not extracted from %s",
@@ -855,25 +907,11 @@ def _gpu_worker(
                 mask.save(out_mask)
 
                 focus_img = _focus_image_to_mask(pil_img, mask)
-                prompt_raw = _caption_qwen(
-                    focus_img,
-                    model_path=qwen_model_path,
-                    qwen_device=device,
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                    max_new_tokens=64,
-                )
-                prompt = _lane_prompt_from_qwen_output(prompt_raw)
-
-                rows.append({
-                    "image": f"{chunk_tag}/images/{os.path.basename(out_img)}",
-                    "mask": f"{chunk_tag}/masks/{os.path.basename(out_mask)}",
-                    "prompt": prompt,
-                    "prompt_2": prompt,
-                })
+                focus_images.append(focus_img)
+                valid_frames.append((frame_number, out_img, out_mask))
 
             except Exception as e:
-                _logger.error("[GPU %d] Failed frame %d of %s: %s",
+                _logger.error("[GPU %d] Failed SAM2 mask frame %d of %s: %s",
                               physical_gpu_id, frame_number, uri, e)
                 for p in (out_img, out_mask):
                     try:
@@ -885,15 +923,48 @@ def _gpu_worker(
                     _logger.error("[GPU %d] FATAL CUDA error — aborting worker",
                                   physical_gpu_id)
                     result_queue.put((physical_gpu_id, _CUDA_FATAL_SENTINEL))
-                    return  # exit subprocess immediately
+                    return
                 continue
 
-        # Periodic housekeeping
-        gc.collect()
-        try:
-            torch.cuda.empty_cache()
-        except Exception:
-            pass
+        # Batch-caption all valid frames in one Qwen forward pass
+        if focus_images:
+            try:
+                prompts_raw = _caption_qwen_batch(
+                    focus_images,
+                    model_path=qwen_model_path,
+                    qwen_device=device,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    max_new_tokens=64,
+                )
+                for (frame_number, out_img, out_mask), prompt_raw in zip(valid_frames, prompts_raw):
+                    prompt = _lane_prompt_from_qwen_output(prompt_raw)
+                    rows.append({
+                        "image": f"{chunk_tag}/images/{os.path.basename(out_img)}",
+                        "mask": f"{chunk_tag}/masks/{os.path.basename(out_mask)}",
+                        "prompt": prompt,
+                        "prompt_2": prompt,
+                    })
+            except Exception as e:
+                _logger.error("[GPU %d] Batch Qwen captioning failed for %s: %s",
+                              physical_gpu_id, uri, e)
+                if _is_cuda_error(e):
+                    _logger.error("[GPU %d] FATAL CUDA error — aborting worker",
+                                  physical_gpu_id)
+                    result_queue.put((physical_gpu_id, _CUDA_FATAL_SENTINEL))
+                    return
+
+        # Periodic housekeeping — only every 10 videos to reduce overhead
+        _videos_done = getattr(_gpu_worker, '_videos_done', {}).get(physical_gpu_id, 0) + 1
+        if not hasattr(_gpu_worker, '_videos_done'):
+            _gpu_worker._videos_done = {}
+        _gpu_worker._videos_done[physical_gpu_id] = _videos_done
+        if _videos_done % 10 == 0:
+            gc.collect()
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
 
         _logger.info("[GPU %d] Completed %s: %d/%d frames OK",
                      physical_gpu_id, os.path.basename(mp4_path), len(rows), len(frames))
@@ -1101,38 +1172,37 @@ def generate_fluxfill_training_data(
     def _download_chunk_videos(
         _fs, chunk_mp4_uris, chunk_dir, base_index
     ) -> list[tuple[int, str, str]]:
-        """Download all videos for a chunk."""
+        """Download all videos for a chunk in parallel."""
         Path(chunk_dir).mkdir(parents=True, exist_ok=True)
-        local_vids = []
-        for j, uri in enumerate(chunk_mp4_uris):
+        results = [None] * len(chunk_mp4_uris)
+
+        def _dl_one(args):
+            j, uri = args
             global_idx = base_index + j
             remote = uri[len("gs://"):] if uri.startswith("gs://") else uri
             local_mp4 = os.path.join(chunk_dir, _local_mp4_name_for_uri(uri, global_idx))
             _fs.get(remote, local_mp4)
-            local_vids.append((global_idx, uri, local_mp4))
-        return local_vids
+            return j, (global_idx, uri, local_mp4)
+
+        dl_pool = ThreadPool(processes=min(16, max(1, len(chunk_mp4_uris))))
+        try:
+            for j, result in dl_pool.imap_unordered(_dl_one, enumerate(chunk_mp4_uris)):
+                results[j] = result
+        finally:
+            dl_pool.close()
+            dl_pool.join()
+        return [r for r in results if r is not None]
 
     def _collect_results(expected_count: int) -> list[dict]:
         """Drain result_queue for *expected_count* video results.
 
         Raises RuntimeError immediately if any worker signals a fatal CUDA error.
+        Blocks indefinitely on each result — model loading can take 30+ min.
         """
         all_rows: list[dict] = []
         collected = 0
         while collected < expected_count:
-            try:
-                _gpu_id, rows = result_queue.get(timeout=120)
-            except Exception:
-                alive = sum(1 for w in workers if w.is_alive())
-                if alive < num_gpus:
-                    raise RuntimeError(
-                        f"GPU worker died (only {alive}/{num_gpus} alive). "
-                        "Aborting job — all GPUs must be healthy."
-                    )
-                logger.warning("Timeout waiting for result (%d/%d collected)",
-                               collected, expected_count)
-                collected += 1
-                continue
+            _gpu_id, rows = result_queue.get()  # block forever
 
             # Check for fatal CUDA signal
             if rows is _CUDA_FATAL_SENTINEL:
@@ -1149,8 +1219,52 @@ def generate_fluxfill_training_data(
     pending_upload_result = None
     pending_upload_chunk_num = None
 
+    # Prefetch pool — used to download next chunk while GPUs process current
+    prefetch_pool = ThreadPool(processes=1)
+
+    def _list_and_download_chunk(
+        _fs, _root, _chunk_num, _start_idx_snapshot, _total_processed_snapshot, _limit,
+    ):
+        """List mp4s in a chunk folder and download them.  Runs in prefetch thread."""
+        chunk_folder = f"{_root}/chunk_{_chunk_num:04d}"
+        try:
+            chunk_files = _fs.find(chunk_folder)
+            chunk_mp4s = [f"gs://{p}" for p in chunk_files if p.lower().endswith(".mp4")]
+        except FileNotFoundError:
+            return None, None, None, _start_idx_snapshot
+
+        if not chunk_mp4s:
+            return None, None, None, _start_idx_snapshot
+
+        si = _start_idx_snapshot
+        if _limit == float("inf"):
+            chunk_to_process = chunk_mp4s[si:] if si > 0 else chunk_mp4s
+        else:
+            remaining = int(_limit) - _total_processed_snapshot
+            chunk_to_process = chunk_mp4s[si:si + remaining] if si > 0 else chunk_mp4s[:remaining]
+        next_start_idx = max(0, si - len(chunk_mp4s))
+
+        if not chunk_to_process:
+            return None, None, None, next_start_idx
+
+        chunk_dir = os.path.join(videos_dir, f"chunk_{_chunk_num:04d}")
+        local_videos = _download_chunk_videos(_fs, chunk_to_process, chunk_dir, _total_processed_snapshot)
+        return chunk_to_process, local_videos, chunk_dir, next_start_idx
+
     try:
-      for chunk_num in range(int(chunk_start), int(chunk_end) + 1):
+      chunk_range = list(range(int(chunk_start), int(chunk_end) + 1))
+
+      # Kick off prefetch for the FIRST chunk immediately
+      prefetch_future = None
+      if chunk_range:
+          first_cn = chunk_range[0]
+          logger.info("Prefetching chunk_%04d …", first_cn)
+          prefetch_future = prefetch_pool.apply_async(
+              _list_and_download_chunk,
+              (fs, root, first_cn, start_idx, total_processed, limit),
+          )
+
+      for ci, chunk_num in enumerate(chunk_range):
         if limit != float("inf") and total_processed >= limit:
             logger.info("Reached video limit (%s), stopping chunk iteration", limit)
             break
@@ -1163,40 +1277,35 @@ def generate_fluxfill_training_data(
                 "Aborting job — all GPUs must be healthy."
             )
 
-        chunk_folder = f"{root}/chunk_{chunk_num:04d}"
         logger.info("=" * 80)
-        logger.info("Processing chunk: %s (chunk %d/%d)", chunk_folder, chunk_num - chunk_start + 1, chunk_end - chunk_start + 1)
+        logger.info("Processing chunk_%04d (chunk %d/%d)",
+                     chunk_num, ci + 1, len(chunk_range))
         logger.info("=" * 80)
-        
-        try:
-            chunk_files = fs.find(chunk_folder)
-            chunk_mp4s = [f"gs://{p}" for p in chunk_files if p.lower().endswith(".mp4")]
-            logger.info("Found %d mp4s in chunk_%04d", len(chunk_mp4s), chunk_num)
-            
-            if not chunk_mp4s:
-                logger.warning("No mp4s in chunk_%04d, skipping", chunk_num)
-                continue
-                
-            if limit == float("inf"):
-                chunk_to_process = chunk_mp4s[start_idx:] if start_idx > 0 else chunk_mp4s
-            else:
-                remaining = int(limit) - total_processed
-                chunk_to_process = chunk_mp4s[start_idx:start_idx + remaining] if start_idx > 0 else chunk_mp4s[:remaining]
-            start_idx = max(0, start_idx - len(chunk_mp4s))
-            
-            if not chunk_to_process:
-                logger.info("No videos to process from chunk_%04d after applying start_index/limit", chunk_num)
-                continue
-                
-        except FileNotFoundError:
-            logger.warning("Chunk folder not found: %s", chunk_folder)
+
+        # ---- Wait for this chunk's prefetch to finish ----
+        chunk_to_process, local_videos, chunk_dir, start_idx = prefetch_future.get()
+
+        if chunk_to_process is None or not local_videos:
+            logger.warning("chunk_%04d: nothing to process, skipping", chunk_num)
+            # Still prefetch next
+            if ci + 1 < len(chunk_range):
+                next_cn = chunk_range[ci + 1]
+                prefetch_future = prefetch_pool.apply_async(
+                    _list_and_download_chunk,
+                    (fs, root, next_cn, start_idx, total_processed, limit),
+                )
             continue
-        
-        # ---- Download this chunk's videos ----
-        chunk_dir = os.path.join(videos_dir, f"chunk_{chunk_num:04d}")
-        logger.info("Downloading %d videos from chunk_%04d …", len(chunk_to_process), chunk_num)
-        local_videos = _download_chunk_videos(fs, chunk_to_process, chunk_dir, total_processed)
-        
+
+        # ---- Kick off prefetch for the NEXT chunk while GPUs work ----
+        if ci + 1 < len(chunk_range):
+            next_cn = chunk_range[ci + 1]
+            next_total = total_processed + len(chunk_to_process)
+            logger.info("Prefetching chunk_%04d in background …", next_cn)
+            prefetch_future = prefetch_pool.apply_async(
+                _list_and_download_chunk,
+                (fs, root, next_cn, start_idx, next_total, limit),
+            )
+
         logger.info("Processing %d videos from chunk_%04d (frames: %s) — %d GPU workers",
                      len(local_videos), chunk_num,
                      ",".join(str(f) for f in frames),
@@ -1268,6 +1377,8 @@ def generate_fluxfill_training_data(
                 w.terminate()
         upload_pool.close()
         upload_pool.join()
+        prefetch_pool.close()
+        prefetch_pool.join()
         logger.info("All workers and pools shut down")
 
     if total_processed > 0:

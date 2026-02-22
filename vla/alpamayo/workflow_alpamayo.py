@@ -253,6 +253,7 @@ def _run_alpamayo_inference(
     helper_mod,
     device: str = "cuda",
     num_traj_samples: int = 1,
+    black_non_target_cameras: bool = True,
 ) -> VLAVideoMetrics:
     """Run Alpamayo inference on a single video *in-process* (no subprocess)."""
     from run_inference import run_inference_on_video
@@ -272,6 +273,7 @@ def _run_alpamayo_inference(
             output_dir=output_dir,
             num_traj_samples=num_traj_samples,
             device=device,
+            black_non_target_cameras=black_non_target_cameras,
         )
 
         return VLAVideoMetrics(
@@ -452,6 +454,7 @@ def run_alpamayo_inference_task(
     model_id: str = "nvidia/Alpamayo-R1-10B",
     num_traj_samples: int = 1,
     video_name: str = "auto",
+    black_non_target_cameras: bool = True,
 ) -> dict:
     """
     Run Alpamayo VLA inference on video data.
@@ -462,6 +465,9 @@ def run_alpamayo_inference_task(
         model_id: HuggingFace model ID or local path
         num_traj_samples: Number of trajectory samples per video
         video_name: Filter to a specific video by stem name ("auto" = all videos)
+        black_non_target_cameras: If True, replace all non-target camera frames with
+            black (zero) frames so the model prediction is influenced only by the
+            generated front camera video.
     
     Returns:
         Dictionary with output GCS path and metrics
@@ -473,6 +479,7 @@ def run_alpamayo_inference_task(
     logger.info(f"Output Run ID: {output_run_id}")
     logger.info(f"Model ID: {model_id}")
     logger.info(f"Video Name Filter: {video_name}")
+    logger.info(f"Black Non-Target Cameras: {black_non_target_cameras}")
     logger.info(f"Container Image: {CONTAINER_IMAGE}")
     
     # Setup checkpoint symlink
@@ -513,6 +520,7 @@ def run_alpamayo_inference_task(
             helper_mod=helper_mod,
             device=device,
             num_traj_samples=num_traj_samples,
+            black_non_target_cameras=black_non_target_cameras,
         )
         all_metrics.append(metrics)
     
@@ -549,6 +557,7 @@ def alpamayo_vla_inference_wf(
     model_id: str = "nvidia/Alpamayo-R1-10B",
     num_traj_samples: int = 1,
     video_name: str = "auto",
+    black_non_target_cameras: bool = True,
 ) -> dict:
     """
     Alpamayo VLA inference workflow.
@@ -559,6 +568,7 @@ def alpamayo_vla_inference_wf(
         model_id: Model identifier
         num_traj_samples: Number of trajectory samples
         video_name: Filter to a specific video by stem name ("auto" = all videos)
+        black_non_target_cameras: If True, black out all non-target cameras
     
     Returns:
         Dictionary with results
@@ -569,4 +579,5 @@ def alpamayo_vla_inference_wf(
         model_id=model_id,
         num_traj_samples=num_traj_samples,
         video_name=video_name,
+        black_non_target_cameras=black_non_target_cameras,
     )

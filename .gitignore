@@ -4,6 +4,7 @@
 
 # Exclude results (downloaded outputs, not source code)
 /results/
+/thesis_writing/
 
 # Ignore local wheel artifact
 /generation/VideoPainter/hlx_wf-2.4.2.dev9-py3-none-any.whl

@@ -85,6 +85,11 @@ NUM_TRAJ_SAMPLES="${NUM_TRAJ_SAMPLES:-1}"
 # Example: VIDEO_NAME="abc123.camera_front_tele_30fov_vp_edit_sample0" bash scripts/build_and_run.sh
 VIDEO_NAME="${VIDEO_NAME:-auto}"
 
+# If true, replace all non-target camera frames with black (zero) frames so
+# the model prediction depends ONLY on the generated front camera video.
+# Override: BLACK_NON_TARGET_CAMERAS=true bash scripts/build_and_run.sh
+BLACK_NON_TARGET_CAMERAS="${BLACK_NON_TARGET_CAMERAS:-true}"
+
 # HuggingFace token for streaming the NVIDIA PhysicalAI-AV dataset
 # Required for ego-motion + multi-camera data from HuggingFace
 # Override: HF_TOKEN="hf_xxx" bash scripts/build_and_run.sh
@@ -109,6 +114,7 @@ echo "  INPUT  (VP videos):    ${VIDEO_DATA_GCS_PATH}"
 echo "  OUTPUT (predictions):  gs://${GCS_BUCKET}/${ALPAMAYO_OUTPUT_BASE}/${RUN_TAG}/"
 echo "  NUM_TRAJ_SAMPLES:      ${NUM_TRAJ_SAMPLES}"
 echo "  VIDEO_NAME:            ${VIDEO_NAME}"
+echo "  BLACK_NON_TARGET_CAMS: ${BLACK_NON_TARGET_CAMERAS}"
 echo "  MODEL_ID:              ${MODEL_ID}"
 echo "  HF_TOKEN:              ${HF_TOKEN:+set (hidden)}"
 echo "================================================================================"
@@ -143,16 +149,25 @@ echo "==========================================================================
 echo "LAUNCHING WORKFLOW"
 echo "================================================================================"
 
-hlx wf run \
-  --team-space research \
-  --domain prod \
-  --execution-name "alpamayo-vla-${RUN_TAG//_/-}" \
-  workflow_alpamayo.alpamayo_vla_inference_wf \
-  --video_data_gcs_path "${VIDEO_DATA_GCS_PATH}" \
-  --output_run_id "${RUN_TAG}" \
-  --model_id "${MODEL_ID}" \
-  --num_traj_samples "${NUM_TRAJ_SAMPLES}" \
+# Build hlx wf run command with optional --black_non_target_cameras flag
+HLX_CMD=(
+  hlx wf run
+  --team-space research
+  --domain prod
+  --execution-name "alpamayo-vla-${RUN_TAG//_/-}"
+  workflow_alpamayo.alpamayo_vla_inference_wf
+  --video_data_gcs_path "${VIDEO_DATA_GCS_PATH}"
+  --output_run_id "${RUN_TAG}"
+  --model_id "${MODEL_ID}"
+  --num_traj_samples "${NUM_TRAJ_SAMPLES}"
   --video_name "${VIDEO_NAME}"
+)
+
+if [[ "${BLACK_NON_TARGET_CAMERAS}" == "true" ]]; then
+  HLX_CMD+=(--black_non_target_cameras true)
+fi
+
+"${HLX_CMD[@]}"
 
 echo ""
 echo "================================================================================"

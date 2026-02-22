@@ -485,6 +485,165 @@ COMPUTE:
 INNOVATION: First integration of VLA trajectory prediction as an evaluation
             metric for video inpainting quality in autonomous driving
 
+MULTI-CAMERA INPUT & BLACK-OUT STRATEGY:
+────────────────────────────────────────
+The Alpamayo-R1-10B VLA model natively operates on a 7-camera multi-view
+input, each providing 4 consecutive frames.  The cameras, their indices,
+and approximate horizontal FOVs are:
+
+  Index  Camera Name                    FOV
+  ─────  ─────────────────────────────  ────
+    0    camera_cross_left_120fov       120°
+    1    camera_front_wide_120fov       120°
+    2    camera_cross_right_120fov      120°
+    3    camera_rear_left_70fov          70°
+    4    camera_rear_tele_30fov          30°
+    5    camera_rear_right_70fov         70°
+    6    camera_front_tele_30fov         30°  ← target camera
+
+In this thesis, only camera_front_tele_30fov (index 6) is edited by
+VideoPainter.  To isolate the effect of the edited front camera on the
+model's trajectory prediction, the "black_non_target_cameras" flag is
+enabled by default (ALPAMAYO_BLACK_NON_TARGET_CAMERAS=true).
+
+When enabled, the inference pipeline:
+  1. Loads ALL 7 camera frames from the PhysicalAI-AV dataset
+  2. Replaces camera_front_tele_30fov frames with VP-edited frames
+  3. Sets ALL OTHER 6 camera tensors to zero (black frames)
+  4. Feeds the resulting 7-camera tensor (28 frames total) to the model
+
+This means the model still receives the expected (N_cameras, 4, 3, H, W)
+input tensor, but only the target camera contains meaningful visual
+information.  The remaining 6 cameras are entirely black.
+
+Rationale: Without blacking out the other cameras, the model could rely
+on the original (unedited) front-wide or cross-camera views to predict
+the trajectory, potentially masking the effect of the VP-edited lane
+markings on the front tele camera.  By zeroing the non-target cameras,
+the model must base its visual understanding solely on the generated
+front camera video.
+
+Note: The ego history (ego_history_xyz, ego_history_rot) is always
+sourced from the real driving data and is identical for both the
+"original" and "generated" inference passes.  This means ego motion
+acts as a confounding variable — the model can partially infer the
+trajectory from deceleration/acceleration patterns in the ego history,
+independent of the visual input.
+
+MODEL INPUTS:
+  The model receives three inputs for each inference pass:
+    1. tokenized_data  — VLM-processed camera images
+       Shape: 7 cameras × 4 frames = 28 images (each 1080×1920)
+    2. ego_history_xyz — past 16 ego positions in ego frame (x=fwd, y=left, z=up)
+       Shape: (16, 3)
+    3. ego_history_rot — past 16 ego rotation matrices
+       Shape: (16, 3, 3)
+
+  The model outputs:
+    - pred_xyz:  (S, 64, 3) — S sampled trajectory predictions, 64 future waypoints
+    - pred_rot:  (S, 64, 3, 3) — corresponding rotation matrices
+    - extra:     dict containing chain-of-thought reasoning traces
+
+DUAL-PASS INFERENCE:
+  For each video, two inference passes are performed:
+    Pass 1 (ORIGINAL):  Uses unmodified real camera frames from PhysicalAI-AV
+    Pass 2 (GENERATED): Uses VP-edited frames on the target camera + blacked-out others
+  Both passes use the same ego history, enabling direct comparison of how
+  the visual edits affect trajectory prediction (minADE metric).
+
+COMPARISON VIDEO VISUALIZATION:
+────────────────────────────────
+The comparison video (_comparison.mp4) provides a side-by-side analysis
+of original vs VP-generated trajectory predictions.  It is rendered by
+visualize_video.py::render_comparison_video().
+
+Layout:
+  ┌────────────────────────┬────────────────────────┐
+  │    LEFT PANEL           │    RIGHT PANEL          │
+  │    ORIGINAL video       │    GENERATED (VP) video │
+  │    + Original pred      │    + Generated pred     │
+  │    + GT overlay         │    + GT overlay         │
+  ├────────────┬────────────┴────────────────────────┤
+  │  BEV Panel │         Metrics Panel               │
+  └────────────┴─────────────────────────────────────┘
+
+LEFT PANEL — "ORIGINAL":
+  Shows the real unmodified camera_front_tele_30fov frames from the
+  PhysicalAI-AV dataset with trajectory overlays:
+    • Red line (BGR: 0,0,255):        Ground truth — the actual future path
+                                       the ego vehicle drove in reality
+    • Blue/Cyan line (BGR: 255,180,50): Original prediction — Alpamayo's
+                                       trajectory prediction from unmodified
+                                       real camera frames
+  Top-left label: "ORIGINAL" with minADE value
+
+RIGHT PANEL — "GENERATED (VP)":
+  Shows the VideoPainter-edited camera_front_tele_30fov frames with
+  trajectory overlays:
+    • Red line (BGR: 0,0,255):        Ground truth — same real future path
+                                       (identical on both panels)
+    • Green line (BGR: 0,255,0):      Generated prediction — Alpamayo's
+                                       trajectory prediction from the
+                                       VP-edited (inpainted) frames
+  Top-left label: "GENERATED (VP)" with minADE value
+
+BEV PANEL (bottom-left, 300×300 px):
+  Bird's-eye-view map showing all trajectories in ego frame (x=forward,
+  y=left), rendered by render_comparison_bev():
+    • Red line:             Ground truth trajectory
+    • Blue/Cyan line:       Original prediction (from real frames)
+    • Green line:           Generated prediction (from VP frames)
+    • Gray line:            Ego history (past 16 positions)
+    • White dot:            Current ego position (origin at 0,0)
+
+METRICS PANEL (bottom-right):
+  Text overlay showing:
+    - Original minADE and Generated minADE values
+    - Delta (gen − orig) in meters with color coding:
+      green if ≤0 (improved), red if >0 (worsened)
+    - Truncated chain-of-thought reasoning traces from both passes
+
+TRAJECTORY PROJECTION ONTO CAMERA IMAGE:
+  The 3D trajectories (in ego frame) are projected onto the 2D camera
+  image using a pinhole camera model:
+
+  1. Ego-to-camera coordinate transform:
+       x_cam = −y_ego     (ego left → camera right)
+       y_cam = −z_ego     (ego up → camera down)
+       z_cam =  x_ego     (ego forward → camera depth)
+     For non-front cameras, an additional yaw rotation is applied first
+     based on the camera's heading angle.
+
+  2. Ground-plane projection:
+     To avoid vertical discrepancy between GT (which has real road-slope z)
+     and predictions (which output z=constant from the unicycle model),
+     all trajectories are projected onto a fixed ground plane at
+     camera_height = 1.5 m.  This ensures both GT and predictions appear
+     on the road surface in the image.
+
+  3. Perspective projection:
+       f_x = (W / 2) / tan(FOV / 2)
+       u = f_x × x_cam / z_cam + W/2
+       v = f_x × y_cam / z_cam + H/2
+     Points behind the camera (z_cam ≤ 0.5 m) are filtered out.
+
+  4. Progressive reveal:
+     Trajectories are drawn progressively — each video frame maps to a
+     linearly interpolated waypoint index:
+       t_reveal = (frame_idx / (num_frames − 1)) × (64 − 1)
+     Only waypoints 0..t_reveal are drawn on that frame, creating an
+     animation of the trajectory being "drawn" forward over time.
+
+OVERLAY VIDEO (_overlay.mp4):
+  The individual overlay video shows only the VP-edited video with:
+    • Red line:   Ground truth trajectory
+    • Cyan line (BGR: 255,255,0): Predicted trajectory (sample #1)
+    • Additional samples cycle through green, orange, yellow, magenta
+    • Gray line:  Ego history (past path)
+    • BEV inset:  250×250 px in bottom-left corner
+    • Legend box: Semi-transparent in top-right corner
+    • HUD text:   minADE, clip_id, camera info from JSON
+
 
 🌟 CONTRIBUTION #7: MASTER PIPELINE ORCHESTRATOR
 ────────────────────────────────────────────────────────────────────────

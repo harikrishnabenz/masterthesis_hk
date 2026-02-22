@@ -306,11 +306,16 @@ def alpamayo_stage(
     model_id: str = "/workspace/alpamayo/checkpoints/alpamayo-r1-10b",
     num_traj_samples: int = 1,
     video_name: str = "auto",
+    black_non_target_cameras: bool = True,
 ) -> str:
     """Run Alpamayo VLA inference (Stage 3 of 3).
 
     Reads VideoPainter output videos and produces trajectory predictions
     under ``gs://…/outputs/alpamayo/<output_run_id>/``.
+
+    If *black_non_target_cameras* is True, all cameras except the target
+    (VP-edited) camera are replaced with black (zero) frames so the model
+    prediction depends only on the generated front-camera video.
 
     Returns
     -------
@@ -331,6 +336,7 @@ def alpamayo_stage(
     logger.info("  output_run_id       = %s", output_run_id)
     logger.info("  model_id            = %s", model_id)
     logger.info("  video_name          = %s", video_name)
+    logger.info("  black_non_target_cameras = %s", black_non_target_cameras)
     logger.info("=" * 80)
 
     result = _alp_fn(
@@ -339,6 +345,7 @@ def alpamayo_stage(
         model_id=model_id,
         num_traj_samples=num_traj_samples,
         video_name=video_name,
+        black_non_target_cameras=black_non_target_cameras,
     )
 
     gcs_path = result.get("output_gcs_path", "")
@@ -388,6 +395,7 @@ def master_pipeline_wf(
     alp_model_id: str = "/workspace/alpamayo/checkpoints/alpamayo-r1-10b",
     alp_num_traj_samples: int = 1,
     alp_video_name: str = "auto",
+    alp_black_non_target_cameras: bool = True,
 ) -> str:
     """End-to-end pipeline: SAM2 → VideoPainter → Alpamayo.
 
@@ -442,6 +450,7 @@ def master_pipeline_wf(
         model_id=alp_model_id,
         num_traj_samples=alp_num_traj_samples,
         video_name=alp_video_name,
+        black_non_target_cameras=alp_black_non_target_cameras,
     )
 
     return alp_output_path
@@ -488,6 +497,7 @@ def vp_alpamayo_wf(
     alp_model_id: str = "/workspace/alpamayo/checkpoints/alpamayo-r1-10b",
     alp_num_traj_samples: int = 1,
     alp_video_name: str = "auto",
+    alp_black_non_target_cameras: bool = True,
 ) -> str:
     """Resume pipeline from VideoPainter → Alpamayo (skip SAM2).
 
@@ -527,6 +537,7 @@ def vp_alpamayo_wf(
         model_id=alp_model_id,
         num_traj_samples=alp_num_traj_samples,
         video_name=alp_video_name,
+        black_non_target_cameras=alp_black_non_target_cameras,
     )
 
     return alp_output_path
@@ -686,29 +697,28 @@ def vp_only_wf(
 @workflow
 def alpamayo_only_wf(
     run_id: str,
-    vp_output_gcs_path: str = "",
+    vp_output_gcs_path: str = f"gs://{GCS_BUCKET}/workspace/user/hbaskar/outputs/vp/",
     # ── Stage 3: Alpamayo ─────────────────────────────────────────────────────
     alp_model_id: str = "/workspace/alpamayo/checkpoints/alpamayo-r1-10b",
     alp_num_traj_samples: int = 1,
     alp_video_name: str = "auto",
+    alp_black_non_target_cameras: bool = True,
 ) -> str:
     """Resume pipeline from Alpamayo only (skip SAM2 + VideoPainter).
 
     Parameters
     ----------
     vp_output_gcs_path
-        Full GCS path to the VP output directory.  If empty, defaults to
-        ``gs://<bucket>/…/outputs/vp/<run_id>/``.
+        Full GCS path to the VP output directory.  Must be provided
+        (the shell script constructs it from VP_OUTPUT_BASE + VP_DATA_RUN_ID).
     """
-    if not vp_output_gcs_path:
-        vp_output_gcs_path = f"gs://{GCS_BUCKET}/workspace/user/hbaskar/outputs/vp/{run_id}/"
-
     alp_output_path = alpamayo_stage(
         video_data_gcs_path=vp_output_gcs_path,
         output_run_id=run_id,
         model_id=alp_model_id,
         num_traj_samples=alp_num_traj_samples,
         video_name=alp_video_name,
+        black_non_target_cameras=alp_black_non_target_cameras,
     )
 
     return alp_output_path

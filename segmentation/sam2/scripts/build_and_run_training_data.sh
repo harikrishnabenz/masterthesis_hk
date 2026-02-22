@@ -49,7 +49,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
 echo "Building docker image (sam2/frontend)..."
-docker compose build
+DOCKER_BUILDKIT=1 docker compose build
 
 echo "Tagging and pushing image: ${REMOTE_IMAGE}"
 docker tag sam2/frontend "${REMOTE_IMAGE}"

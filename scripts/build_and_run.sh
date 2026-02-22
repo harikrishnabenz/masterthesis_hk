@@ -44,7 +44,7 @@ cd "${REPO_ROOT}"
 GCS_BUCKET="mbadas-sandbox-research-9bb9c7f"
 
 RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-RUN_ID="${RUN_ID:-06_p1_1v_vps50_true}"
+RUN_ID="${RUN_ID:-06_p5_gen_vps90_video}"
 MASTER_RUN_ID="${RUN_ID}_${RUN_TIMESTAMP}"
 
 
@@ -73,7 +73,7 @@ MASTER_RUN_ID="${RUN_ID}_${RUN_TIMESTAMP}"
 # ==============================================================================
 
 # ── Stage selection (1=SAM2, 2=VP, 3=Alpamayo; combine: 12, 23, 123) ─────────
-STAGES="${STAGES:-23}"
+STAGES="${STAGES:-3}"
 
 # ── Stage 1 (SAM2) inputs ────────────────────────────────────────────────────
 SAM2_CHUNK_START="${SAM2_CHUNK_START:-}"
@@ -81,10 +81,20 @@ SAM2_CHUNK_END="${SAM2_CHUNK_END:-}"
 SAM2_FILES_PER_CHUNK="${SAM2_FILES_PER_CHUNK:-}"
 
 # ── Stage 2 (VP) input — required when running VP without SAM2 (STAGES=2,23) ─
-SAM2_DATA_RUN_ID="${SAM2_DATA_RUN_ID:-01_v}"
+SAM2_DATA_RUN_ID="${SAM2_DATA_RUN_ID:-}"
 
 # ── Stage 3 (Alpamayo) input — required when running Alp without VP (STAGES=3)
-VP_DATA_RUN_ID="${VP_DATA_RUN_ID:-}"
+# ── VP output folders (copy-paste the one you need into VP_DATA_RUN_ID) ───────
+#VP_DATA_RUN_ID="${VP_DATA_RUN_ID:-06_p1_100v_20260219_165629}"          # Prompt 1 — single solid white (50 steps)
+#VP_DATA_RUN_ID="${VP_DATA_RUN_ID:-06_p2_100v_20260219_165801}"          # Prompt 2 — double solid white (50 steps)
+#VP_DATA_RUN_ID="${VP_DATA_RUN_ID:-06_p3_100v_20260219_165938}"          # Prompt 3 — single solid yellow (50 steps)
+#VP_DATA_RUN_ID="${VP_DATA_RUN_ID:-06_p4_100v_20260219_170051}"          # Prompt 4 — double solid yellow (50 steps)
+#VP_DATA_RUN_ID="${VP_DATA_RUN_ID:-06_p5_100v_20260219_170208}"          # Prompt 5 — single dashed white (50 steps)
+#VP_DATA_RUN_ID="${VP_DATA_RUN_ID:-06_p1_100v_vps90_20260219_232441}"    # Prompt 1 — single solid white (90 steps)
+#VP_DATA_RUN_ID="${VP_DATA_RUN_ID:-06_p2_100v_vps90_20260219_232331}"    # Prompt 2 — double solid white (90 steps)
+#VP_DATA_RUN_ID="${VP_DATA_RUN_ID:-06_p3_100v_vps90_20260219_232214}"    # Prompt 3 — single solid yellow (90 steps)
+#VP_DATA_RUN_ID="${VP_DATA_RUN_ID:-06_p4_100v_vps90_20260219_232102}"    # Prompt 4 — double solid yellow (90 steps)
+VP_DATA_RUN_ID="${VP_DATA_RUN_ID:-06_p5_100v_vps90_20260219_231936}"    # Prompt 5 — single dashed white (90 steps)
 
 
 
@@ -268,7 +278,7 @@ VP_NUM_INFERENCE_STEPS="${VP_NUM_INFERENCE_STEPS:-50}"
 VP_GUIDANCE_SCALE="${VP_GUIDANCE_SCALE:-6.0}"
 
 
-VP_STRENGTH="${VP_STRENGTH:-0.50}"
+VP_STRENGTH="${VP_STRENGTH:-1.0}"
 
 
 VP_CAPTION_REFINE_ITERS="${VP_CAPTION_REFINE_ITERS:-10}"
@@ -281,8 +291,8 @@ VP_MASK_FEATHER="${VP_MASK_FEATHER:-4}"
 VP_BORDER_AWARE_MASKING="${VP_BORDER_AWARE_MASKING:-true}"
 # Method for border handling: inpaint (best), blur (fast), interpolate (experimental)
 VP_BORDER_METHOD="${VP_BORDER_METHOD:-inpaint}"
-VP_KEEP_MASKED_PIXELS="${VP_KEEP_MASKED_PIXELS:-True}"
-VP_IMG_INPAINTING_LORA_SCALE="${VP_IMG_INPAINTING_LORA_SCALE:-1.0}"
+VP_KEEP_MASKED_PIXELS="${VP_KEEP_MASKED_PIXELS:-False}"
+VP_IMG_INPAINTING_LORA_SCALE="${VP_IMG_INPAINTING_LORA_SCALE:-0.0}"
 VP_SEED="${VP_SEED:-42}"
 
 # ==============================================================================
@@ -292,6 +302,11 @@ ALPAMAYO_OUTPUT_BASE="${ALPAMAYO_OUTPUT_BASE:-workspace/user/hbaskar/outputs/alp
 ALPAMAYO_MODEL_ID="${ALPAMAYO_MODEL_ID:-/workspace/alpamayo/checkpoints/alpamayo-r1-10b}"
 ALPAMAYO_NUM_TRAJ_SAMPLES="${ALPAMAYO_NUM_TRAJ_SAMPLES:-1}"
 ALPAMAYO_VIDEO_NAME="${ALPAMAYO_VIDEO_NAME:-auto}"
+
+# If true, replace all non-target camera frames with black (zero) frames so
+# the model prediction depends ONLY on the generated front camera video.
+# Override: ALPAMAYO_BLACK_NON_TARGET_CAMERAS=true STAGES=3 bash scripts/build_and_run.sh
+ALPAMAYO_BLACK_NON_TARGET_CAMERAS="${ALPAMAYO_BLACK_NON_TARGET_CAMERAS:-true}"
 
 # HuggingFace token (needed by Alpamayo for ego-motion data)
 HF_TOKEN="${HF_TOKEN:-}"
@@ -387,6 +402,7 @@ if [[ ${RUN_ALP} -eq 1 ]]; then
     echo "  Model:              ${ALPAMAYO_MODEL_ID}"
     echo "  Traj samples:       ${ALPAMAYO_NUM_TRAJ_SAMPLES}"
     echo "  Video name filter:  ${ALPAMAYO_VIDEO_NAME}"
+    echo "  Black non-target:   ${ALPAMAYO_BLACK_NON_TARGET_CAMERAS}"
     echo "  Docker image:       ${ALP_TAGGED}"
     echo ""
 fi
@@ -506,6 +522,10 @@ ALP_COMMON_ARGS=(
     --alp_num_traj_samples "${ALPAMAYO_NUM_TRAJ_SAMPLES}"
     --alp_video_name "${ALPAMAYO_VIDEO_NAME}"
 )
+# Only add the boolean flag when true (omitting it = False for HLX bool params)
+if [[ "${ALPAMAYO_BLACK_NON_TARGET_CAMERAS}" =~ ^[Tt]rue$ ]]; then
+    ALP_COMMON_ARGS+=(--alp_black_non_target_cameras)
+fi
 
 case "${STAGES}" in
     1)
@@ -539,13 +559,14 @@ case "${STAGES}" in
         # ── Alpamayo only ───────────────────────────────────────────────────
         echo "Submitting Alpamayo-only pipeline …"
         echo "  Using VP data run: ${VP_DATA_RUN_ID}"
+        VP_OUTPUT_GCS_PATH="${VP_OUTPUT_BASE}/${VP_DATA_RUN_ID}/"
         hlx wf run \
           --team-space research \
           --domain prod \
           --execution-name "alp-${MASTER_RUN_ID//_/-}" \
           workflow_master.alpamayo_only_wf \
           --run_id "${MASTER_RUN_ID}" \
-          --vp_data_run_id "${VP_DATA_RUN_ID}" \
+          --vp_output_gcs_path "${VP_OUTPUT_GCS_PATH}" \
           "${ALP_COMMON_ARGS[@]}"
         ;;
 

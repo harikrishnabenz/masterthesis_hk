@@ -15,6 +15,7 @@ env/
 ENV/
 
 results/
+thesis_writing/
 
 # IDE
 .vscode/
