@@ -600,13 +600,15 @@ All 5 jobs executed in parallel on separate A100 80GB GKE nodes. Identical hyper
 | 1 | `single_yellow_solid` | 372 | 465 | ~53 min | 0.186 → 0.178 → 0.165 → 0.176 → **0.165** | ✅ Complete |
 | 2 | `single_white_dashed` | 373 | 470 | ~53 min | 0.148 → 0.158 → 0.149 → 0.171 → **0.146** | ✅ Complete |
 | 3 | `single_white_solid` | 1,522 | 1,905 | ~3.6 hrs | Completed (5/5 epochs) | ✅ Complete |
-| 4 | `double_white_solid` | 4,612 | 5,765 | ~10.9 hrs | (in progress) | 🔄 Running |
+| 4 | `double_white_solid` | 4,612 | 5,765 | ~10.9 hrs | Data download confirmed (4,612 images + 4,612 masks in ~12 min); training in progress | 🔄 Running |
 | 5 | `double_yellow_solid` | 6,493 | 8,120 | ~15.3 hrs | (in progress) | 🔄 Running |
 
 Key observations:
 - Loss stabilizes by epoch 3 for completed jobs (final-epoch avg: 0.145–0.165)
 - Epoch duration is highly consistent within each job (~633s ±2s for 370-image datasets)
 - GCS upload of final checkpoints completes in ~8 seconds
+- GCS data download scales linearly: ~3 min for 1.5k images, ~12 min for 4.6k images
+  (double_white_solid: 4,612 images in ~8.5 min + 4,612 masks in ~3.5 min)
 - Harmless `gcsfs`/`aiohttp` session cleanup traceback at exit does not affect results
 
 **Why This Is Novel:** First LoRA fine-tuning pipeline specifically designed for FluxFill inpainting on structured lane marking datasets, with automated multi-variant training producing one specialized checkpoint per lane-marking type, integrated into a cloud workflow system.

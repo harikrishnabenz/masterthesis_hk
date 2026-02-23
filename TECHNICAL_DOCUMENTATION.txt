@@ -1874,8 +1874,11 @@ Run ID Timestamp: 20260222_201003
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │ JOB 4: double_white_solid                                  🔄 IN PROGRESS  │
 ├─────────────────────────────────────────────────────────────────────────────┤
+│ Run ID: fluxfill_double_white_solid_20260222_201003                         │
 │ Dataset: 4,612 images   Total Steps: 5,765   Est. Time: ~10.9 hours        │
-│ Status: ~10% complete (epoch 1, step ~580/5765)                             │
+│ Data Download: 4,612 images (~8.5 min) + 4,612 masks (~3.5 min) = ~12 min  │
+│   Source: gs://…/training/data/td-chunk0-99_double_white_solid              │
+│ Status: Data download complete, training in progress                        │
 │                                                                             │
 │ GCS Output (pending): gs://mbadas-sandbox-research-9bb9c7f/.../             │
 │   fluxfill_double_white_solid_20260222_201003/                              │
@@ -1918,9 +1921,13 @@ OBSERVATIONS FROM COMPLETED TRAINING
 3. Epoch Duration Stability: All epochs within a job take near-identical time
    (~633s ± 2s), confirming no performance degradation over training.
 
-4. Data Download: Mask/image downloading from GCS completes in ~2-5 minutes
-   depending on dataset size (e.g., 6,400 masks for double_yellow_solid took
-   ~5 minutes at ~100 files per 4.5 seconds).
+4. Data Download: Image/mask downloading from GCS scales linearly with
+   dataset size. Measured download times:
+   - single_white_solid (1,522 images + 1,522 masks): ~3 min total
+   - double_white_solid (4,612 images + 4,612 masks): ~12 min total
+     (images: ~8.5 min at ~100 files/7.5s; masks: ~3.5 min at ~100 files/4.7s)
+   - double_yellow_solid (6,493 images + 6,493 masks): ~5 min for masks
+     at ~100 files per 4.5 seconds.
 
 5. Known Harmless Issue: gcsfs/aiohttp session cleanup traceback at process
    exit ("RuntimeError: Task attached to a different loop"). Does not affect
@@ -2059,6 +2066,10 @@ Completed Jobs (3/5):
 
 In-Progress Jobs (2/5):
   double_white_solid  — 4,612 images, 5,765 steps, est. ~10.9 hours
+    Run ID: fluxfill_double_white_solid_20260222_201003
+    Data: 4,612 images + 4,612 masks from td-chunk0-99_double_white_solid
+    Data download: ~12 min (images ~8.5 min at ~100 files/7.5s, masks ~3.5 min at ~100 files/4.7s)
+    Training speed: ~6.8s/step, checkpoints every 100 steps
   double_yellow_solid — 6,493 images, 8,120 steps, est. ~15.3 hours
 
 RESULTS: PIPELINE INFERENCE (Run 006, SAM2 Run 006_20260219_135038)
