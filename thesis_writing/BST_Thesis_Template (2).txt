@@ -1,427 +1,0 @@
-
- <PRIMARY THESIS TITLE>
-<Secondary Title>
-submitted as a requirement for the degree of
-Master of Computer Science XXXX
-
-Berlin, Germany, Date of Submission
-
-by
-<First Name(s)> <Last Name>
-(previously obtained) Academic Degree(s), University
-
-Primary Thesis Supervisor:			Prof. Dr. <XXX>
-Associate Thesis Supervisor:		Prof. Dr. <XXX>
-
-written in conjunction with <XXX Corporation, City, Country>
-
-ABSTRACT
-Abstract text. Full Sentences, 300 words maximum.
-An abstract is a concise summary of a research project. 
-In this case, it contains a short description of your project, including the scope and content of the project, the objective, the methodology, the main results/findings, the discussion and the conclusion. 
-An abstract is not a summary of your topic, but a summary of your whole present academic work. It should contain the most relevant pieces of information in a very reduced form.
-In comparison to other segments of a research paper, it is usually written last. 
-Examples are found in many peer-reviewed articles.
-Keywords: Optionally, you can also include a few keywords that cover your thesis topic here.
-An abstract is not mandatory. Delete this page if you don’t intend to include it.
-
-FOREWORD
-Foreword Text. May not exceed two pages.
-Maybe the most personal and lyric segment of a master’s thesis, the foreword serves as a space in which you can reflect on the subject in general, maintaining an objective position and introducing the maybe personal importance the research topic has for you.
-A foreword is not mandatory. Delete this page if you don’t intend to include it.
-
-ACKNOWLEDGEMENTS
-Personal acknowledgements, dedications statements; may not exceed one page.
-People who have assisted the process, be it by offering counsel, facilitating networking or anything else, can be acknowledged here. Institutions can be included as well. Don’t forget family and friends!
-Acknowledgements are not mandatory. Delete this page if you don’t intend to include it.
-
-
-
-TABLE OF CONTENTS
-ABSTRACT	ii
-FOREWORD	iii
-ACKNOWLEDGEMENTS	iv
-LIST OF FIGURES	vi
-LIST OF TABLES	vii
-LIST OF EQUATIONS	viii
-LIST OF ABBREVIATIONS	ix
-
-1.	INTRODUCTION	1
-1.1.	Subject Relevance (1. to 5. from above)	1
-1.2.	Own Interest/Motivation (not mandatory)	1
-1.3.	Research Gap	1
-1.4.	Objectives and Goals (7. and 8. from above)	1
-1.5.	Research Questions	1
-1.6.	Scope & Limitation (mandatory)	1
-1.7.	Structure/Overview (not mandatory)	1
-2.	LITERATURE REVIEW & THEORETICAL FRAMEWORK	2
-3.	METHODOLOGY	4
-4.	FINDINGS	5
-5.	DISCUSSION OF FINDINGS	6
-6.	CONCLUSION	7
-
-APPENDIX I	- 1 -
-APPENDIX II	- 2 -
-ALPHABETICAL LIST OF REFERENCES	- 3 -
-CHRONOLOGICAL LIST OF REFERENCES	- 5 -
-REFERENCE LIST BY BIBLIOGRAPHY TYPE	- 6 -
-
-AFFIDAVIT	I
-
-FORMATTING GUIDELINES AND RECOMMENDATIONS	- 1 -
-1.1.	Section 1.1 Title	- 1 -
-1.2.	Section 1.2 Title	- 1 -
-1.3.	Quotation Guidelines	- 1 -
-1.3.1.	General Information regarding citations	- 1 -
-1.3.2.	Footnotes	- 2 -
-1.3.3.	Plagiarism Advisory	- 3 -
-1.3.4.	Direct Quotations	- 4 -
-1.3.5.	Indirect quotations	- 5 -
-1.3.6.	Sample Citations	- 6 -
-1.3.7.	Captions	- 7 -
-1.3.8.	Equations and Formulas (Office 2007 and later)	- 9 -
-1.3.9.	Listing Levels	- 10 -
-1.3.10.	Cross-Referencing within your document	- 11 -
-
-
-
-LIST OF FIGURES
-Figure 1: SRH Master Student. Image taken during the fourth semester.	- 1 -
-Figure 2: Footnote insertion in MS Word 2007.	- 2 -
-Figure 3: Footnote for indirect quotations and note for further references.	- 3 -
-Figure 4: Selection of the citation template	- 4 -
-Figure 5: Use of the cf. and see prefixes for indirect quotations.	- 5 -
-Figure 6: Insert Citation function in MS Word 2007.	- 6 -
-Figure 7: Source manager. Sample entries have been made of a journal article.	- 6 -
-Figure 8: Split view screen in MS Word 2003.	- 7 -
-Figure 9: Insert Caption Function in MS Word 2007.	- 8 -
-Figure 10: Creating your own caption in MS Word 2007.	- 8 -
-Figure 11: Equation manager in Word 2007.	- 9 -
-Figure 12: Tools icons of the equation manager design tab.	- 10 -
-Figure 13: Cross-Referencing Button Locations	- 11 -
-Figure 14: Document Element Selection Windows	- 11 -
-
-
-A Figure is every complementary information element that is not part of the main text, not a table, and not an equation. Figures are usually images or graphs, screenshots (also an image), maps, icons etc. 
-Every figure should be automatically numbered and listed in order of appearance here and, when located in the main body, comes with a brief descriptive caption title and a short ancillary explanation (for example, when giving additional descriptions, highlighting key findings, or providing copyright information). Ancillary explanations are not to be included in this automated listing.
-
-LIST OF TABLES
-Table 1: Outline of the academic year 2010.	- 9 -
-Just like with graphs, here you can list, in order of appearance, the tables you have used for your master’s thesis.
-If you automate your captions, the list will be generated automatically.
-
-
-LIST OF EQUATIONS
-Equation 2: Fourier Series.	- 10 -
-Just like with graphs and tables, here you can list, in order of appearance, the equations you have used for your master’s thesis.
-
-If you don't use equations, delete this page!
-
-
-
-LIST OF ABBREVIATIONS
-AcronymExplanationLOILetter of IntentROIReturn on Investment
-List all abbreviations in alphabetical order.
-Just like with graphs, tables and equations, here you list, in alphabetical order, the abbreviations used in this master’s thesis.
-
-
-1. INTRODUCTION
-Introduction to the research topic, subject relevance
-Reader’s instruction:
-Obviously, your thesis must include an introductory chapter that sets the stage for your thesis!
-This chapter provides the traditional components of the introductory chapter. In some cases, the addition, rearrangement, or omission of components might be necessary.
-Traditional components:
-1. Setting the stage: Establish the importance of the field and the topic
-2. Provide background information
-3. Define hallmark terminology if necessary
-4. Present the current research focus including hallmark publications in order to substantiate the main assumptions of your thesis with literature references
-5. Present the problem area
-6. Show the gap in the research
-7. Describe the problem you will address
-8. Describe the purpose of the paper/thesis
-9. Provide information about the structure of the paper/thesis
-After setting the stage with some sentences about the broader context, chapter subsections could be (please adapt to your purpose)
-1.1. Subject Relevance (1. to 5. from above)
-1.2. Own Interest/Motivation (not mandatory)
-1.3. Research Gap
-1.4. Objectives and Goals (7. and 8. from above)
-1.5. Research Questions
-1.6. Scope & Limitations (mandatory for IM & EP, optional for MBA theses)
-1.7. Structure/Overview (not mandatory)
-
-2. LITERATURE REVIEW & THEORETICAL FRAMEWORK
-Literature review & subject research
-Literature review & subject research is a process in which the author synthesizes and summarizes the already existing research on the topic he has chosen. A literature review can justify your own research by showing how your work builds upon the already known and demonstrates your expertise on the matter. It is not a simple exposition of excerpts of books, or articles but a cohesive text that provides with all information needed to understand your paper within the context of your topic. The quality of the sources used in the literature review is of high importance: Strive for a balance between scientific sources (such as peer reviewed articles and research reports) and other sources (grey literature…). Obviously, scientific sources should make out the majority of your literature review.
-In case you have a novel topic without much current literature, strive to find parallels to analogous findings from other industries, countries, cultures, or scientific sub-disciplines.
-Elucidate the historical development, findings and opinion camps pertaining to your research topic. Deciding as to how far back into the past and how broad your literature review should span should be a decision made primarily with your first supervisor.
-It is expected that you base your literature research not only on simple search engine queries like on Google Scholar, but that you perform systematic literature queries in libraries and scientific data bases such as
-* IEEE Digital Library (http://ieeexplore.ieee.org)
-* ACM Digital Library (http://portal.acm.org)
-* SpringerLink (http://link.springer.com)
-* IDEAS Digital Library (http://ideas.repec.org/)
-* ScienceDirect (http://www.sciencedirect.com/)
-For healthcare management topics use also consider
-* Medline/Pubmed (https://www.ncbi.nlm.nih.gov/pubmed/)
-* Cochrane Library (https://www.cochranelibrary.com)
-
-Please keep in mind that if your literature review extends into other languages, that you include a table of translations of search parameters and strings thereof.
-One of the most structured ways of conveying the results of your literature review is a year-by-year visualisation of the incidences of publications on your main search subjects (theories, empirical studies, synthesis paper…)
-When cataloguing research findings or distinguishing opinion camps, it is common to also list representative hallmark publications for each category.
-This chapter has to be the foundation of the theoretical framework (theories, concepts, assumptions and mathematical formulas) through which you will later interpret the results of your own research findings in the subsequent chapters.
-
-Research Strategies:
-* Backtracing (Using the bibliography of articles which are relevant for your topic.)
-* Systematic Literature Review
-* Consult websites like https://www.ub.tu-berlin.de/en/searching-for-resources/ to adapt your research strategy
-2. 
-
-3. METHODOLOGY
-Research design, analytic methodology employed & reason for choice
-After restating the research gap as well as the goal to connect your chapters with each other, the methodology chapter must answer the following questions:
-* What are the main methods you seek to employ? (Give information about background and application of the methods.)
-* How does each method work? (You can give examples of other studies which have used the same approach for a similar purpose and were successful with it. What common inputs are required? How do the essential mechanisms of each method work to achieve research output?)
-* What does each method commonly explore and how is this useful in filling your research gap? = Justify the choice of your method and why it is the best suitable approach to accomplishing for your research goal!
-* How will you apply the methods in detail and where are the limits of your research scope?
-o Provide details on your research design and proceedings to sufficient detail such that a third party will be capable to independently repeat your methodological application (sample, how did you select the sample, characteristics of sample...)
-o Provide precise information about the sources leading to data generation and the process of data extraction (How did you collect your data, how did you extract it, which tools did you use to analyse it...)
-* What are the inherent strengths and weaknesses of each method? (Scope, limitations, possible biases...)
-Present everything in a way which shows great care and increases credibility!
-Be transparent and detailed!
-Always keep in mind that your methodology chapter must be detailed enough to allow another researcher to exactly repeat your work and reproduce your results. This is an important attribute of scientific research!
-
-
-4. FINDINGS
-Results of your research = Application of the analytic method 
-This chapter deals with the results of your scientific research. It is a complete exposition of your results, in which you present the obtained data in the most transparent and objective way possible. Using graphic tools, data sets, tables, or other ways of displaying information can be a good way to complement the written information.  
-In the result section, you should present your results without further comments, or an interpretation from your side. 
-Usually, you start the result section with the basic descriptive variables and the outcome dataset. For example, if you did a survey start with a description of your sample, such as the sample size, the response rate, demographic variables (age, gender, socio-economic status etc.).
-The information you provide in this chapter acts as a raw set of facts, which you will then use to draw conclusions towards answering your individual research questions and proving or disproving hypotheses that you presented in the introductory chapter. 
-In case you did further, more sophisticated statistical analyses, modelling, etc., put the most exciting results at the end of your result chapter.
-
-Additional analyses which are not necessary to answer your research question should not be included in the results chapter but put into an appendix after the main text of your thesis. 
-Please discuss these decisions with your supervisor.
-
-
-5. DISCUSSION OF FINDINGS
-Summary and discussion of findings
-After having presented the findings of your research, you discuss them. 
-Start the discussion chapter with a short summary of your findings, just in maximum three sentences.
-Describe in the discussion chapter what the data and the results mean with reference to your research objectives.
-The discussion chapter includes the methodological limitations of your research, for example, if you only studied the behavior of students, the reader may not extrapolate your findings to other subject groups.
-This includes the comparison of your results with your findings from the literature review: Up to which point do your findings support the findings of other studies and/or where do they differ? What could that mean and what could the underlying reasons therefore be?
-Discuss to what extent your results are transferable to a larger population, other companies or industries, and different international or intercultural domains. 
-
-
-6. CONCLUSION
-Conclusions, impact on industry/society/(multi-)disciplinary context, lessons learned, potential for further research
-This chapter deals with the author’s own thoughts and conclusions about the presented research. Taking the introduction, the literature review, the research design and your own findings into account, the author can now integrate the information to form new ideas or conclusions. 
-The possible impact for industry, society, and the scientific community should be presented. Briefly summarize whether the inherent strengths and weaknesses of your methodological approach also manifested themselves in your findings, or whether you encountered unexpected results.
-After having done your research you will probably have new questions: This is the place to present them as potential for further research. Every research field can be expanded. Your research paper should expand on the topic and propose further possible directions to research. 
-The conclusion chapter should end with a short section of clear take-home messages, maybe with a short comment on the relevance of your findings (such as: “For the first time, it has been shown in a large student population that online lectures are more effective than self-study. This might change the strategy of universities completely.”)  
-
-
-APPENDIX I
-If you have further relevant background information regarding a specific topic addressed in your core text, place such information into an appendix 
-* Legal texts 
-* Corporate Documentation 
-* Larger spreadsheets and associated major formula
-* Sample calculations
-* Your questionnaire
-* Transcriptions of interviews
-* etc. 
-
-APPENDIX II
-Add additional appendices when necessary.
-
-
-ALPHABETICAL LIST OF REFERENCES
-
-Your reference list is important and an essential part of your research work. 
-One reference list is mandatory!
-You can choose one of the reference lists (Alphabetical, Chronological or by appearance in text or sorted by type of reference…) or you can even include all of them.
-
-Britton, J. (2007). An investigation into the feasibility of locating portable medical devices using radio frequency identification devices and technology. Journal of Medical Engineering and Technology, 31(6), 450-458.
-Knels, R. (2009). EUROCODE und RFID für die erweiterte Blutprodukte-Logistik mit Sensorik. Healthcaretag 2009 (p. Section 8). Frankfurt a.M.: EHIBCC Deutschland.
-Kolata, G. (2010, March 29). Health Law Does Little to Curb Overuse of Care. (The New York Times Company) Retrieved April 30, 2010, from NYtimes: http://www.nytimes.com/2010/03/30/health/30use.html?ref=health
-Richards, F. (2005). Vendor Selection and Contract Negotiation. In J. Walker, & e. al., Implementing an Electronic Health Record System (pp. 15-20). London, UK: Springer-Verlag London Ltd.
-Widmayer, E. (2006). Vander’s Human Physiology: The Mechanisms of Body Function (10th Edition ed.). New York, NY, USA: McGraw-Hill Companies, Inc.
-Widmayer, E. (2006). Vander’s Human Physiology: The Mechanisms of Body Function (10th Edition ed.). New York, NY, USA: McGraw-Hill Companies, Inc.
-
-Here, list your sources by author, in alphabetical order, while disregarding nobility prefixes. Therefore, Von Weizsäcker would be listed under W, De Gaulle would be near the beginning of the G section. If authors use pseudonyms, sort by the pseudonym’s first letter instead of the determined last name. Should you have articles published both under the author’s pseudonym and real name, make long references for both.
-
-CHRONOLOGICAL LIST OF REFERENCES
-
-Insert your bibliography here sorted by year, using word’s citation manager in APA Style, as shown before.
-
-REFERENCE LIST BY BIBLIOGRAPHY TYPE
-Online sources:
-…
-Scientific Articles:
-…
-Books:
-…
-Conference Proceedings:
-…
-etc.
-
-
-AFFIDAVIT
-Under the penalty of perjury, I, <First Name(s)> <Last Name>, hereby declare under oath, that this master thesis, titled
-<Primary Thesis Title>. <Secondary Title>
-has been independently authored by me, that I have used no other sources or aids other than those quoted, and that I have denoted all direct and indirect citations thereof within the text. This manuscript has never before been published or submitted to this or another academic institution for examination.
-
-
-
-
-
-Location, DateSignature of Author
-
-1. 
-FORMATTING GUIDELINES AND RECOMMENDATIONS
-This is a guideline section to help you use the formatting templates of MS Word.
-1. EXAMPLE OF A CHAPTER TITLE
-1.1. Section 1.1 Title
-Subsection 1 Text. 
-1.2. Section 1.2 Title
-Subsection 2 Text.
-
-Figure 1: SRH Master Student. Image taken during the fourth semester. 
-More Section 1.2 text…
-1.3. Quotation Guidelines
-This section describes how to directly and indirectly cite references.
-1.3.1. General Information regarding citations
-Throughout your thesis, it is outmost imperative that you cite every sentence which you didn‘t author! Equally, you have to reference where you acquired images and figures; inclusion of © and ™ notices might also be necessary, as specified by the copyright holder. 
-Throughout your thesis, every text element that did not fully originate from your mind must be verifiable for the reader through your referencing. This inherently includes:
-* Realizations and concepts which cannot be independently reached without solitary mental efforts
-* Results from field research and (laboratory) experiments; empirical findings
-* Fundamental methodical, theoretical and philosophical assumptions, definitions, and descriptions of correlations which act as elements to your train of thought
-* Legal statutes, regulations, (corporate) guidelines (excerpts are to be placed in associated appendices)
-Regardless whether used information has been published or not, whether it is primary or secondary literature, whether it was conveyed in writing or orally, you MUST adhere to your referencing responsibility!
-The only exception would be common knowledge and general definitions within the thesis’ primary subject areas (f.e. profit in business administration). Nevertheless, keep in mind that the following are not considered as reliable sources:
-* Trivial literature (tabloids, etc.)
-* Lecture materials
-* Homework assignments
-* Undergraduate theses
-For these, it is your responsibility to find out the underlying original sources upon which these texts are built upon and to cite these instead.
-1.3.2. Footnotes
-For any reference, use the Insert footnote function in MS Word, by pressing Alt + Ctrl + F or as shown in Figure 2 below:
-
-Figure 2: Footnote insertion in MS Word 2007. 
-Word will incorporate a footnote designator at the specified location. Should the preceding text be an exponential number or character, separate the footnote designator from the latter by including an additional spacing. Inside the footnote itself, incorporate a so-called short reference as shown in Figure 3, or add additional referencing information:
-
-Figure 3: Footnote for indirect quotations and note for further references. 
-Footnotes are to be formatted to Times New Roman, single-spaced, 10 pt font size.
-The short reference consists of consisting of the author’s last name, the year of publication and the page range where the reader can find the corresponding passages in the original text. Should there be more than one author, only mention the primary author’s last name and substitute any secondary authors with ‘et al.’. When quoting different sources simultaneously, list them chronologically. When quoting from multiple publications from the same author from the same year, please add lowercase letters after the year:
-Last Name (YYYYa, p. 1), Last Name (YYYYb, p. 8-20)
-Should an author not be known to you, replace the last name with N.N. Should an author use a pseudonym, use it instead of the last name. Should you have multiple sources for the same section of primary text, append short references to the same footnote, thereby avoiding multiple footnote designators in the text. If you are able to determine the author’s real name, place his or her last name in square brackets after the pseudonym. 
-Please note, that the short reference structure must also be used for online source. This means that it is never permissible to place the URL into a short reference for an online source! The complete bibliographical information of the source (edition, location of publisher, editors, etc.) –the long reference– will be placed into your list of references at the end of your master thesis. The short reference will act like a unique identifier to link quotations to the detailed bibliography for the reader.
-If you are quoting from the same source sequentially in your primary text, you may place the abbreviation ibid. (short for ibidem = in the same place) into the second footnotes, instead of repeating the same short reference again.
-1.3.3. Plagiarism Advisory
-During review of your thesis, the university uses advanced plagiarism detection software1. Failure to correctly cite external information may have severe negative impact on the grade of your thesis; acts of plagiarism in your thesis can lead to exmatriculation without attainment of the Master of Arts degree!
-1.3.4. Direct Quotations
-Separate direct quotations from the primary text by formatting them in italics, aligning them centered and -of course- be flanked with citation marks. Always include the quoted author and, if possible, his or her function, as shown below:
-
-“ad verbatim quotations have to be placed between citation marks”
--Author, or cited person2
-Function of cited person
-
-A citation template is available. 
-
-Figure 4: Selection of the citation template
-Should you change wording of the original passage, please mark such alterations between [square brackets]. In this case, state that you changed the wording in your corresponding footnote.
-Should you leave out sections of the original passage, please indicate such gaps by […]. When omitting only a single word, indicate this with the [.] designator. Only when directly quoting sentence fragments, reformatting of these sections is not necessary. For example:
-The plaza in front of Rathaus Schöneberg is a historical site in the south of Berlin as this is the location where former US president John F. Kennedy made his famous remark “[…] Ich bin ein Berliner”. 
-A subsequent footnote containing the translation of such well-known phrases is usually not necessary.
-For secondary quotations, indicate the original passage with ‘apostrophes'‘. Should the original text have spelling errors, do not correct them, instead include the [sic!] designator at the location of the mistake.
-When directly quoting texts in foreign languages, place an English translation into the primary text and place the quote in its original language into a subsequent footnote.
-“Insanity is doing the same thing over and over, while expecting different results”
--Albert Einstein3
-Physicist, Nobel Laureate
-In general, direct citations should be avoided as much as possible and should only be included to highlight the 
-1.3.5. Indirect quotations
-If passages are not directly quoted, but your text has similar reasoning, your footnote has to indicate your sources with the cf. abbreviation (rarely the word see as used instead), as Figure 5 exemplifies:
-
-Figure 5: Use of the cf. and see prefixes for indirect quotations.
-Please note that newer Word versions use a slightly different short reference than the format introduced in section 1.3.2. It is possible to modify this feature, however extensive recoding of the apa.xsl file on your computer is necessary. While a separate instruction document is available for you, identifier modification is not required for your thesis. 
-1.3.6. Sample Citations
-Using MS Word’s source manager suffices for the formatting guidelines of the thesis. In its latest versions (starting with Office 2007), it can be found in the References Tab, a screenshot of which can be seen in Figure 6:
-
-Figure 6: Insert Citation function in MS Word 2007. 
-Clicking on Add New Source opens the source manager:
-
-Figure 7: Source manager. Sample entries have been made of a journal article.
-Place the link into a footnote in the format described in section 1.3.2. A few examples are listed on the next page:
-* Book4	
-* Chapter in Book5
-* Journal Article6
-* Conference Proceedings7 
-* Online Article8
-Unfortunately, the older versions of Microsoft Office do not include a source manager, which can subsequently automatically generate your bibliography lists at the end of your thesis. If you don’t have access to Office 2007, 2008 or 2010, you should create a single-column table and manually paste and sort your sources there. In such case, it is advisable to split the view screen to minimize excessive scrolling:
-
-Figure 8: Split view screen in MS Word 2003.
-1.3.7. Captions
-To automatically number Figures, tables and should be numbered and indexed at the end of your thesis. To automate numbering and indexing, use Word’s Caption function by right clicking on the image, and clicking on <Insert caption> as shown in Figure 9 below:
-
-Figure 9: Insert Caption Function in MS Word 2007. Captions may be generated by right-clicking to the object to be captured. 
-A window will appear and prompt you to select a respective label. Initially, individual labels, such as Figure, Table, Equation, etc. needs to generated as depicted in Figure 10:
-
-Figure 10: Creating your own caption in MS Word 2007. 
-Any caption should have a short title which is to follow the label and auto-number in boldface font. A subsequent elaboration should very briefly describe the main message of the figure. Both caption and respective object are to be centered. In your own diagrams, text should be single spaced, Times New Roman and not be smaller than 7 pt font size. 
-If a figure or comparable object follows a paragraph, the latter should include working to link to the upcoming object. Avoid including figures without reference in the respective text. Likewise, it is advisable to copy the auto-number from the caption into your text to avoid manual renumbering should the sequence of figure shuffle.
-On the following page, you will find an example of a table caption:
-4th Semester of the Master Year Group of 20082010JanuaryM21 –Internship
-(Minimum Duration: 6 weeks)
-FebruaryMarchMarch 15th: Due date of Internship ReportAprilM19 –Foreign Language (2 weeks)M22 –Master Thesis
-(Duration: 16 weeks)MayJuneJulyAugustAugust 16th:
-Submission deadline for the master thesis and measurements for academic regaliaPeriod for 
-Thesis DefenseSeptemberSRH Commencement CeremonyGrand Oral @ INSEEC ParisOctoberNovemberDecember2011JanuaryFebruaryINSEEC Remise de diplômeMarchTable 1: Outline of the academic year 2010.
-
-1.3.8. Equations and Formulas (Office 2007 and later)
-Should your thesis include complex calculations, it is necessary that you include the general formula in your thesis text. In addition, you should incorporate a single sample calculation of every newly introduced formula in the text in your appendix. Similarly, you should include printouts of utilized spreadsheets in respective appendices and likewise include denote functions and sample calculations there. 
-While older versions of Microsoft Office do not include this feature, Office 2007 and newer offers an equation manager, which can be accessed through the Insert Tab, as shown on the left in Figure 11.
-
-Figure 11: Equation manager in Word 2007. The icon may be found on the far-right side of the Insert Tab (left). Structures and Symbols icons from the Design Tab of the equation manager (right)
-
-Once you have completed input of your equation, a field such as in Equation 1 will be inserted.
-f(x)=a_0+?_(n=1)^??(a_n cos n?x/L+b_n sin n?x/L) 
-Equation 1: Fourier Series.
-Note that when saving in older versions of Word (.doc format), the equation will be converted into an image which won’t be able to be modified subsequently.
-Lastly, when using long names instead of single letter variables, remember to switch of Normal Text formatting, as seen in Figure 12:
-
-Figure 12: Tools icons of the equation manager design tab. 
-
-1.3.9. Listing Levels
-1.3.9.1. Subsection 1.3.9.1. Title (Fourth listing level)
-Subsection 1.3.9.1. Text
-1.3.9.1.1. Title Subsection 1.3.9.1.1. Title (Fifth listing level) 
-Organize your thesis to not expand beyond more than five subordinate section listing levels!
-Insert a page break between chapters. (There shouldn’t be an empty page between chapters though.)
-1.3.10. Cross-Referencing within your document 
-When referring to different sections within your manuscript, it is possible to automatically reference to a specific heading using the cross-referencing function. Icons for the cross-referencing functions can be found both in the Insert and References tabs:
-
-
-Figure 13: Cross-Referencing Button Locations
-A window will pop up giving you a listing of various element types of your document, such as section headings, figures, tables, etc.
-  
-Figure 14: Document Element Selection Windows
-When insert in a cross reference to a section heading number as shown in Figure 14, word will automatically insert the correct number. Even if your section headings change (for example after adding a new section or switching the sequence of elements in your document), you can have Word automatically update all cross-references by pressing CTRL + A and then F9.
-
-
-1 To view a sample analysis, or trial screen your manuscript, please consult http://www.turnitin.com   
-2 Cited from …
-3 translated by author; original quote: „Wahnsinn ist, wenn man immer wieder das Gleiche tut, aber andere Resultate erwartet.“
-4 cf.  (Widmayer, 2006)
-5 cf. (Richards, 2005)
-6 cf. (Britton, 2007)
-7 cf. (Knels, 2009)
-8 cf. (Kolata, 2010)
----------------
-
-------------------------------------------------------------
-
----------------
-
-------------------------------------------------------------
-
-		<Lazar>, <Primary Thesis Title>,  vi
-
