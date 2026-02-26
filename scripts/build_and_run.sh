@@ -44,7 +44,7 @@ cd "${REPO_ROOT}"
 GCS_BUCKET="mbadas-sandbox-research-9bb9c7f"
 
 RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-RUN_ID="${RUN_ID:-fun_flower}"
+RUN_ID="${RUN_ID:-}"
 MASTER_RUN_ID="${RUN_ID}_${RUN_TIMESTAMP}"
 
 
@@ -306,7 +306,7 @@ VP_LLM_MODEL="${VP_LLM_MODEL:-/workspace/VideoPainter/ckpt/vlm/Qwen2.5-VL-7B-Ins
 # OR pass a custom prompt directly (when PROMPT_IDS is not set):
 #   CUSTOM_PROMPT='Your custom editing instruction here' bash scripts/build_and_run.sh
 PROMPT_IDS="${PROMPT_IDS:-}"
-CUSTOM_PROMPT="${CUSTOM_PROMPT:-flowers on the road}"
+CUSTOM_PROMPT="${CUSTOM_PROMPT:-}"
 
 
 
