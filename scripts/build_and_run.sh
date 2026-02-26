@@ -44,8 +44,46 @@ cd "${REPO_ROOT}"
 GCS_BUCKET="mbadas-sandbox-research-9bb9c7f"
 
 RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-RUN_ID="${RUN_ID:-06_p5_lora_gen_video}"
+RUN_ID="${RUN_ID:-fun_flower}"
 MASTER_RUN_ID="${RUN_ID}_${RUN_TIMESTAMP}"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ===============================================================================
+# MODEL CHECKPOINT GCS FOLDER PATHS (Mounted folders in containers)
+# ===============================================================================
+
+# GCS folder for SAM2 model checkpoints
+SAM2_MODEL_GCS_CKPT_FOLDER="gs://${GCS_BUCKET}/workspace/user/hbaskar/Checkpoints/sam2"
+
+# GCS folder for VideoPainter model checkpoints (main model)
+VIDEOPAINTER_MODEL_GCS_CKPT_FOLDER="gs://${GCS_BUCKET}/workspace/user/hbaskar/Checkpoints/videopainter"
+
+# GCS folder for VideoPainter LoRA checkpoints (per-prompt)
+VIDEOPAINTER_LORA_GCS_CKPT_FOLDER="gs://${GCS_BUCKET}/workspace/user/hbaskar/Video_inpainting/videopainter/training/trained_checkpoint"
+
+# GCS folder for Alpamayo model checkpoints
+ALPAMAYO_MODEL_GCS_CKPT_FOLDER="gs://${GCS_BUCKET}/workspace/user/hbaskar/Checkpoints/alpamayo"
+
+
+
+
+
+
+
+
+
 
 
 
@@ -76,9 +114,9 @@ MASTER_RUN_ID="${RUN_ID}_${RUN_TIMESTAMP}"
 STAGES="${STAGES:-123}"
 
 # ── Stage 1 (SAM2) inputs ────────────────────────────────────────────────────
-SAM2_CHUNK_START="${SAM2_CHUNK_START:-100}"
-SAM2_CHUNK_END="${SAM2_CHUNK_END:-100}"
-SAM2_FILES_PER_CHUNK="${SAM2_FILES_PER_CHUNK:-20}"
+SAM2_CHUNK_START="${SAM2_CHUNK_START:-1}"
+SAM2_CHUNK_END="${SAM2_CHUNK_END:-1}"
+SAM2_FILES_PER_CHUNK="${SAM2_FILES_PER_CHUNK:-1}"
 
 # ── Stage 2 (VP) input — required when running VP without SAM2 (STAGES=2,23) ─
 SAM2_DATA_RUN_ID="${SAM2_DATA_RUN_ID:-}"
@@ -326,7 +364,7 @@ elif [[ -n "${CUSTOM_PROMPT}" ]]; then
   # Use custom prompt directly
   echo "Using CUSTOM_PROMPT: ${CUSTOM_PROMPT:0:80}…"
   VIDEO_EDITING_INSTRUCTIONS="${CUSTOM_PROMPT}"
-  PROMPT_IDS="C"    # tag for run naming
+  PROMPT_IDS="c"    # tag for run naming (lowercase for RFC 1123 compliance)
   NUM_PROMPTS=1
 else
   if [[ ${RUN_VP} -eq 1 ]]; then
@@ -373,7 +411,7 @@ VP_BORDER_AWARE_MASKING="${VP_BORDER_AWARE_MASKING:-true}"
 # Method for border handling: inpaint (best), blur (fast), interpolate (experimental)
 VP_BORDER_METHOD="${VP_BORDER_METHOD:-inpaint}"
 VP_KEEP_MASKED_PIXELS="${VP_KEEP_MASKED_PIXELS:-False}"
-VP_IMG_INPAINTING_LORA_SCALE="${VP_IMG_INPAINTING_LORA_SCALE:-1.0}"
+VP_IMG_INPAINTING_LORA_SCALE="${VP_IMG_INPAINTING_LORA_SCALE:-0.0}"
 
 
 
