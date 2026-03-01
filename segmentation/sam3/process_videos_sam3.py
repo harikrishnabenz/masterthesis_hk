@@ -498,16 +498,19 @@ def segment_road_in_video_sam3(
         )
     ):
         frame_idx = frame_output.get("frame_index", produced)
-        masks = frame_output.get("masks", None)
-        if masks is not None:
-            # SAM3 returns masks per object; combine all detected road masks
-            if isinstance(masks, torch.Tensor):
-                combined_mask = (masks.sum(dim=0) > 0).cpu().numpy()
-            elif isinstance(masks, np.ndarray):
-                combined_mask = (masks.sum(axis=0) > 0)
-            else:
-                combined_mask = masks
-            video_segments[frame_idx] = combined_mask
+        outputs = frame_output.get("outputs", None)
+        if outputs is not None:
+            # SAM3 returns {"out_binary_masks": (N_objs, H, W) bool array, ...}
+            binary_masks = outputs.get("out_binary_masks", None)
+            if binary_masks is not None and len(binary_masks) > 0:
+                # Combine all detected object masks into a single road mask
+                if isinstance(binary_masks, torch.Tensor):
+                    combined_mask = (binary_masks.sum(dim=0) > 0).cpu().numpy()
+                elif isinstance(binary_masks, np.ndarray):
+                    combined_mask = (binary_masks.sum(axis=0) > 0)
+                else:
+                    combined_mask = binary_masks
+                video_segments[frame_idx] = combined_mask
         produced += 1
         if not first_n_recorded and produced >= timed_frames:
             first_n_recorded = True
@@ -547,21 +550,24 @@ def segment_road_in_video_sam3(
             work_items.append((frame_idx, frame_path, raw_mask))
 
     # Process frames in parallel
-    num_workers = min(os.cpu_count() or 4, len(work_items), 8)
+    num_workers = max(1, min(os.cpu_count() or 4, len(work_items), 8))
     processed_masks: dict[int, np.ndarray] = {}
 
-    def _process_frame(item):
-        fidx, fpath, raw = item
-        mask = _postprocess_single_frame(
-            fidx, fpath, raw, ref_point, output_masks_dir, output_vis_dir,
-        )
-        return fidx, mask
+    if not work_items:
+        print("⚠ No segmented frames to post-process")
+    else:
+        def _process_frame(item):
+            fidx, fpath, raw = item
+            mask = _postprocess_single_frame(
+                fidx, fpath, raw, ref_point, output_masks_dir, output_vis_dir,
+            )
+            return fidx, mask
 
-    with ThreadPoolExecutor(max_workers=num_workers) as pool:
-        futures = [pool.submit(_process_frame, w) for w in work_items]
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Saving masks"):
-            fidx, mask = future.result()
-            processed_masks[fidx] = mask
+        with ThreadPoolExecutor(max_workers=num_workers) as pool:
+            futures = [pool.submit(_process_frame, w) for w in work_items]
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Saving masks"):
+                fidx, mask = future.result()
+                processed_masks[fidx] = mask
 
     if timings is not None:
         timings.postprocess_write_s = _elapsed_s(post_start)
