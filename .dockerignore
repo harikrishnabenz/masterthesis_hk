@@ -13,8 +13,8 @@ build/
 venv/
 env/
 ENV/
-
-
+result_folders.tar
+result_folders/
 original/
 results/
 thesis_writing/
